@@ -1,0 +1,10 @@
+# Phase 3 (in addition to requirements-bench.txt)
+-r requirements-bench.txt
+scikit-image>=0.21     # skeletonize / remove_small_objects (lineaments)
+geopandas>=0.14        # candidate_lineaments.gpkg (falls back to Parquet + WKT)
+shapely>=2.0
+pyarrow>=14            # Parquet
+# CNN (3E): install the CUDA build matching your driver, e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+# torch>=2.1 is already listed in requirements-bench.txt; the 3E default encoder is the
+# built-in U-Net, so segmentation-models-pytorch is optional.

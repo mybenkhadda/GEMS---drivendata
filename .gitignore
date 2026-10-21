@@ -1,0 +1,74 @@
+# ---------------------------------------------------------------- data (lives on Google Drive, see data/README.md)
+*.tif
+*.tiff
+*.vrt
+*.npy
+*.npz
+*.zarr/
+*.parquet
+*.gpkg
+*.h5
+*.nc
+data/**
+!data/README.md
+!tests/fixtures/**
+
+# legacy Phase 1-4 artifacts (~9 GB): keep only the written findings
+outputs/**
+!outputs/**/
+!outputs/**/*.md
+
+# Phase 5+ workspace folders (mirrored to Drive by gems_bench.artifacts.sync)
+/experiments/
+/submissions/
+/model_registry/
+/cached_artifacts/
+/environment/
+reports/**
+!reports/README.md
+!reports/presentation/
+!reports/presentation/**
+
+# ---------------------------------------------------------------- models / checkpoints
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.joblib
+*.pkl
+*.partial
+
+# ---------------------------------------------------------------- secrets
+.env
+.env.*
+*.pem
+*.key
+*credentials*.json
+*service-account*.json
+*client_secret*.json
+token.json
+.netrc
+
+# ---------------------------------------------------------------- environments / tooling
+.venv/
+venv/
+env/
+.conda/
+conda-env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---------------------------------------------------------------- large executed notebooks (> 10 MB of outputs)
+# Strip outputs (e.g. `nbstripout`) before adding; see docs/PROJECT_STATE.md.
+notebooks/01_geological_eda.ipynb

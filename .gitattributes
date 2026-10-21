@@ -1,0 +1,12 @@
+* text=auto eol=lf
+*.py text diff=python
+*.ipynb text eol=lf
+*.yaml text
+*.yml text
+*.md text
+*.csv text
+*.json text
+*.png binary
+*.svg text
+*.tif binary
+*.pt binary

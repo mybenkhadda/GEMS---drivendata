@@ -1,0 +1,14 @@
+# Workspace data layout (identical locally, on Colab /content/gems_work and on Drive MyDrive/GEMS_2).
+# Raw files are accepted flat at the workspace root (original layout) or under data/raw/<source>/.
+raw:
+  features: data/raw/geodawn/gems-geodawn-numerical-features.tif   # 19 bands, 100 m, EPSG:32611
+  faults: data/raw/faults/existing_faults.tif                      # value >= 1 = mapped fault
+  submission_template: data/raw/geodawn/example_submission.tif
+  dem_urls: data/raw/dem_1m/tnm_urls.json                          # USGS TNM 1 m DEM download list
+legacy_outputs:                                                    # Phase 1-4 artifacts, read-only
+  eda: outputs/eda
+  benchmark: outputs/benchmark         # Phase-2 feature cache, folds, discovery splits, G1-G4 runs
+  phase3: outputs/phase3
+  phase4: outputs/phase4               # RS feature cache, P4 encoders, DL00-DL02, RS LightGBM
+folds: outputs/benchmark/folds/geo_k3_b20km_buf13km_s2026
+discovery: outputs/benchmark/folds/discovery_d3_link1km_s2026

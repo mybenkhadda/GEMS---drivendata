@@ -1,0 +1,10 @@
+# E3: cross-scale gated fusion (coarse potential-field levels inform fine terrain levels).
+# Width reduced to keep parameters ~ P4_B_gated; check architecture.csv and adjust before training.
+extends: [e1_gsn_parity.yaml]
+name: e3_gsn_crossscale
+model_name: P5_E3_gsn_crossscale
+model:
+  fusion: crossscale
+  overrides: {enc_width: 22}
+evaluation:
+  control: P5_E1_gsn_gated

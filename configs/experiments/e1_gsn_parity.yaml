@@ -1,0 +1,4 @@
+# E1: GeoStructureNet in its parity configuration (gated fusion, no long-range, no context) - should match B0.
+extends: [_base_cnn5.yaml, ../models/geostructurenet.yaml]
+name: e1_gsn_parity
+model_name: P5_E1_gsn_gated

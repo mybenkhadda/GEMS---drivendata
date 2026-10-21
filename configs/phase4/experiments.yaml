@@ -1,0 +1,135 @@
+# Phase-4 experiment definitions (read by notebooks/04_remote_sensing_and_geological_encoders.ipynb).
+# Every run uses the Phase-2 geographic folds (geo_k3_b20km_buf13km_s2026), the Phase-2 discovery splits
+# (discovery_d3_link1km_s2026), seed 2026 and the Phase-3 scoring (cross-fitted binary-area DTI).
+# Exp-id conventions: LightGBM p4_<key>_s<seed>; CNN p4_<key>_p<patch>_s<seed>; discovery disc<d>_<key>;
+# SSL pretraining ssl_<key>_<protocol>[_fold<k>]. All land in outputs/phase4/experiments/.
+version: 1
+seed: 2026
+match_frac: 0.05               # matched area budget for recall / complementarity tables (Phase-3 MATCH_FRAC)
+
+# ---------------------------------------------------------------- reused Phase-3 artifacts (never retrained)
+reuse:
+  oof:                          # short name -> outputs/phase3/experiments/<exp_id>/oof.tif
+    G3_D2: p3_lgbm_D2_conservative_G3_s2026
+    CNN_A_bcedice: p3_CNN_A_bcedice_p256_s2026
+    CNN_A_dti: p3_CNN_A_dti_p256_s2026
+    CNN_B_bcedice: p3_CNN_B_bcedice_p256_s2026
+  discovery:                    # short name -> disc<d>_<key> folder (phase4 first, then phase3)
+    G3_D2: D2_conservative
+    CNN_A_bcedice: CNN_A_bcedice
+
+# ---------------------------------------------------------------- LightGBM RS ablations (P0)
+lgbm:
+  variant: D2_conservative      # Phase-3 3C winner with early stopping (lr .05, C2, S1, ES on AUC)
+  reference: G3_D2              # G3 under the same variant = Phase-3 run, reused
+  experiments:
+    RS01_G1:            {base: G1, add_groups: []}
+    RS02_G1_terrain:    {base: G1, add_groups: [RS_T]}
+    RS03_G3_potential:  {base: G3, add_groups: [RS_P]}
+    RS04_G3_crossmodal: {base: G3, add_groups: [RS_X]}
+    RS05c_G3_noSS:      {base: G3, drop_modalities: [seismicity, strain], add_groups: []}
+    RS05_G3_noSS_RS:    {base: G3, drop_modalities: [seismicity, strain], add_groups: [RS_T, RS_P, RS_X]}
+  comparisons:                  # (candidate, control) pairs reported in rs_feature_ablation.csv
+    - [RS02_G1_terrain, RS01_G1]
+    - [RS03_G3_potential, G3_D2]
+    - [RS04_G3_crossmodal, G3_D2]
+    - [RS05c_G3_noSS, G3_D2]
+    - [RS05_G3_noSS_RS, RS05c_G3_noSS]
+  discovery: [RS01_G1, RS02_G1_terrain, RS03_G3_potential, RS04_G3_crossmodal, RS05c_G3_noSS, RS05_G3_noSS_RS]
+  drop_group_base: auto         # best RS experiment by cross-fitted area DTI (or an explicit key)
+
+# ---------------------------------------------------------------- missing Phase-3 CNN comparisons (P0)
+cnn_controls:
+  gpu: {data_on_gpu: true, amp_dtype: auto, channels_last: true, cudnn_benchmark: true, eval_every: 1, infer_batch: 16}
+  DL00_CNN_B_dti:      {from_phase3: CNN_B_bcedice, override: {loss: dti}, note: "CNN-B inputs, distance-aware loss only change"}
+  DL01:                {models: [CNN_A_dti, CNN_A_bcedice], note: "same splits, policies, budgets; CNN_A_dti discovery epochs = median best epoch"}
+  DL02_CNN_TMGB_dti:   {from_phase3: CNN_A_dti, keep_modalities: [terrain, magnetic, gravity, basement],
+                        note: "raw bands only; compare with CNN_A_dti (all 19 raw bands, same loss)"}
+  DL02b_CNN_noSS_dti:  {from_phase3: CNN_A_dti, drop_modalities: [seismicity, strain], enabled: false,
+                        note: "isolates seismicity/strain (keeps conductivity); enable if DL02 differs from CNN_A_dti"}
+  discovery: [DL00_CNN_B_dti, DL02_CNN_TMGB_dti]
+
+# ---------------------------------------------------------------- geology-aware encoders (P1)
+channel_groups:
+  terrain:
+    - raw:det_elev
+    - raw:det_elev_slope
+    - terrain:curvature@1km
+    - terrain:tilt_edge@5km
+    - terrain:ridge@1km
+    - terrain:relief@2km
+    - rs:terrain:curv_profile@0.5km
+    - rs:terrain:curv_plan@0.5km
+    - rs:terrain:tpi@0.3km
+    - rs:terrain:laplacian@0.5km
+    - rs:terrain:slope_break@0.5km
+  subsurface:
+    - raw:mag_anom
+    - raw:rtp
+    - raw:tmi
+    - raw:tmi_hg
+    - raw:tmi_vg
+    - raw:tc
+    - raw:iso_grav_anom
+    - raw:iso_grav_anom_hg
+    - raw:iso_grav_anom_vg
+    - raw:iso_grav_anom_slope
+    - raw:depth_to_base_surf
+    - magnetic:thdr@2km
+    - magnetic:log_gabor@5km
+    - magnetic:coherence@2km
+    - gravity:thdr@2km
+    - gravity:log_gabor@2km
+    - basement:thdr@5km
+    - basement:tilt_edge@10km
+
+architectures:
+  common: {loss: dti, patch_px: 256, epochs: 40, steps_per_epoch: 150, batch_size: 16, lr: 0.001,
+           pos_patch_frac: 0.5, ignore_px: 2, patience: 6, min_epochs: 5, rot180: true}
+  P4_A_repro:   {arch: single, enc_width: 32, channels_from: CNN_A_dti, enabled: false,
+                 note: "Phase-4 trainer on CNN_A_dti inputs: must reproduce ~0.130 before trusting P4_* numbers"}
+  P4_B_concat:  {arch: dual, enc_width: 24, dec_width: 32, fusion: concat}
+  P4_B_gated:   {arch: dual, enc_width: 24, dec_width: 32, fusion: gated}
+  P4_B_ctrl:    {arch: single, enc_width: matched:P4_B_concat, note: "single encoder, same channels, parameter count matched to P4_B_concat"}
+  P4_C_context: {arch: single, enc_width: same:P4_B_ctrl, context: true, context_factor: 4, context_strict: true,
+                 note: "P4_B_ctrl + low-resolution (1/4) context branch seeing 4x the patch extent"}
+  P4_D_aux:     {arch: single, enc_width: same:P4_B_ctrl, aux_dist: 0.2, aux_orient: 0.1,
+                 note: "P4_B_ctrl + training-only proximity and cos/sin(2 theta) heads"}
+  discovery: [P4_B_ctrl, P4_B_gated]   # extend after reading the geographic results
+
+# ---------------------------------------------------------------- self-supervised pretraining (P2)
+ssl:
+  arch: P4_B_ctrl               # fine-tuned architecture (random-init control = the P4_B_ctrl run itself)
+  SSL01:
+    mask_mode: spatial          # random 16 px blocks (ratio 0.5) + modality dropout (p 0.15)
+    mask_ratio: 0.5
+    block_px: 16
+    channel_drop_p: 0.15
+    grad_weight: 0.5            # L1 on finite-difference gradients inside the masked region
+    robust: false
+    epochs: 30
+    steps_per_epoch: 150
+    lr: 0.001
+    protocols: [strict, transductive]
+  SSL02:
+    mask_mode: modality         # one of terrain / magnetic / gravity withheld, reconstructed from the others
+    grad_weight: 0.5
+    robust: true                # smooth-L1: tolerant to genuinely unpredictable cross-modal variation
+    epochs: 30
+    steps_per_epoch: 150
+    lr: 0.001
+    protocols: [strict]
+    enabled: false              # run only if SSL01 shows a gain
+  finetune: {encoder_lr_mult: 1.0, freeze_encoder_epochs: 0}
+
+# ---------------------------------------------------------------- promotion (section 12 of the Phase-4 brief)
+promotion:
+  min_geo_gain: 0.005           # cross-fitted area DTI vs control, and >= 2 of 3 folds
+  min_folds: 2
+  max_fold_min_drop: 0.005
+  min_disc_gain: 0.005          # pseudo-discovery (both excl and retained_fp must not drop)
+  max_area_ratio: 1.5           # chosen discovery area fraction vs control
+  min_short_recall_gain: 0.02   # weighted recall on <2 km faults at the matched budget
+  min_unique_systems: 2         # withheld systems recovered (>= 0.5) and missed by the control by >= 0.3
+  expensive: [P4_B_concat, P4_B_gated, P4_C_context, P4_D_aux, SSL01_strict, SSL01_transductive, SSL02_strict]
+  expensive_min_criteria: 2

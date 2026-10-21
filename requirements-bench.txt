@@ -1,0 +1,10 @@
+# Phase 2 benchmark (in addition to requirements-eda.txt)
+-r requirements-eda.txt
+scikit-learn>=1.3
+lightgbm>=4.0
+psutil>=5.9          # optional: RSS in run.json
+tabulate>=0.9        # DataFrame.to_markdown in BENCHMARK_FINDINGS.md
+pytest>=7            # tests/test_metric.py
+# CNN section (GPU recommended; install the CUDA build of torch matching your driver)
+torch>=2.1
+segmentation-models-pytorch>=0.3   # optional: falls back to a built-in U-Net

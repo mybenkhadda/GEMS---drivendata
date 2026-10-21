@@ -1,0 +1,6 @@
+# Phase 4 (in addition to requirements-phase3.txt)
+-r requirements-phase3.txt
+pyyaml>=6.0            # configs/phase4/*.yaml
+tabulate>=0.9          # DataFrame.to_markdown in PHASE4_FINDINGS.md
+# torch: CUDA build already required by Phase 3 (pip install --force-reinstall torch --index-url https://download.pytorch.org/whl/cu128)
+# EO02 / EO03 (optional, not installed by default): rasterio already present; terratorch only if EO03 is ever un-deferred

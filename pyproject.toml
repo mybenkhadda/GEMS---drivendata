@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gems-fault-discovery"
+dynamic = ["version"]
+description = "Geology-aware fault-discovery research platform for the DrivenData GEMS challenge (Western Nevada)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "BENKHADDA Mohamed Yassine"}]
+keywords = ["geology", "faults", "remote sensing", "geophysics", "segmentation", "positive-unlabeled"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "pyarrow>=12",
+    "matplotlib>=3.7",
+    "scikit-image>=0.21",
+    "scikit-learn>=1.3",
+    "rasterio>=1.3",
+    "shapely>=2.0",
+    "pyyaml>=6.0",
+    "lightgbm>=4.0",
+    "tabulate>=0.9",
+    "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+# torch is NOT pinned in [colab]: Colab ships a CUDA build; reinstalling it would waste minutes and may break CUDA.
+torch = ["torch>=2.1"]
+geo = ["geopandas>=0.14", "pyogrio>=0.7"]
+colab = ["geopandas>=0.14", "pyogrio>=0.7"]
+smp = ["segmentation-models-pytorch>=0.3"]
+dev = ["pytest>=7", "ruff>=0.4"]
+all = ["torch>=2.1", "geopandas>=0.14", "pyogrio>=0.7", "pytest>=7", "ruff>=0.4"]
+
+[project.scripts]
+gems = "gems_bench.cli:main"
+
+[project.urls]
+Documentation = "https://github.com/OWNER/REPOSITORY/tree/main/docs"
+
+[tool.setuptools.dynamic]
+version = {attr = "gems_bench._version.__version__"}
+
+[tool.setuptools.packages.find]
+# Flat layout on purpose: the executed Phase 1-4 notebooks import gems_bench / gems_eda from the project root
+# (sys.path.insert(ROOT)). See docs/ARCHITECTURE.md for the deferred move to src/.
+where = ["."]
+include = ["gems_bench*", "gems_eda*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 125
+target-version = "py310"
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E731", "E741"]

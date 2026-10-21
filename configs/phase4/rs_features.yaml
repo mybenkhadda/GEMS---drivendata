@@ -1,0 +1,111 @@
+# Phase-4 remote-sensing / geomorphometric / structural feature bank  (gems_bench/rs_features.py)
+#
+# * Every feature is label-free and computed on the native 100 m grid from the GeoDAWN bands.
+# * Terrain = DETRENDED elevation (det_elev): slope, curvature, TPI, hillshade etc. describe the detrended
+#   surface, not true topography. Each terrain spec carries basis=detrended_elevation; do not read them as
+#   physical landform indices (no absolute relief, no true hillslope gradients).
+# * Names: rs:<modality>:<transform>[_<output>][_<tag>]@<scale>km.  Groups: RS_T terrain, RS_P potential
+#   field, RS_X cross-modal. `family` drives drop-group ablations.
+# * Strike families come from the Phase-1 mapped-fault morphology (all labels): a documented
+#   hyper-parameter choice, identical to the Phase-2 directional derivatives (not pixel leakage).
+version: 1
+strike_families_deg: [17.5, 152.5]
+
+redundancy:
+  max_abs_spearman: 0.95      # RS feature this correlated with any existing feature -> flagged redundant
+  sample_px: 150000           # label-free random sample of valid pixels (seed 2026)
+  drop_redundant: true        # RS groups used by experiments exclude flagged features
+
+blocks:
+  terrain:
+    modality: terrain
+    source: det_elev
+    basis: detrended_elevation
+    group: RS_T
+    features:
+      - {transform: tpi, scales_km: [0.3, 1.0], family: tpi, note: "z minus disk mean, radius = scale"}
+      - {transform: tri, scales_km: [0.1, 0.3], family: tri, note: "mean |dz| to the 8 neighbours at lag = scale"}
+      - {transform: range, scales_km: [1.0, 2.0], family: local_relief, note: "max - min in a square window of width = scale"}
+      - {transform: curv_profile, scales_km: [0.5, 1.0], family: curvature_pp, note: "profile curvature of the Gaussian-smoothed surface (1/m)"}
+      - {transform: curv_plan, scales_km: [0.5, 1.0], family: curvature_pp, note: "tangential curvature = plan x sin(slope): bounded on flats"}
+      - {transform: laplacian, scales_km: [0.5], family: laplacian, note: "scale-normalised -LoG; terrain:mexhat already covers 1-2 km"}
+      - {transform: hillshade, scales_km: [0.3], outputs: [perp_s17.5, perp_s152.5, mdow], family: hillshade,
+         params: {altitude_deg: 30.0, z_factor: 1.0},
+         note: "sun perpendicular to each strike family; mdow = mean of azimuths 225/270/315/360"}
+      - {transform: slope_break, scales_km: [0.5, 1.0], family: slope_break, note: "|grad| of the smoothed slope magnitude"}
+      - {transform: geomorphon, scales_km: [0.5, 1.5], outputs: [convexity, linear], family: geomorphon, standardize: false,
+         params: {flat_deg: 1.0},
+         note: "simplified geomorphon (8 endpoint look-ups at lag = scale); linear = +1 ridge, -1 valley, 0 other"}
+      - {transform: coherence, scales_km: [0.5], family: terrain_coherence, note: "structure-tensor coherence; terrain:coherence@1km exists"}
+      - {transform: persistence, scales_km: [0.5], outputs: [frac, min], family: persistence,
+         params: {scales_km: [0.5, 1.0, 2.0, 4.0], q: 0.9, mode: ridge},
+         note: "share of scales (min rank) at which the Hessian line response is in the top 10 %"}
+
+  magnetic:
+    modality: magnetic
+    source: rtp
+    basis: rtp_field
+    group: RS_P
+    features:
+      - {transform: analytic_signal, scales_km: [1.0, 2.0], family: analytic_signal, note: "sqrt(THDR^2 + VDR^2) of the smoothed RTP"}
+      - {transform: tdx, scales_km: [1.0], family: tilt_derivs, note: "atan(THDR / |VDR|) in degrees; maxima on contacts"}
+      - {transform: thdr_ridge, scales_km: [1.0, 2.0], family: thdr_ridge, note: "Hessian ridges of THDR = contact traces"}
+      - {transform: hessian_ridge, scales_km: [1.0], family: hessian_ridge, note: "both-polarity line response of the field (dykes)"}
+      - {transform: dog, scales_km: [1.0], family: pyramid, params: {ratio: 3.0}, note: "difference of Gaussians (Laplacian-pyramid band)"}
+      - {transform: gabor_bank, scales_km: [1.0], outputs: [max, entropy, fam_s17.5, fam_s152.5], family: gabor_bank,
+         params: {n_orient: 8}, note: "log-Gabor wavelength 2 x scale; entropy = local orientation entropy"}
+      - {transform: gabor_bank, scales_km: [2.0], outputs: [entropy, fam_s17.5, fam_s152.5], family: gabor_bank,
+         params: {n_orient: 8}, note: "max@2km duplicates magnetic:log_gabor@2km, not recomputed"}
+      - {transform: coherence, scales_km: [1.0], family: pf_coherence}
+      - {transform: persistence, scales_km: [0.5], outputs: [frac, min], family: persistence,
+         params: {scales_km: [0.5, 1.0, 2.0, 4.0], q: 0.9, mode: thdr}}
+
+  gravity:
+    modality: gravity
+    source: iso_grav_anom
+    basis: isostatic_residual_gravity
+    group: RS_P
+    features:
+      - {transform: analytic_signal, scales_km: [2.0], family: analytic_signal}
+      - {transform: tdx, scales_km: [2.0], family: tilt_derivs}
+      - {transform: thdr_ridge, scales_km: [2.0], family: thdr_ridge}
+      - {transform: dog, scales_km: [2.0], family: pyramid, params: {ratio: 3.0}}
+      - {transform: gabor_bank, scales_km: [2.0], outputs: [entropy, fam_s17.5, fam_s152.5], family: gabor_bank, params: {n_orient: 8}}
+      - {transform: coherence, scales_km: [2.0], family: pf_coherence}
+      - {transform: persistence, scales_km: [1.0], outputs: [frac, min], family: persistence,
+         params: {scales_km: [1.0, 2.0, 4.0, 8.0], q: 0.9, mode: thdr}}
+
+  basement:
+    modality: basement
+    source: depth_to_base_surf
+    basis: depth_to_basement
+    group: RS_P
+    features:
+      - {transform: thdr_ridge, scales_km: [5.0], family: thdr_ridge, note: "basement-step traces"}
+
+  xmod:
+    modality: xmod
+    group: RS_X
+    basis: cross_modal
+    features:
+      - {transform: orient_agree, scales_km: [1.0, 2.0], tag: terrain-magnetic, family: orient_agree,
+         params: {a: terrain, b: magnetic}, note: "c_a c_b cos(2 dtheta): axial, 180 deg periodic"}
+      - {transform: orient_agree, scales_km: [2.0], tag: gravity-magnetic, family: orient_agree, params: {a: gravity, b: magnetic}}
+      - {transform: edge_agree, scales_km: [2.0], outputs: [min, max], tag: gravity-magnetic, family: edge_agree,
+         params: {a: gravity, b: magnetic}, note: "min = both modalities edgy (rank), max = either (no forced agreement)"}
+      - {transform: edge_agree, scales_km: [1.0], outputs: [min, max], tag: terrain-magnetic, family: edge_agree,
+         params: {a: terrain, b: magnetic}}
+      - {transform: orient_conf, scales_km: [1.0, 2.0], family: orient_conf, params: {sources: [terrain, magnetic, gravity]},
+         note: "axial resultant length |sum c_m exp(2i theta_m)| / M"}
+      - {transform: edge_contrast, scales_km: [1.0], tag: terrain, family: edge_contrast, params: {src: terrain, regional_km: 10.0},
+         note: "log(local THDR / regional mean THDR)"}
+      - {transform: edge_contrast, scales_km: [1.0], tag: magnetic, family: edge_contrast, params: {src: magnetic, regional_km: 10.0}}
+      - {transform: normal_contrast, scales_km: [0.5], outputs: [contrast, step], tag: terrain, family: normal_contrast,
+         params: {src: terrain, orient_src: terrain, orient_scale_km: 2.0, offset_km: 0.3},
+         note: "step across vs along the local fabric strike (strike from the 2 km structure tensor, label-free)"}
+      - {transform: normal_contrast, scales_km: [0.5], outputs: [contrast, step], tag: terrain-by-magnetic, family: normal_contrast,
+         params: {src: terrain, orient_src: magnetic, orient_scale_km: 2.0, offset_km: 0.3},
+         note: "terrain step across the MAGNETIC fabric: orientation independent of the terrain input"}
+      - {transform: xmod_persistence, scales_km: [0.5], family: xmod_persistence, standardize: false,
+         params: {sources: [terrain, magnetic, gravity], scales_km: [0.5, 1.0, 2.0, 4.0], q: 0.9, min_frac: 0.5},
+         note: "number of modalities whose lineament persists over >= half the scales (0-3)"}

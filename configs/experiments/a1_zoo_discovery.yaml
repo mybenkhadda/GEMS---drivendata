@@ -1,0 +1,11 @@
+# A1 + A4: complete the gated dual encoder's pseudo-discovery (Phase-4 code and protocol), then score every
+# established model under ONE protocol and write the competition-alignment scoreboard. GPU: ~3 x 10 min.
+extends: [../validation/phase5_protocol.yaml, ../colab/runtime.yaml]
+name: a1_zoo_discovery
+kind: zoo
+seed: 2026
+complete_discovery: [P4_B_gated]
+models: [G1, RS05_G3_noSS_RS, CNN_A_dti, DL00_CNN_B_dti, DL02_CNN_TMGB_dti, P4_B_gated]
+evaluation:
+  control: DL00_CNN_B_dti           # best completed CNN on pseudo-discovery so far
+  candidates: [P4_B_gated]

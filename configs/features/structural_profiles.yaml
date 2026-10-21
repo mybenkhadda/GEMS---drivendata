@@ -1,0 +1,40 @@
+# Fault-normal structural profiles (Experiment D; gems_bench/features/profiles.py).
+# Orientation is ALWAYS estimated from measured fields (orient_src), never from labels.
+# Names: p5:<modality>:profile_<output>[_<tag>]@<scale>km
+version: 1
+defaults: {K: 3, unit_km: 0.2, shifts: [1, 2], orient_scale_km: 2.0}
+blocks:
+  terrain:
+    src: terrain
+    orient_src: terrain
+    scales_km: [0.5, 1.0]
+    outputs: [step, asymmetry, sign_change, sharpness, offset, lineation]
+    persistence: {scales_km: [0.5, 1.0, 2.0, 4.0], q: 0.9}
+    note: "terrain profiles across the terrain fabric"
+  terrain_by_magnetic:
+    src: terrain
+    orient_src: magnetic
+    tag: bymag
+    modality: terrain
+    scales_km: [0.5]
+    outputs: [step, asymmetry, offset]
+    note: "terrain step across the MAGNETIC fabric (orientation independent of the profiled field)"
+  magnetic:
+    src: magnetic
+    orient_src: magnetic
+    scales_km: [1.0, 2.0]
+    params: {unit_km: 0.4}
+    outputs: [step, asymmetry, sharpness, offset, lineation]
+    persistence: {scales_km: [1.0, 2.0, 4.0, 8.0], q: 0.9, unit_km: 0.4}
+  gravity:
+    src: gravity
+    orient_src: gravity
+    scales_km: [2.0]
+    params: {unit_km: 0.6}
+    outputs: [step, asymmetry, sharpness]
+  basement:
+    src: basement
+    orient_src: basement
+    scales_km: [5.0]
+    params: {unit_km: 1.0}
+    outputs: [step, sharpness]

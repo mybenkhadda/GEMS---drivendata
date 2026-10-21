@@ -1,0 +1,10 @@
+# Colab runtime (non-semantic: excluded from config hashes). Override per experiment under `runtime:`.
+runtime:
+  max_stage_minutes: 0              # 0 = no budget; e.g. 200 on a free-tier session -> clean, resumable stop
+  gpu: {}                           # explicit overrides of training.gpu.autoconfig (batch_size, amp_dtype, ...)
+drive:
+  sync: true                        # push the experiment folder to Drive after every stage / unit
+paths:
+  local_root: /content/gems_work
+  drive_root: /content/drive/MyDrive/GEMS_2
+  code_root: /content/GEMS

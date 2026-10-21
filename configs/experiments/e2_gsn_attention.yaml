@@ -1,0 +1,8 @@
+# E2: modality-wise attention fusion (one axis changed vs E1; compare n_params in architecture.csv).
+extends: [e1_gsn_parity.yaml]
+name: e2_gsn_attention
+model_name: P5_E2_gsn_attention
+model:
+  fusion: attention
+evaluation:
+  control: P5_E1_gsn_gated

@@ -1,0 +1,13 @@
+# G: discovery-aware ensembling, nested geographic weights, geo-masked discovery weights.
+# Add promoted Phase-5 candidates to `members` once they exist (members need OOF + all discovery maps).
+extends: [../validation/phase5_protocol.yaml, ../colab/runtime.yaml]
+name: g1_ensemble
+kind: ensemble5
+seed: 2026
+members: [G1, RS05_G3_noSS_RS, CNN_A_dti, DL00_CNN_B_dti, P4_B_gated]
+methods: [rank_mean, weighted_rank, convex_stack]
+step: 0.25
+discovery_weights: geo_masked        # or loso (leave-one-split-out)
+calibration_ok: false                # uncertainty-aware fusion stays disabled
+evaluation:
+  control: null                      # null = best member on the primary discovery policy

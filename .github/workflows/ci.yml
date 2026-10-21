@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install (CPU torch, no project data)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
+      - name: Import smoke test
+        run: python -c "import gems_bench, gems_bench.experiment, gems_bench.cli; print(gems_bench.__version__)"
+      - name: Lint (pyflakes errors only; informational)
+        continue-on-error: true
+        run: ruff check --select F gems_bench gems_eda tests
+      - name: Unit tests (synthetic fixtures only)
+        run: pytest

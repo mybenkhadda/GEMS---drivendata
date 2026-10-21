@@ -1,0 +1,8 @@
+# C2: C1 + label-free thinness and along-strike continuity (no isotropic smoothing; cannot bridge systems).
+extends: [c1_geometry_heads.yaml]
+name: c2_thin_continuity
+model_name: P5_C2_thin_cont
+model:
+  overrides: {w_thin: 0.05, w_continuity: 0.05, continuity_step_px: 1.0}
+evaluation:
+  control: P5_C1_heads

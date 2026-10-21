@@ -1,0 +1,8 @@
+# B3: mean-teacher consistency on unlabeled pixels (translation + noise views). Run ONLY if B1 or B2 passes its
+# promotion gate; then set `pu` to the winning variant and `evaluation.control` to that model, so B3 isolates
+# the consistency term.
+extends: [_base_cnn5.yaml]
+name: b3_consistency
+model_name: P5_B3_consistency
+model:
+  overrides: {pu: none, consistency: 1.0, ema_decay: 0.99, consistency_rampup: 5, consistency_shift_px: 8}

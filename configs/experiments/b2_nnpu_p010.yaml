@@ -1,0 +1,6 @@
+# B2: PU-corrected DTI surrogate + non-negative PU BCE. Prior sweep: b2_nnpu_p005 / p010 / p020.
+extends: [_base_cnn5.yaml]
+name: b2_nnpu_p010
+model_name: P5_B2_nnpu_p010
+model:
+  overrides: {pu: nnpu, pu_prior: 0.01, collapse_max_unlabeled_mean: 0.35}

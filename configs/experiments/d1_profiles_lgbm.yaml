@@ -1,0 +1,15 @@
+# D1: RS05 LightGBM + fault-normal structural profile features, plus one drop-family CV run per profile family.
+extends: [../validation/phase5_protocol.yaml, ../colab/runtime.yaml]
+name: d1_profiles_lgbm
+model_name: P5_D1_RS05_prof
+kind: lgbm5
+seed: 2026
+variant: D2_conservative
+features:
+  base: RS05_G3_noSS_RS
+  add_prefixes: ["p5:"]
+  profile_config: configs/features/structural_profiles.yaml
+ablate_families: true
+evaluation:
+  control: RS05_G3_noSS_RS
+  models: [G1, RS05_G3_noSS_RS]

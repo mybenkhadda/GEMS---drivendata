@@ -1,0 +1,15 @@
+# F4 (tabular arm): G1 vs G1 + DEM aggregates, both scored on identical DEM-covered pixels only.
+extends: [../validation/phase5_protocol.yaml, ../colab/runtime.yaml]
+name: f4_g1_dem
+model_name: P5_F4_G1_dem
+kind: lgbm5
+seed: 2026
+variant: D2_conservative
+features:
+  base: G1
+  add_prefixes: ["dem:"]
+evaluation:
+  control: G1
+  models: [G1]
+  restrict: dem_coverage
+  min_coverage: 0.9

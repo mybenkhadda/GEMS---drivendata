@@ -1,0 +1,12 @@
+# 5D: full-raster inference of the registry champion + validated GeoTIFF export (each known-fault variant).
+extends: [../colab/runtime.yaml]
+name: z_submission
+kind: submission
+seed: 2026
+model:
+  name: null                         # null = registry champion (status promoted)
+  allow_unpromoted: false
+export:
+  mode: binary_area                  # DTI is maximised by a binary map at the cross-fitted area budget
+  area_frac: null                    # null = champion's geographic cross-fitted budget
+  known_policies: [model, suppress_known]

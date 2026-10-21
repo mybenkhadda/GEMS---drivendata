@@ -1,0 +1,8 @@
+# C1: multi-task decoder - proximity + axial orientation heads (cosine loss; no supervision at intersections
+# or on pieces < 1 km). Submission output stays the single seg raster.
+extends: [_base_cnn5.yaml]
+name: c1_geometry_heads
+model_name: P5_C1_heads
+export_heads: true
+model:
+  overrides: {aux_dist: 0.2, aux_orient: 0.1, orient_loss: cosine, orient_junction_px: 3.0, orient_min_length_km: 1.0}

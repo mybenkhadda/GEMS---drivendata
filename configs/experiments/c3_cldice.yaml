@@ -1,0 +1,8 @@
+# C3: C1 + soft-clDice centreline loss. Its precision term inherits negative-label bias: weight kept small.
+extends: [c1_geometry_heads.yaml]
+name: c3_cldice
+model_name: P5_C3_cldice
+model:
+  overrides: {w_centerline: 0.1}
+evaluation:
+  control: P5_C1_heads

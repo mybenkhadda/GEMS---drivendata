@@ -1,0 +1,5 @@
+# The Phase-4 gated dual encoder (P4_B_gated) as a Phase-5 model block: exact config.json of the Phase-4 run.
+model:
+  base: P4_B_gated
+  type: geounet
+  overrides: {orient_loss: mse}     # Phase-4 parity for any auxiliary head

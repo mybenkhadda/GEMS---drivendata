@@ -1,0 +1,7 @@
+# B0 = E0: P4_B_gated retrained with the Phase-5 trainer, Phase-4 objective. Control for every B / C / E run;
+# its difference to the original P4_B_gated measures trainer / seed variance.
+extends: [_base_cnn5.yaml]
+name: b0_reference
+model_name: P5_B0_gated
+evaluation:
+  control: P4_B_gated

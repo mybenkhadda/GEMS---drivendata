@@ -1,0 +1,11 @@
+# E5: optional coarse context branch (regional strain / seismicity) behind a near-zero learned gate.
+# Phase 3/4 found seismicity / strain hurt tabular models: this tests whether a gated coarse branch avoids that.
+extends: [e1_gsn_parity.yaml]
+name: e5_gsn_context
+model_name: P5_E5_gsn_context
+model:
+  add_channels:
+    context: ["raw:geod_shearrate", "raw:geod_2ndinv", "raw:deq_n100a15", "raw:ieq_n100a15"]
+  overrides: {context_factor: 4, context_strict: true}
+evaluation:
+  control: P5_E1_gsn_gated

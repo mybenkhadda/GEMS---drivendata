@@ -1,0 +1,9 @@
+# E4: ONE long-range context method at the bottleneck: dilated residual block. The small Fourier unit
+# (LaMa-style FFC) is a separate research run: copy this file with long_range: fourier - never both at once.
+extends: [e1_gsn_parity.yaml]
+name: e4_gsn_dilated
+model_name: P5_E4_gsn_dilated
+model:
+  long_range: dilated
+evaluation:
+  control: P5_E1_gsn_gated

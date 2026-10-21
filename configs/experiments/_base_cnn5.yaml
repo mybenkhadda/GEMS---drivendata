@@ -1,0 +1,8 @@
+# Base for every Phase-5 CNN experiment. Children override `name`, `model_name`, model fields, evaluation.control.
+extends: [../validation/phase5_protocol.yaml, ../colab/runtime.yaml, ../models/gated_dual_p4.yaml]
+kind: cnn5
+seed: 2026
+discovery: true                    # 3 pseudo-discovery splits, epochs = median best CV epoch (Phase-3 rule)
+export_heads: false
+evaluation:
+  control: P5_B0_gated             # gated dual encoder re-run with the Phase-5 trainer (same code path)

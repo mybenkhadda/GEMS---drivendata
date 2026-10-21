@@ -1,0 +1,12 @@
+# F4 (CNN arm): gated dual encoder + DEM channels (zero outside coverage + explicit coverage channel),
+# scored on DEM-covered pixels only against B0 scored on the same pixels.
+extends: [_base_cnn5.yaml]
+name: f4_dual_dem
+model_name: P5_F4_dual_dem
+model:
+  add_channels:
+    terrain: ["dem:coverage", "dem:scarp_density", "dem:scarp_length_m", "dem:microrelief_rms", "dem:slope_break_mean",
+              "dem:orient_entropy", "dem:persistence_mean"]
+evaluation:
+  restrict: dem_coverage
+  min_coverage: 0.9

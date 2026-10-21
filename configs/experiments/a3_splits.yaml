@@ -1,0 +1,16 @@
+# A3: stronger spatial designs, saved as standard fold / split files under data/processed/splits/<name>.
+# Retrain a model under a design by adding validation.discovery_dir / validation.folds_dir to its config, e.g.
+#   validation: {discovery_dir: data/processed/splits/short_lt2km_k3}
+extends: [../colab/runtime.yaml]
+name: a3_splits
+kind: splits
+seed: 2026
+designs:
+  - {name: system_k5, design: system_kfold, k: 5, min_system_km: 1.0}
+  - {name: short_lt2km_k3, design: length_stratified, lo_km: 0.0, hi_km: 2.0, k: 3}
+  - {name: region_loro, design: region_loro, buffer_km: 13.0}
+buffer_audit:
+  buffer_km: 13.0
+  channels: []
+hard_subregions:
+  models: [G1, DL00_CNN_B_dti, P4_B_gated]

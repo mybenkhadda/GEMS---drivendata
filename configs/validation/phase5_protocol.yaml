@@ -1,0 +1,16 @@
+# Shared evaluation protocol for every Phase-5 experiment (merged through `extends`).
+# Same folds / splits / budgets / policies as Phase 4: numbers are comparable with outputs/phase4 tables.
+evaluation:
+  match_frac: 0.05                  # matched area budget for recall / complementarity / unique systems
+  refs: [G1]                        # reference for unique-system counts (G1 = strongest tabular baseline)
+  models: [G1, P4_B_gated]          # always reported next to the candidate
+  promotion:                        # section 17 (evaluation.scoreboard.DEFAULT_RULES)
+    primary_policy: excl            # designated primary pseudo-discovery policy
+    alt_policy: retained_fp
+    min_disc_gain: 0.005
+    max_alt_drop: 0.002
+    max_geo_drop: 0.005
+    min_unique_systems: 1
+    max_far_share_increase: 0.05
+    max_fold_min_drop: 0.005
+    min_folds_beating: 2

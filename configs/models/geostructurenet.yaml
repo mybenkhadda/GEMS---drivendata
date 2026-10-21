@@ -1,0 +1,8 @@
+# GeoStructureNet starting point: P4_B_gated channels/groups, same widths, gated fusion, no long-range block.
+# With these settings it is architecturally P4_B_gated (parity control); experiments change ONE axis.
+model:
+  base: P4_B_gated
+  type: geostructurenet
+  fusion: gated
+  long_range: none
+  overrides: {enc_width: 24, dec_width: 32, gsn_heads: 4}

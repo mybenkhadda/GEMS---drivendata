@@ -1,0 +1,6 @@
+# B1: downweight unlabeled pixels where LABEL-FREE structural evidence (B0_lineament map) is strong.
+extends: [_base_cnn5.yaml]
+name: b1_bg_weight
+model_name: P5_B1_bgw
+model:
+  overrides: {pu: bg_weight, bg_evidence: "map:B0_lineament", bg_lambda: 0.5, bg_q0: 0.8, bg_min_weight: 0.2}

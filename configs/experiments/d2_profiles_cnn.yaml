@@ -1,0 +1,9 @@
+# D2: gated dual encoder + profile channels. Edit the list after D1's family ablation (keep families that help).
+extends: [_base_cnn5.yaml]
+name: d2_profiles_cnn
+model_name: P5_D2_prof
+model:
+  add_channels:
+    terrain: ["p5:terrain:profile_step@0.5km", "p5:terrain:profile_asymmetry@0.5km", "p5:terrain:profile_offset@0.5km",
+              "p5:terrain:profile_persistence@0.5km"]
+    subsurface: ["p5:magnetic:profile_step@1km", "p5:magnetic:profile_sharpness@1km", "p5:gravity:profile_step@2km"]

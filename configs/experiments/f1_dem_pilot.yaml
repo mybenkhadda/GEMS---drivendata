@@ -1,0 +1,22 @@
+# F1-F3: inventory, balanced pilot selection, (explicit) download, 1 m morphology -> 100 m mosaic.
+# Downloading is approved separately with runtime.dem_download: true (non-semantic: same experiment id), only
+# after reading dem_storage_estimate.json and dem_pilot_tiles.csv from the prepare stage.
+extends: [../colab/runtime.yaml]
+name: f1_dem_pilot
+kind: dem_pilot
+seed: 2026
+dem:
+  urls_json: data/raw/dem_1m/tnm_urls.json
+  inspect_headers: 10
+  overlap_policy: latest
+  n_tiles: 24
+  quotas: {short_missed: 5, cnn_missed: 5, disagreement: 4, control: 4}
+  disagreement_models: [G1, P4_B_gated]
+  reference_cnn: DL00_CNN_B_dti
+  max_tiles: 30
+  max_gib: 15.0
+  morphology: {block_px: 2000, halo_px: 100, scarp_slope_deg: 15.0}
+evaluation:
+  min_coverage: 0.9
+runtime:
+  dem_download: false

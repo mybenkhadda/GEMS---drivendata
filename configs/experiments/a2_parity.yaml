@@ -1,0 +1,11 @@
+# A2: metric parity. CPU only, minutes. Put the organisers' scorer (if you have it) at the path below.
+extends: [../colab/runtime.yaml]
+name: a2_parity
+kind: parity
+seed: 2026
+parity:
+  official_scorer: null             # e.g. data/external/official_metric.py (never downloaded by the package)
+  official_function: score
+  real_maps: [G1, P4_B_gated]
+  windows: [[1500, 1500], [2500, 1200], [800, 2000]]
+  submission: null                  # e.g. submissions/<file>.tif to audit an existing export
