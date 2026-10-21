@@ -45,7 +45,7 @@ all = ["torch>=2.1", "geopandas>=0.14", "pyogrio>=0.7", "pytest>=7", "ruff>=0.4"
 gems = "gems_bench.cli:main"
 
 [project.urls]
-Documentation = "https://github.com/OWNER/REPOSITORY/tree/main/docs"
+Documentation = "https://github.com/mybenkhadda/GEMS---drivendata/tree/main/docs"
 
 [tool.setuptools.dynamic]
 version = {attr = "gems_bench._version.__version__"}

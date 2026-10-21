@@ -4,17 +4,10 @@
 
 * Nested repository in `Downloads/GEMS` (branch `main`). The home-directory repository
   (`C:/Users/myben`, remote `ImplementationML`) was not touched; GEMS was never tracked there.
-* Commits: `c0cb2cb` (platform + Phase 5), then this handoff. **No remote configured, nothing pushed.**
-* Push (create an empty GitHub repository first, private recommended; no README / license on creation):
-
-```bash
-cd ~/Downloads/GEMS
-git remote add origin https://github.com/<owner>/<repository>.git
-git push -u origin main
-```
-
-Then replace `OWNER/REPOSITORY` in `notebooks/colab/*.ipynb` (variable `REPO`) and `pyproject.toml`
-(`[project.urls]`), commit, push. Install from GitHub: `pip install "git+https://github.com/<owner>/<repository>.git@<sha>"`.
+* Commits: `c0cb2cb` (platform + Phase 5), handoff, repository URL.
+* Remote: `origin = https://github.com/mybenkhadda/GEMS---drivendata.git` (branch `main`, pushed 2026-10-21).
+  Notebooks (`REPO`) and `pyproject.toml` point at it.
+  Install from GitHub: `pip install "git+https://github.com/mybenkhadda/GEMS---drivendata.git@<sha>"`.
 
 * Not in Git by design: raw rasters, `outputs/**` except findings `.md`, feature caches, checkpoints,
   `experiments/`, `submissions/`, `model_registry/`, secrets. `notebooks/01_geological_eda.ipynb` (31 MB of

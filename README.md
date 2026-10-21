@@ -16,7 +16,7 @@ and geometry-aware learning, GeoStructureNet, 1 m DEM pilot, discovery-aware ens
 # local (editable) - from the project root
 pip install -e ".[dev]"                    # + torch matching your CUDA: https://pytorch.org/get-started
 # Colab / any machine, from GitHub (pin a commit for reproducibility)
-pip install "git+https://github.com/OWNER/REPOSITORY.git@<commit>"
+pip install "git+https://github.com/mybenkhadda/GEMS---drivendata.git@<commit>"
 pip install -e ".[colab]"                  # inside a clone (Colab already provides torch)
 ```
 
