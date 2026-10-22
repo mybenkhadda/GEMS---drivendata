@@ -1,0 +1,6 @@
+{
+  "model": "unsupervised_map",
+  "description": "Phase-1 fused lineament score (200 m -> 100 m)",
+  "seed": 2026,
+  "features": []
+}

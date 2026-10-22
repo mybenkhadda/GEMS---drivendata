@@ -33,11 +33,21 @@ Data never goes into Git (`data/README.md`). Two layouts are recognised automati
 `$GEMS_ROOT` (data workspace), `$GEMS_DRIVE_ROOT` (Drive mirror) and `$GEMS_CODE_ROOT` (checkout with `configs/`) override
 discovery. See `docs/GOOGLE_DRIVE_LAYOUT.md` for the one-time upload of the Phase 1–4 artifacts.
 
-## 3. Colab + Drive
+## 3. Colab + Drive: start here
 
-Open `notebooks/colab/00_setup_and_drive.ipynb`, set `REPO` / `COMMIT`, run all. It mounts Drive, clones and installs
-the package, checks the GPU, creates `MyDrive/GEMS_2/…` folders, stages core data to `/content`, and lists existing
-experiments and the registry. Details: `docs/COLAB_QUICKSTART.md`.
+**Recommended:** open `notebooks/colab/GEMS_MASTER_PIPELINE.ipynb`. It is a single resumable notebook for the whole workflow,
+and it bootstraps from the four raw competition files: the Phase 1 EDA dependencies, folds, splits and features are
+regenerated when missing, and valid existing artifacts are reused. Set the control panel (`CONFIG`), run top to
+bottom, and re-run after a disconnect. Guide: `docs/MASTER_COLAB_GUIDE.md`. Stage graph: `docs/PIPELINE_DEPENDENCIES.md`.
+Missing artifacts: `docs/ARTIFACT_RECOVERY.md`.
+
+```python
+from gems_bench.pipeline import Pipeline
+pipe = Pipeline.from_notebook({"run_mode": "PREPARE_DATA"})
+pipe.plan(); pipe.run(); pipe.dashboard()
+```
+
+The focused notebooks `notebooks/colab/00`–`07` remain as research entry points (`docs/COLAB_QUICKSTART.md`).
 
 ## 4. Run a baseline evaluation
 
@@ -105,6 +115,7 @@ provenance JSON. Record uploads and public scores in `reports/leaderboard_log.cs
 
 ## Documentation
 
+`docs/MASTER_COLAB_GUIDE.md` · `docs/PIPELINE_DEPENDENCIES.md` · `docs/ARTIFACT_RECOVERY.md` ·
 `docs/ARCHITECTURE.md` · `docs/COLAB_QUICKSTART.md` · `docs/GOOGLE_DRIVE_LAYOUT.md` · `docs/DATA_PROVENANCE.md` ·
 `docs/EXPERIMENT_GUIDE.md` · `docs/VALIDATION_PROTOCOL.md` · `docs/MODEL_REGISTRY.md` · `docs/PROJECT_STATE.md` ·
 `docs/NEXT_SESSION_HANDOFF.md`. Phase 1–4 plans and findings: `docs/PHASE*_PLAN.md`, `outputs/*/…FINDINGS.md`.

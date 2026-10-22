@@ -114,6 +114,8 @@ class P3Context:
                 p = self.bench.ensembles / f"{PHASE2_ENSEMBLES[name]}.tif"
             else:
                 p = self.paths.experiments / name / "oof.tif"
+            if not p.exists():                   # has_oof() relies on FileNotFoundError (rasterio raises its own)
+                raise FileNotFoundError(f"no oof.tif for {name}: {p}")
             self._maps[name] = read_map(p)
         return self._maps[name]
 
@@ -175,18 +177,24 @@ class P3Context:
         return p
 
 
-def load_context(root: Path | None = None, with_segments: bool = True) -> P3Context:
-    """Reload everything Phase 3 needs from Phase-1/2 artifacts (no recomputation of folds or features)."""
+def load_context(root: Path | None = None, with_segments: bool = True, *, fold_dir: Path | None = None,
+                 disc_dir: Path | None = None) -> P3Context:
+    """Reload everything Phase 3 needs from Phase-1/2 artifacts (no recomputation of folds or features).
+
+    ``fold_dir`` / ``disc_dir`` select another (versioned) validation design; default = the Phase-2 protocol."""
     cfg = BenchConfig()
     bench = BenchPaths.discover(root)
     p3 = Phase3Paths(bench.root).ensure()
     man = BenchManifest(p3)
     data = load_native(bench)
     store = FeatureStore(data, build_specs(data.band_names, include_eda=True))
-    fold_dir = bench.folds / f"geo_k{cfg.n_folds}_b{cfg.block_km:g}km_buf{cfg.buffer_km:g}km_s{cfg.seed}"
-    disc_dir = bench.folds / f"discovery_d{cfg.n_discovery_folds}_link{cfg.system_link_km:g}km_s{cfg.seed}"
+    fold_dir = Path(fold_dir) if fold_dir else \
+        bench.folds / f"geo_k{cfg.n_folds}_b{cfg.block_km:g}km_buf{cfg.buffer_km:g}km_s{cfg.seed}"
+    disc_dir = Path(disc_dir) if disc_dir else \
+        bench.folds / f"discovery_d{cfg.n_discovery_folds}_link{cfg.system_link_km:g}km_s{cfg.seed}"
     if not (fold_dir / "fold_map.tif").exists() or not (disc_dir / "discovery_map.tif").exists():
-        raise FileNotFoundError("Phase-2 folds / discovery splits missing: run notebook 02 sections 0-2 first")
+        raise FileNotFoundError("Phase-2 folds / discovery splits missing: run the master pipeline stages "
+                                "spatial_folds + discovery_splits (or notebook 02 sections 0-2)")
     folds = GeoFolds.load(fold_dir, data.grid)
     splits = DiscoverySplits.load(disc_dir, data.grid)
     seg, seg_tab = None, None

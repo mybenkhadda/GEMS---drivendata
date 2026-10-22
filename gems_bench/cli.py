@@ -10,6 +10,7 @@
     gems status   --experiment <EXPERIMENT_ID>
     gems registry list | promote --model NAME --experiment ID | reject --model NAME --reason TEXT
     gems parity                                                      (synthetic metric-parity cases)
+    gems pipeline plan|run|status [--mode RESUME] [--stage NAME] [--pipeline-config my.yaml]
 
 Global options: --root (workspace), --drive (Drive mirror), --code (checkout with configs/), --resume-policy.
 """
@@ -52,6 +53,31 @@ def cmd_features(a):
     print(ctx.store.build(names).to_string(index=False))
 
 
+def cmd_pipeline(a):
+    from .pipeline import Pipeline, PipelineConfig
+
+    paths = {k: v for k, v in (("local_root", a.root), ("drive_root", a.drive), ("code_root", a.code)) if v}
+    over = {"paths": paths} if paths else None
+    cfg = PipelineConfig.load(PipelineConfig.default_yaml(), overrides=over)
+    if a.pipeline_config:
+        import yaml
+
+        from .pipeline.config import _deep_merge
+
+        cfg = PipelineConfig(_deep_merge(cfg.raw, yaml.safe_load(open(a.pipeline_config, encoding="utf-8")) or {}),
+                             f"{cfg.source} + {a.pipeline_config}")
+        cfg.validate()
+    pipe = Pipeline(cfg)
+    if a.action == "plan":
+        print(pipe.plan(a.mode).to_string(index=False))
+    elif a.action == "status":
+        print(pipe.status().to_string(index=False))
+    elif a.stage:
+        pipe.run_stage(a.stage)
+    else:
+        print(pipe.run(a.mode).to_string(index=False))
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="gems", description="GEMS fault-discovery research platform")
     ap.add_argument("--root")
@@ -79,6 +105,11 @@ def main(argv=None) -> int:
     r.add_argument("--experiment")
     r.add_argument("--reason", default="")
     sub.add_parser("parity")
+    pl = sub.add_parser("pipeline")
+    pl.add_argument("action", choices=["plan", "run", "status"])
+    pl.add_argument("--mode")
+    pl.add_argument("--stage")
+    pl.add_argument("--pipeline-config", help="YAML overriding configs/pipeline/master.yaml")
     a = ap.parse_args(argv)
 
     if a.cmd == "data":
@@ -115,6 +146,8 @@ def main(argv=None) -> int:
             print(promote(a.model, a.experiment, p))
         else:
             print(reject(a.model, a.reason or "manual rejection", p))
+    elif a.cmd == "pipeline":
+        cmd_pipeline(a)
     elif a.cmd == "parity":
         from .evaluation.parity import run_parity
 

@@ -1,0 +1,94 @@
+# GEMS 2.0 master pipeline configuration (gems_bench.pipeline.config.PipelineConfig).
+# The notebook's CONFIG / DEM_CONFIG dicts override these values; unknown keys are rejected.
+# NEVER put download URLs here: use Colab Secrets (GEMS_URL_FEATURES, GEMS_URL_FAULTS, GEMS_URL_SUBMISSION,
+# GEMS_URL_DEM_JSON) or the notebook's URL cell. Signed DrivenData links expire and must not reach Git.
+version: 1
+repo: mybenkhadda/GEMS---drivendata
+ref: main
+seed: 2026
+
+# SETUP_ONLY | PREPARE_DATA | BASELINES | ADVANCED_RESEARCH | FULL_PIPELINE | RESUME | SUBMISSION_ONLY
+run_mode: RESUME
+rebuild_missing: true            # RESUME builds missing cheap stages; false = only continue started stages
+
+paths:
+  drive_root: /content/drive/MyDrive/GEMS_2     # durable mirror ("" = no Drive, local run)
+  local_root: /content/gems_work                # fast working copy
+  code_root: /content/GEMS                      # Git checkout
+
+data:
+  download_missing: true         # download only files that are absent / invalid on Drive AND locally
+  use_colab_secrets: true
+  urls: {}                       # runtime only; keys: features, faults, submission, dem_json
+  verify: sha256                 # Drive copies verified by checksum
+
+stages:
+  run_eda: true                  # minimal Phase-1 rebuild when outputs/eda is missing (CPU, ~15-45 min once)
+  run_baselines: true            # scan / verify baselines (cheap); training only for names below
+  train_baselines: []            # e.g. [B0_lineament, G1, G3] (CPU) or + [CNN_A_dti, DL00_CNN_B_dti, P4_B_gated] (GPU)
+  run_advanced_features: true    # Phase-4 RS features used by the baselines (+ Phase-5 profiles if listed)
+  run_advanced_models: false     # GPU research experiments: explicit opt-in
+  run_dem_pilot: false           # 1 m DEM pilot (download additionally needs dem.download: true)
+  run_scoreboard: true           # unified geographic + pseudo-discovery scoreboard of available models (CPU)
+  run_ensemble: true             # needs >= 2 models with complete discovery maps (skipped otherwise)
+  run_full_inference: false      # full-raster map of the PROMOTED model (promotion is manual)
+  run_submission: false          # write competition GeoTIFFs (never uploaded)
+  run_reports: true
+
+# Phase-2 validation protocol (BenchConfig defaults). Changing any value creates a NEW versioned split folder;
+# existing folds are never regenerated or overwritten.
+validation:
+  n_folds: 3
+  block_km: 20.0
+  buffer_km: 13.0
+  clusters_per_fold: 3
+  inner_buffer_km: 5.0
+  n_discovery: 3
+  link_km: 1.0
+  frac_km: 0.12
+  min_system_km: 5.0
+  max_system_frac: 0.05
+  ignore_km: 1.0
+  eval_km: 10.0
+
+eda:
+  max_dim: 2048                  # Phase-1 working grid (200 m); same as notebooks/01_geological_eda.ipynb
+  seed: 7
+
+features:
+  # raw | phase2 | phase2_eda | phase4_rs_used | phase4_rs_all | phase5_profiles | dem
+  families: [raw, phase2, phase2_eda, phase4_rs_used]
+  extra: []
+
+dem:
+  enabled: false
+  mode: pilot                    # pilot | inventory_only   (the full 1 m collection is never downloaded)
+  inventory: true                # metadata inventory whenever the URL JSON exists (no tiles)
+  download: false                # explicit approval of the pilot download (after reading the estimate)
+  pilot_tiles: 24                # = configs/experiments/f1_dem_pilot.yaml (same experiment id)
+  max_tiles: 30
+  max_gib: 15.0
+  download_only_intersecting: true
+  compute_morphology: true       # 1 m morphology before aggregation
+  aggregate_to_100m: true
+  inspect_headers: 10
+  experiment: f1_dem_pilot
+
+experiments:
+  advanced: [b0_reference, b1_bg_weight, b2_nnpu_p010, c1_geometry_heads, e1_gsn_parity]
+  scoreboard_models: [G1, G3, RS05_G3_noSS_RS, CNN_A_dti, DL00_CNN_B_dti, DL02_CNN_TMGB_dti, P4_B_gated]
+  ensemble: g1_ensemble
+  submission: z_submission
+  stop_on_failure: false
+
+gpu:
+  use_gpu: true
+  max_stage_minutes: 0           # e.g. 200 on free-tier sessions: clean, resumable stop at an epoch boundary
+  overrides: {}                  # training.gpu.autoconfig overrides (batch_size, amp_dtype, ...), non-semantic
+
+sync:
+  push_after_stage: true
+
+reports:
+  save_figures: true
+  save_intermediate: true

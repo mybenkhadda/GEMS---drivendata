@@ -1,47 +1,70 @@
-# Next-session handoff (2026-10-21)
+# Next-session handoff (2026-10-22)
 
-## Git
+## What this session added
 
-* Nested repository in `Downloads/GEMS` (branch `main`). The home-directory repository
-  (`C:/Users/myben`, remote `ImplementationML`) was not touched; GEMS was never tracked there.
-* Commits: `c0cb2cb` (platform + Phase 5), handoff, repository URL.
-* Remote: `origin = https://github.com/mybenkhadda/GEMS---drivendata.git` (branch `main`, pushed 2026-10-21).
-  Notebooks (`REPO`) and `pyproject.toml` point at it.
-  Install from GitHub: `pip install "git+https://github.com/mybenkhadda/GEMS---drivendata.git@<sha>"`.
+A single resumable Colab entry point that no longer depends on hand-uploaded Phase 1–4 outputs.
 
-* Not in Git by design: raw rasters, `outputs/**` except findings `.md`, feature caches, checkpoints,
-  `experiments/`, `submissions/`, `model_registry/`, secrets. `notebooks/01_geological_eda.ipynb` (31 MB of
-  outputs) is excluded: strip outputs (`nbstripout notebooks/01_geological_eda.ipynb`) and remove its line from
-  `.gitignore` to version it.
+* `notebooks/colab/GEMS_MASTER_PIPELINE.ipynb`: the recommended start (23 sections, control panel, mode-aware cells).
+* `gems_bench/pipeline/`: `config` (validated schema), `registry`, `dependencies`, `manifests`, `executor`,
+  `context`, `stages`, `baselines`, `eda_rebuild`, `experiments`, `status`.
+* `gems_bench/data/acquisition.py`: resumable, verified, URL-free-on-disk acquisition of the raw files and the DEM list.
+* `gems_bench/artifacts/validation.py`: content-level validators (GeoTIFF, grid alignment, Parquet, JSON, npy,
+  fold and split folders, EDA groups, legacy runs).
+* `configs/pipeline/master.yaml`; `configs/baselines/legacy_specs/*.json`, which are training-config snapshots of the
+  legacy baselines (recipes only, no results).
+* Compatibility fixes in the library (all backward compatible):
+  * `p3.context.P3Context.oof` raises `FileNotFoundError` for a missing Phase 2 map, so `has_oof` returns False
+    instead of crashing.
+  * `load_context` / `load_context4` / `load_context5` accept `fold_dir` / `disc_dir`, for versioned validation designs.
+  * `training.spec.base_spec_dict` falls back to the snapshot. `cnn5` experiments (B, C, E) no longer need
+    `outputs/phase4/experiments/p4_P4_B_gated_p256_s2026/config.json`.
+  * `ZooRunner._spec` uses `base_spec_dict`.
+  * `gems pipeline plan|run|status` CLI.
+* Docs: `MASTER_COLAB_GUIDE.md`, `PIPELINE_DEPENDENCIES.md`, `ARTIFACT_RECOVERY.md`; README and the Drive layout updated.
+* Tests (authored, **not run**): `tests/test_pipeline_engine.py`, `tests/test_pipeline_artifacts.py`.
 
 ## Nothing was executed
 
-No Python, notebook, test or training ran in this session. Expected first-run work: `pytest` locally, then
-notebook 00 on Colab. Fix first-run errors in place (keep config hashes stable where possible).
+No Python, notebook, test, download or training ran. Expected first-run work:
+
+1. Run `pytest tests/test_pipeline_engine.py tests/test_pipeline_artifacts.py` locally, then the full suite.
+2. On Colab, run the master notebook with `run_mode='SETUP_ONLY'`, then `PREPARE_DATA`.
+
+Fix first-run errors in place, keeping config hashes stable where possible.
 
 ## Ready to execute (in order)
 
-1. `pytest` (synthetic) → `gems run --config configs/experiments/a2_parity.yaml` (CPU).
-2. Upload data + outputs to Drive (`docs/GOOGLE_DRIVE_LAYOUT.md`).
-3. Colab 00 → 01 (profile features) → 02: **A1 gated-encoder pseudo-discovery** (the critical missing result) + A4 scoreboard, A3 designs.
-4. Colab 03: B0 → B1, B2 (π sweep) → C1 → C2, C3. B3 only if B1/B2 pass.
+1. `SETUP_ONLY`: verifies Drive, GPU, and the raw files. The observed Drive has `data/raw/example_submission.tif` and
+   `data/raw/tnm_items.json` at non-canonical paths; both are accepted.
+2. `PREPARE_DATA`: minimal EDA rebuild (`outputs/eda` is missing on Drive), segment rasters, reuse of the
+   regenerated folds and splits, feature store (raw + Phase 2 + `eda:*` + RS features used by baselines),
+   DEM inventory.
+3. `BASELINES` with `train_baselines=['B0_lineament', 'G1', 'G3']` (CPU). Then add `RS05_G3_noSS_RS` (CPU), and on a
+   GPU `CNN_A_dti`, `DL00_CNN_B_dti`, `P4_B_gated`. Alternatively upload the legacy run folders
+   (`docs/ARTIFACT_RECOVERY.md`) after checking that the fold files are identical.
+4. `ADVANCED_RESEARCH` with `run_advanced_models=True` on a GPU: b0 → b1, b2 → c1 → e1.
 
-## Deferred (authored, run after the above)
+## Unverified integration points (check on first run)
 
-D2 (needs D1 family ablation), E1–E5, F (needs `tnm_urls.json` on Drive; download needs explicit approval),
-G (after promoted candidates exist), submission (after a promotion), hierarchical 1 m encoder (only if F4 is
-compelling), `src/` layout migration (`docs/ARCHITECTURE.md`).
+* `gems_eda` rebuild through a redirected `EDAPaths` subclass (`eda_rebuild._rebuild_paths`): `Manifest` relative
+  paths, and `s3_profiles` / `s5_crossmodal` memory use on the 2048 px grid.
+* `segments.segment_id_raster` needs geopandas (`[colab]` extra) and the rebuilt GeoPackage CRS.
+* Retraining `CNN_A_dti` through `replace(ctx, paths=ctx.p3paths, ...)` on a `P5Context`.
+* `competition_scoreboard` / `recovery_matrix` when the reference model `G1` is not available (scoreboard of a
+  partial zoo).
+* DEM footprint GeoPackage writing several layers (one per UTM zone) with pyogrio.
+* `SubmissionRunner` supports `cnn5` and LightGBM champions only. Legacy `cnn3` / `cnn4` zoo champions raise
+  `NotImplementedError` (pre-existing limitation).
 
 ## Compatibility risks
 
-* Legacy notebooks import from the project root: unchanged behaviour (flat layout kept).
-* `gems_bench.data` / `.features` / `.discovery` are now packages; old imports work, but stale `__pycache__`
-  `.pyc` files from before the move must not shadow them (deleted this session).
-* Phase-4 `configs/phase4` are read from the code checkout when the data workspace lacks them (Colab).
-* Torch / CUDA versions on Colab change over time: pin `COMMIT`, record `environment_report()` per session.
+* If the regenerated folds on Drive differ from the historical local folds (sklearn KMeans version), legacy OOF
+  maps and new runs are not comparable. Compare `fold_map.tif` sha256 values before uploading legacy runs.
+* Experiments are opened with `resume_policy="config"`, so a newer commit does not block a resume (it is recorded
+  as a warning).
 
 ## Exact next milestone
 
-**5B execution:** obtain the gated dual encoder's pseudo-discovery scores (A1), the unified scoreboard (A4), metric
-parity (A2) and the first PU / geometry comparisons against B0 (B1, B2, C1), then decide which of D / E / F gets
-the next GPU budget, based on the promotion decisions.
+Bootstrap a fresh Drive to a valid `feature_store` with `PREPARE_DATA`. Then obtain verified baselines (G1, G3,
+B0) and the first unified scoreboard. After that, run the A1 gated-encoder pseudo-discovery and the B / C
+comparisons against B0 on a GPU.

@@ -1,0 +1,55 @@
+{
+  "model": "lightgbm",
+  "group": "G1",
+  "features": [
+    "raw:det_elev",
+    "raw:det_elev_slope",
+    "terrain:curvature@0.5km",
+    "terrain:curvature@1km",
+    "terrain:curvature@2km",
+    "terrain:curvature@5km",
+    "terrain:tilt_edge@2km",
+    "terrain:relief@2km",
+    "terrain:tilt_edge@5km",
+    "terrain:relief@5km",
+    "terrain:thdr@0.5km",
+    "terrain:ridge@0.5km",
+    "terrain:thdr@1km",
+    "terrain:ridge@1km",
+    "terrain:mexhat@1km",
+    "terrain:mexhat@2km",
+    "terrain:std@1km",
+    "terrain:std@3km",
+    "terrain:coherence@1km"
+  ],
+  "seed": 2026,
+  "params": {
+    "objective": "binary",
+    "learning_rate": 0.05,
+    "num_leaves": 63,
+    "min_child_samples": 200,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 1,
+    "lambda_l2": 1.0,
+    "max_bin": 255,
+    "verbose": -1
+  },
+  "rounds": 3000,
+  "early_stop": 100,
+  "refit_full": true,
+  "folds": "outputs/benchmark/folds/geo_k3_b20km_buf13km_s2026",
+  "sampling": {
+    "n_pos": 150000,
+    "n_neg_uniform": 300000,
+    "n_neg_ring": 150000,
+    "ignore_px": 2,
+    "ring_km": [
+      0.5,
+      2.5
+    ],
+    "pu_weight": 0.3,
+    "pu_quantile": 0.97
+  },
+  "sample_scale": 1.0
+}

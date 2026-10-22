@@ -57,7 +57,8 @@ def stage_core(extra: tuple[str, ...] = (), local_root: str = LOCAL_ROOT, drive_
     rels = [r for r in CORE + tuple(extra) if (Path(drive_root) / r).exists()]
     missing = [r for r in CORE if not (Path(drive_root) / r).exists()]
     if missing:
-        print(f"[stage] not on Drive (see docs/GOOGLE_DRIVE_LAYOUT.md): {missing}")
+        print(f"[stage] not on Drive: {missing} - the master pipeline regenerates the derived ones "
+              "(notebooks/colab/GEMS_MASTER_PIPELINE.ipynb, docs/ARTIFACT_RECOVERY.md)")
     return s.stage_in(rels)
 
 

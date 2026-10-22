@@ -18,11 +18,11 @@ class ZooRunner(Runner):
     kind = "zoo"
 
     def _spec(self, name: str):
-        from ...models.zoo import experiment_dir
         from ...phase4_training import P4Spec, spec_from_config
         from ...training.gpu import autoconfig
+        from ...training.spec import base_spec_dict
 
-        cfg = json.loads((experiment_dir(self.ctx, name) / "config.json").read_text(encoding="utf-8"))
+        cfg = base_spec_dict(self.ctx, name)          # legacy config.json, else the committed snapshot
         spec = spec_from_config(cfg, P4Spec)
         gpu = {**autoconfig(patch_px=spec.patch_px, effective_batch=spec.batch_size * max(spec.grad_accum, 1),
                             n_channels=len(spec.channels)), **(self.cfg.get("runtime.gpu", {}) or {})}

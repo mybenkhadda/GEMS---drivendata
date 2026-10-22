@@ -19,7 +19,12 @@ MyDrive/GEMS_2/                         (= $GEMS_DRIVE_ROOT; same relative layou
 ├── cached_artifacts/  environment/     sync ledger, environment snapshots
 ```
 
-## One-time upload from the local project (`Downloads/GEMS`)
+## Optional upload from the local project (`Downloads/GEMS`)
+
+The upload is **no longer required**. The master pipeline (`notebooks/colab/GEMS_MASTER_PIPELINE.ipynb`) bootstraps from
+the raw files and regenerates the minimal EDA set, segment rasters, folds, splits, and feature caches. Uploading the
+legacy folders below only saves compute, and it is the only way to have the *historical* model maps
+(`docs/ARTIFACT_RECOVERY.md`).
 
 | local | Drive | size | needed for |
 |---|---|---|---|

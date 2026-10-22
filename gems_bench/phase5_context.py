@@ -84,8 +84,11 @@ def scan_experiment_maps(exp_root: Path) -> dict:
 
 
 def load_context5(root: Path | None = None, *, with_segments: bool = True, paths5: ProjectPaths | None = None,
-                  profile_cfg: Path | None = None, dem_dir: Path | None = None) -> P5Context:
-    """Phase-4 context (unchanged loaders) + Phase-5 feature store + Phase-5 zoo."""
+                  profile_cfg: Path | None = None, dem_dir: Path | None = None, fold_dir: Path | None = None,
+                  disc_dir: Path | None = None) -> P5Context:
+    """Phase-4 context (unchanged loaders) + Phase-5 feature store + Phase-5 zoo.
+
+    ``fold_dir`` / ``disc_dir``: validation design (default: the Phase-2 protocol folders)."""
     from .features.phase5_store import Phase5FeatureStore, load_profile_specs
 
     paths5 = paths5 or ProjectPaths.discover(root)
@@ -93,7 +96,8 @@ def load_context5(root: Path | None = None, *, with_segments: bool = True, paths
     rs_cfg = paths5.root / "configs" / "phase4" / "rs_features.yaml"
     base = load_context4(paths5.root, with_segments,
                          experiments_cfg=exp_cfg if exp_cfg.exists() else config_path("phase4", "experiments.yaml"),
-                         rs_cfg=rs_cfg if rs_cfg.exists() else config_path("phase4", "rs_features.yaml"))
+                         rs_cfg=rs_cfg if rs_cfg.exists() else config_path("phase4", "rs_features.yaml"),
+                         fold_dir=fold_dir, disc_dir=disc_dir)
     prof_specs = load_profile_specs(base.data.band_names, profile_cfg)
     store = Phase5FeatureStore.from_phase4(base.store, prof_specs, paths5.feature_store / "phase5",
                                            dem_dir=dem_dir or paths5.processed / "dem_1m_100m")

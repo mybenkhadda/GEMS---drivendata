@@ -57,11 +57,27 @@ def spec_from_dict(d: dict) -> P5Spec:
 
 
 def base_spec_dict(ctx, base: str) -> dict:
-    """config.json of a zoo run (exact Phase-3/4 settings); ``base`` is a zoo name or an experiment folder."""
+    """config.json of a zoo run (exact Phase-3/4 settings); ``base`` is a zoo name or an experiment folder.
+
+    When the legacy run folder is absent (e.g. a fresh Drive without the Phase-4 upload), the training
+    configuration snapshot in ``configs/baselines/legacy_specs/<name>.json`` is used: hyper-parameters and
+    channel lists only, never results. ``n_params`` in it is the legacy model's parameter count."""
     from ..models.zoo import BY_NAME, experiment_dir
 
-    d = experiment_dir(ctx, base) if base in BY_NAME else ctx.run_dir(base)
-    return json.loads((d / "config.json").read_text(encoding="utf-8"))
+    try:
+        d = experiment_dir(ctx, base) if base in BY_NAME else ctx.run_dir(base)
+        p = d / "config.json"
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        pass
+    from ..pipeline.baselines import legacy_spec
+
+    snap = legacy_spec(base)
+    if snap is None:
+        raise FileNotFoundError(f"config.json of {base} not found in the legacy experiment folders and no snapshot "
+                                f"in configs/baselines/legacy_specs/")
+    return snap
 
 
 def spec_from_experiment(ctx, model_cfg: dict, name: str, seed: int) -> P5Spec:

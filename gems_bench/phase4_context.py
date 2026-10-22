@@ -215,9 +215,9 @@ def load_yaml(path: Path) -> dict:
 
 
 def load_context4(root: Path | None = None, with_segments: bool = True, experiments_cfg: Path | None = None,
-                  rs_cfg: Path | None = None) -> P4Context:
+                  rs_cfg: Path | None = None, *, fold_dir: Path | None = None, disc_dir: Path | None = None) -> P4Context:
     """Reload Phase-1/2 data, folds, splits, segments (via the Phase-3 loader) and attach Phase-4 paths/store."""
-    base = load_context(root, with_segments)
+    base = load_context(root, with_segments, fold_dir=fold_dir, disc_dir=disc_dir)
     p4 = Phase4Paths(base.bench.root).ensure()
     cfg_dir = base.bench.root / "configs" / "phase4"
     if not cfg_dir.is_dir():                       # Colab: data workspace and code checkout are separate
