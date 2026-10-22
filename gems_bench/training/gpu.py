@@ -14,6 +14,8 @@ def detect() -> dict:
     try:
         import torch
 
+        # torch.version.cuda is None for a CPU-only wheel: such a build never sees a GPU, whatever the runtime
+        info.update(torch=torch.__version__, torch_cuda=torch.version.cuda)
         if torch.cuda.is_available():
             p = torch.cuda.get_device_properties(0)
             info.update(cuda=True, name=p.name, vram_gb=round(p.total_memory / 2**30, 1),

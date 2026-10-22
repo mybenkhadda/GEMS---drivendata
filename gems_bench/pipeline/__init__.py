@@ -2,8 +2,11 @@
 
     from gems_bench.pipeline import Pipeline
     pipe = Pipeline.from_notebook(CONFIG, DEM_CONFIG, urls=URLS)
+    pipe.overview()                   # read-only: config, code commit, Drive, GPU, raw data, planned actions
     pipe.plan()                       # read-only: what is cached on Drive, what would run, what is blocked
-    pipe.run()                        # the configured mode (default RESUME); or pipe.run_stage("feature_store")
+    pipe.run()                        # the configured mode (default RESUME); or pipe.step("feature_store")
+    pipe.explain("geological_eda")    # error, file:line, recovery, traceback of a stage (this or a past session)
+    pipe.failure_report()             # root failures and the stages each one blocks
     pipe.dashboard()
 
 Modules: ``config`` (validated schema), ``registry`` (stage declarations), ``dependencies`` (graph, modes),
@@ -14,7 +17,7 @@ Modules: ``config`` (validated schema), ``registry`` (stage declarations), ``dep
 from __future__ import annotations
 
 from .config import MODES, ConfigError, PipelineConfig
-from .context import GPURequired, PipelineContext, PipelineStop
+from .context import GPURequired, PipelineContext, PipelineStop, StageFailed
 
 
 class Pipeline:
@@ -89,13 +92,80 @@ class Pipeline:
         return self.executor.run(mode=mode, targets=targets, force=tuple(force))
 
     def run_stage(self, name: str, force: bool = False):
-        r = self.executor.run_stage(name, force=force)
-        print(f"[{name}] {r.outcome}: {r.reason[:300]}")
-        if r.recovery:
-            print(f"[{name}] recovery: {r.recovery}")
+        """Run one stage (dependencies validated, not built). Under ``failure_policy: interactive`` a failed
+        critical stage raises ``StageFailed`` after printing the full diagnostics, so "Run all" stops there."""
+        ex = self.executor
+        r = ex.run_stage(name, force=force)
+        if r.outcome == "FAILED":
+            ex.print_failure(r, full=ex.policy == "interactive")
+        elif r.outcome == "BLOCKED":
+            root = ", ".join(r.root_causes)
+            print(f"[{name}] BLOCKED by {root}: {r.reason[:300]}")
+            print(f"[{name}] fix the root stage first (pipe.explain('{r.root_causes[0]}') shows why)"
+                  if r.root_causes else "")
+        else:
+            print(f"[{name}] {r.outcome}: {r.reason[:300]}")
+            if r.recovery:
+                print(f"[{name}] recovery: {r.recovery}")
         if r.usable:
             print(f"[{name}] outputs: {self.outputs(name)[:6]}")
+        if ex.stops(r):
+            raise StageFailed(name, r.reason, r.recovery, r.location)
         return r
+
+    def explain(self, stage: str) -> dict:
+        """Why a stage is in its state: outcome, error, file:line, recovery and the traceback (this session's
+        result, else the record saved on Drive by an earlier session)."""
+        r = self.executor.results.get(stage)
+        rec = self.pc.manifests.load(stage)
+        info = {"stage": stage, "outcome": r.outcome if r else rec.get("status", "never run"),
+                "error": (r.reason if r else rec.get("error", "")) or "",
+                "location": (r.location if r else rec.get("location", "")) or "",
+                "recovery": (r.recovery if r else rec.get("recovery", "")) or "",
+                "root_causes": list(r.root_causes) if r else [],
+                "traceback": (r.traceback if r else rec.get("traceback", "")) or ""}
+        for k in ("stage", "outcome", "error", "location", "recovery", "root_causes"):
+            if info[k]:
+                print(f"{k:12s}: {info[k]}")
+        if info["traceback"]:
+            print(info["traceback"].rstrip())
+        return info
+
+    def failure_report(self):
+        """Root failures of this session and the stages each one blocks."""
+        print(self.executor.failure_report_text())
+        return self.executor.failure_report()
+
+    def overview(self):
+        """First-run status: configuration, code revision, Drive, GPU, raw data, cached artifacts, planned actions.
+        Read-only (validates, never builds)."""
+        from .._version import provenance
+        from .dependencies import closure, mode_targets
+
+        pc, cfg = self.pc, self.cfg
+        prov = provenance()
+        print(f"mode           : {cfg.mode}   failure_policy: {cfg.get('failure_policy')}")
+        print(f"code           : ref '{cfg.get('ref')}' -> commit {prov['git_commit']} (package {prov['version']})")
+        print(f"Drive          : {pc.drive if pc.drive is not None else 'NOT MOUNTED - nothing will persist'}")
+        g = pc.gpu()
+        ok, why = pc.cuda_ready()
+        gpu_txt = f"{g.get('name')} ({g.get('vram_gb')} GB, cc {g.get('capability')})" if ok else f"none - {why}"
+        print(f"GPU            : {gpu_txt}; torch {g.get('torch')} (CUDA build {g.get('torch_cuda')})")
+        order = closure(self.registry, mode_targets(self.registry, cfg.mode))
+        gpu_stages = [s.name for s in self.registry if s.resource == "gpu" and s.name in order]
+        if not ok and gpu_stages:
+            print(f"                 GPU stages in this mode ({', '.join(gpu_stages)}) will be DISABLED; "
+                  "CPU preprocessing and LightGBM baselines are unaffected")
+        try:
+            from .stages import raw_validate
+
+            raw = raw_validate(pc, pc.drive or pc.local)
+            print(f"raw data       : {raw.summary()}")
+        except Exception as e:
+            print(f"raw data       : cannot validate yet ({type(e).__name__}: {e})")
+        plan = self.plan()
+        print("planned actions: " + ", ".join(f"{r.stage}={r.planned}" for r in plan.itertuples()))
+        return plan
 
     def step(self, name: str, force: bool = False):
         """Notebook section cell: run ``name`` if the configured mode includes it, otherwise only report its
@@ -153,4 +223,5 @@ class Pipeline:
         return pd.concat([cat, pd.DataFrame(st)], axis=1)
 
 
-__all__ = ["Pipeline", "PipelineConfig", "PipelineContext", "PipelineStop", "GPURequired", "ConfigError", "MODES"]
+__all__ = ["Pipeline", "PipelineConfig", "PipelineContext", "PipelineStop", "StageFailed", "GPURequired",
+           "ConfigError", "MODES"]

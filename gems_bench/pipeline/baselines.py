@@ -160,6 +160,14 @@ def _ensure_features(ctx, names: list[str]) -> None:
         raise PipelineStop(f"features not defined in the store: {unknown[:8]}",
                            "check the feature families / configs/phase4/rs_features.yaml of this checkout")
     missing = [n for n in names if not ctx.store.has(n)]
+    if any(n.startswith("eda:") for n in missing):
+        from .context import PipelineStop
+        from .stages import FAMILY_EDA_GROUPS, eda_groups_ready
+
+        bad = eda_groups_ready(ctx.data.paths.root, FAMILY_EDA_GROUPS["phase2_eda"])
+        if bad:
+            raise PipelineStop(f"this recipe needs eda:* features but the Phase-1 EDA groups {bad} are missing",
+                               "run geological_eda first (pipe.step('geological_eda')); other baselines continue")
     if missing:
         print(f"[baselines] building {len(missing)} missing feature caches")
         ctx.store.build(missing)

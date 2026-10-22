@@ -68,10 +68,15 @@ def closure(reg: StageRegistry, targets: list[str]) -> list[str]:
 # validated and staged but not built (``ANCESTORS_VALIDATE_ONLY``).
 MODE_TARGETS = {
     "SETUP_ONLY": ["bootstrap", "raw_data"],
-    "PREPARE_DATA": ["native_grid", "geological_eda", "segment_attributes", "spatial_folds", "discovery_splits",
-                     "feature_store", "dem_inventory", "dem_pilot"],
-    "BASELINES": ["feature_store", "baselines", "discovery_validation", "reports"],
-    "ADVANCED_RESEARCH": ["feature_store", "baselines", "advanced_models", "discovery_validation", "reports"],
+    # PREPARE_DATA stops before any model training (baselines / advanced_models are validate-only there)
+    "PREPARE_DATA": ["native_grid", "dem_inventory", "geological_eda", "segment_attributes", "spatial_folds",
+                     "discovery_splits", "feature_store", "dem_pilot"],
+    # the EDA stages are soft dependencies of feature_store / baselines, so they are named here explicitly
+    # (cached -> SKIP_CACHED in seconds; never silently left out of a mode that needs eda:* features)
+    "BASELINES": ["geological_eda", "segment_attributes", "feature_store", "baselines", "discovery_validation",
+                  "reports"],
+    "ADVANCED_RESEARCH": ["geological_eda", "segment_attributes", "feature_store", "baselines", "advanced_models",
+                          "discovery_validation", "reports"],
     "FULL_PIPELINE": None,           # every stage
     "RESUME": None,                  # every stage; expensive ones only when previously started (see executor)
     "SUBMISSION_ONLY": ["full_inference", "submission"],

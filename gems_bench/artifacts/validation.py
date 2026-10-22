@@ -380,12 +380,21 @@ def validate_eda_minimal(eda_dir: Path) -> Report:
     return rep
 
 
-def validate_native_segments(bench_out: Path, grid: dict | None = None) -> Report:
+def validate_native_segments(bench_out: Path, grid: dict | None = None, eda_dir: Path | None = None) -> Report:
+    """Raster (1 band ``seg_id``, native grid) + attribute table. With ``eda_dir`` and a recorded provenance,
+    the Phase-1 segment set they were derived from must still be the one in ``eda_dir`` (seg_id identity)."""
     d = Path(bench_out) / "datasets"
     rep = Report("native_segments")
-    rep.add(check_geotiff(d / "native_segment_ids.tif", grid=grid, count=1, bands=("seg_id",)))
-    rep.add(check_parquet(d / "segment_attributes.parquet", columns=("seg_id", "length_km", "primary_archetype"),
-                          min_rows=1))
+    c1 = rep.add(check_geotiff(d / "native_segment_ids.tif", grid=grid, count=1, bands=("seg_id",)))
+    c2 = rep.add(check_parquet(d / "segment_attributes.parquet", columns=("seg_id", "length_km", "primary_archetype"),
+                               min_rows=1))
+    prov = read_json(d / "native_segments_provenance.json", None)
+    if eda_dir is not None and prov and c1.ok and c2.ok:
+        from ..pipeline.eda_rebuild import eda_segments_fingerprint
+
+        if prov.get("eda_segments") != eda_segments_fingerprint(eda_dir):
+            c1.status = INCOMPATIBLE
+            c1.reason = "derived from another Phase-1 segment set (outputs/eda/datasets changed since)"
     return rep
 
 

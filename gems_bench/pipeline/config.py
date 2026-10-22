@@ -44,6 +44,7 @@ DEFAULTS: dict = {
     "seed": 2026,
     "run_mode": "RESUME",
     "rebuild_missing": True,
+    "failure_policy": "batch",
     "paths": {"drive_root": "/content/drive/MyDrive/GEMS_2", "local_root": "/content/gems_work",
               "code_root": "/content/GEMS"},
     "data": {"download_missing": True, "use_colab_secrets": True, "urls": {}, "verify": "sha256"},
@@ -74,7 +75,12 @@ DEFAULTS: dict = {
 
 TYPES = {
     "version": int, "repo": str, "ref": str, "seed": int, "run_mode": str, "rebuild_missing": bool,
+    "failure_policy": str,
 }
+
+# interactive: a failed critical stage prints its full traceback and raises StageFailed (stops "Run all").
+# batch: independent stages continue; blocked stages are grouped under their root failure in one report.
+FAILURE_POLICIES = ("interactive", "batch")
 
 
 class ConfigError(ValueError):
@@ -170,6 +176,9 @@ class PipelineConfig:
         r["run_mode"] = r["run_mode"].upper()
         if r["run_mode"] not in MODES:
             raise ConfigError(f"run_mode '{r['run_mode']}' not in {MODES}")
+        r["failure_policy"] = r["failure_policy"].lower()
+        if r["failure_policy"] not in FAILURE_POLICIES:
+            raise ConfigError(f"failure_policy '{r['failure_policy']}' not in {FAILURE_POLICIES}")
         for k, v in r["stages"].items():
             if k == "train_baselines":
                 if not isinstance(v, list) or not all(isinstance(x, str) for x in v):

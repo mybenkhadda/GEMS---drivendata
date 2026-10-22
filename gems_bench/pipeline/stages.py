@@ -2,18 +2,20 @@
 
 Graph (hard dependencies; ``~`` = soft, used when available)::
 
-    bootstrap -> raw_data -> native_grid -+-> geological_eda -> segment_attributes -+
-                                          +-> spatial_folds ------------------------+-> feature_store
-                                          +-> discovery_splits ---------------------+       |
-                                          +-> dem_inventory -> dem_pilot (needs feature_store)
-    feature_store -> baselines -> discovery_validation (~advanced_models) -> ensemble
+    bootstrap -> raw_data -> native_grid -+-> dem_inventory -> dem_pilot (needs feature_store)
+                                          +-> geological_eda -> segment_attributes ~~+
+                                          +-> spatial_folds -------------------------+-> feature_store
+                                          +-> discovery_splits ----------------------+
+    spatial_folds + discovery_splits (~feature_store, ~segment_attributes) -> baselines
+    baselines -> discovery_validation (~advanced_models) -> ensemble
     feature_store + baselines -> advanced_models
     feature_store (~ensemble, ~advanced_models) -> full_inference -> submission
     bootstrap (~everything) -> reports
 
-Why ``feature_store`` needs folds, splits and segments: every model-producing stage works on the
-Phase-5 research context (``load_context5``), whose loader requires them; building the context once there
-proves the whole chain loads before GPU time is spent.
+Why ``feature_store`` hard-needs folds and splits: every model-producing stage works on the Phase-5 research
+context (``load_context5``), whose loader requires them. The Phase-1 EDA is needed only by the ``eda:*``
+feature family (``FAMILY_EDA_GROUPS``) and by segment-stratified evaluation, so it is a soft dependency:
+ordered first, but a failed EDA does not stop the raw / Phase-2 families or a G1 LightGBM baseline.
 """
 from __future__ import annotations
 
@@ -34,8 +36,12 @@ from .registry import (ALWAYS_RUN, CPU, CPU_HEAVY, DELEGATED, GPU, LIGHT, NETWOR
 
 NATIVE_GRID_JSON = "environment/pipeline/native_grid.json"
 EDA_STAGE_IN = ["outputs/eda/manifest.json", "outputs/eda/datasets", "outputs/eda/features/lineament_maps.tif",
-                "outputs/eda/features/crossmodal_orientation.tif", "outputs/eda/REBUILD_PROVENANCE.json"]
-SEG_RELS = ["outputs/benchmark/datasets/native_segment_ids.tif", "outputs/benchmark/datasets/segment_attributes.parquet"]
+                "outputs/eda/features/crossmodal_orientation.tif", "outputs/eda/REBUILD_PROVENANCE.json",
+                "outputs/eda/INSTALL_STATE.json"]
+SEG_RELS = ["outputs/benchmark/datasets/native_segment_ids.tif", "outputs/benchmark/datasets/segment_attributes.parquet",
+            "outputs/benchmark/datasets/native_segments_provenance.json"]
+# feature family -> Phase-1 EDA groups it is computed from (other families need only raw data + the grid)
+FAMILY_EDA_GROUPS = {"phase2_eda": ("lineaments", "crossmodal")}
 FEATURE_DIRS = {"phase2": "outputs/benchmark/cache/features", "phase4": "outputs/phase4/cache/features",
                 "phase5": "data/feature_store/phase5"}
 FEATURE_REGISTRY = "data/feature_store/pipeline_feature_registry.csv"
@@ -199,12 +205,16 @@ def native_fp(pc) -> dict:
 
 # =============================================================================== Phase-1 EDA (minimal)
 def eda_run(pc) -> dict:
-    from .eda_rebuild import adopt_manifest, rebuild_minimal
+    from .eda_rebuild import adopt_manifest, rebuild_minimal, rebuild_sources
 
-    rep = rebuild_minimal(pc.local, max_dim=pc.cfg.get("eda.max_dim"), seed=int(pc.cfg.get("eda.seed")))
+    max_dim, seed = pc.cfg.get("eda.max_dim"), int(pc.cfg.get("eda.seed"))
+    if pc.drive is not None:                  # a finished rebuild / interrupted install from an earlier session
+        pc.stage_in(rebuild_sources(pc.drive, max_dim, seed))
+    rep = rebuild_minimal(pc.local, max_dim=max_dim, seed=seed)
     adopt_manifest(pc.local)
     if rep["blocked"]:
-        raise PipelineStop(f"historical EDA groups are incomplete / invalid: {rep['blocked']}",
+        raise PipelineStop(f"historical EDA groups are incomplete / invalid: {rep['blocked']}"
+                           + (f" ({rep['blocked_detail']})" if rep.get("blocked_detail") else ""),
                            "the pipeline never mixes or overwrites historical files: restore the complete group from "
                            "the local project (docs/ARTIFACT_RECOVERY.md, EDA) or move the partial files out of "
                            "MyDrive/GEMS_2/outputs/eda/ yourself, then re-run")
@@ -230,11 +240,14 @@ def eda_fp(pc) -> dict:
 def seg_run(pc) -> dict:
     from .eda_rebuild import build_native_segments
 
-    return {"written": build_native_segments(pc.data, pc.local)}
+    written = build_native_segments(pc.data, pc.local)
+    pc.forget("ctx5")                          # a cached research context was loaded without these segments
+    return {"written": written}
 
 
 def seg_validate(pc, root) -> V.Report:
-    return V.validate_native_segments(root / "outputs" / "benchmark", grid=pc.grid(root))
+    return V.validate_native_segments(root / "outputs" / "benchmark", grid=pc.grid(root),
+                                      eda_dir=root / "outputs" / "eda")
 
 
 # =============================================================================== folds / splits
@@ -386,14 +399,24 @@ def features_stage_in(pc) -> list[str]:
     return rels + regs
 
 
+def eda_groups_ready(root: Path, groups) -> list[str]:
+    """EDA groups (of ``groups``) that are NOT valid under ``root/outputs/eda``."""
+    return [g for g in groups if not V.validate_eda_group(Path(root) / "outputs" / "eda", g).ok]
+
+
 def features_run(pc) -> dict:
     ctx = pc.ctx5()
     cat = feature_catalogue(pc, pc.local)
     names = required_features(pc, cat)
-    built = {}
+    built, deferred = {}, {}
     for fam in ("raw", "phase2", "phase2_eda", "phase4_rs", "phase5_profiles", "dem"):
         todo = [n for n in names if _family(n) == fam and not ctx.store.has(n)]
         if not todo:
+            continue
+        missing = eda_groups_ready(pc.local, FAMILY_EDA_GROUPS.get(fam, ()))
+        if missing:                            # build every other family first; report this one precisely
+            deferred[fam] = {"n": len(todo), "missing_eda_groups": missing}
+            print(f"[features] {fam}: {len(todo)} feature(s) deferred - Phase-1 EDA groups {missing} not available")
             continue
         t0 = time.perf_counter()
         print(f"[features] {fam}: building {len(todo)} feature(s)")
@@ -401,6 +424,11 @@ def features_run(pc) -> dict:
         built[fam] = {"n": len(todo), "minutes": round((time.perf_counter() - t0) / 60, 1)}
         pc.push([r for r in cat[cat.name.isin(todo)].rel])          # persist each family as soon as it exists
     write_feature_registry(pc, cat, names)
+    if deferred:
+        raise PipelineStop(f"feature families {sorted(deferred)} need Phase-1 EDA rasters that are missing: {deferred}; "
+                           f"built and kept: {sorted(built) or 'nothing new'}",
+                           "run geological_eda (pipe.step('geological_eda')), then re-run feature_store (only the "
+                           "deferred features are computed). LightGBM baselines without eda:* features can already train.")
     return {"required": len(names), "built": built}
 
 
@@ -631,10 +659,14 @@ def baselines_run(pc) -> dict:
     n = pc.bench_cfg.n_discovery_folds
     before = B.status_table(pc.local, grid=pc.grid(), n_splits=n, folds_sha=fs, splits_sha=ss)
     req = list(pc.cfg.get("stages.train_baselines") or [])
+    gpu_blocked = gpu_blocked_baselines(pc, req)
+    if gpu_blocked:
+        print(f"[baselines] not attempted on this runtime: {gpu_blocked} ({pc.cuda_ready()[1]}); "
+              "CPU baselines continue")
     done, failed = [], {}
     for name in req:
         row = before.set_index("model").loc[name]
-        if row.status == B.AVAILABLE:
+        if row.status == B.AVAILABLE or name in gpu_blocked:
             continue
         try:
             res = B.train_baseline(pc, name, folds_sha=fs, splits_sha=ss)
@@ -648,16 +680,28 @@ def baselines_run(pc) -> dict:
     _save_table(pc, after, "baseline_status")
     if failed:
         raise PipelineStop(f"baselines not trained: {failed}", "see each message; other baselines were kept")
-    return {"trained": done, "status": dict(zip(after.model, after.status))}
+    return {"trained": done, "gpu_blocked": gpu_blocked, "status": dict(zip(after.model, after.status))}
+
+
+def gpu_blocked_baselines(pc, names) -> list[str]:
+    """Requested GPU baselines that cannot run here (no CUDA): reported, never attempted, never faked."""
+    if pc.cuda_ready()[0]:
+        return []
+    return [n for n in names if n in B.RECIPES and B.RECIPES[n].gpu]
 
 
 def baselines_validate(pc, root) -> V.Report:
     n = int(pc.cfg.get("validation.n_discovery"))
     r = V.Report("baselines")
     req = set(pc.cfg.get("stages.train_baselines") or [])
+    blocked = set(gpu_blocked_baselines(pc, req))
     tab = B.status_table(root, grid=pc.grid(root), n_splits=n)
     for row in tab.itertuples():
-        if row.model in req:
+        if row.model in blocked and row.status != B.AVAILABLE:
+            # an environment limit, not a missing CPU result: noted, excluded from this runtime's checks;
+            # the stage re-runs (always_run) in a GPU session and trains it then
+            r.notes.append(f"{row.model}: requested, needs a CUDA GPU - not trained on this runtime")
+        elif row.model in req:
             r.add(V.Check(row.cv_dir, V.OK if row.status == B.AVAILABLE else V.MISSING, f"{row.model}: {row.status}"))
     r.add(V.check_csv(root / "reports/pipeline/baseline_status.csv", columns=("model", "status")))
     return r
@@ -677,7 +721,9 @@ def advanced_enabled(pc) -> tuple[bool, str]:
         return False, "run_advanced_models is false (GPU training is opt-in)"
     if not _advanced(pc):
         return False, "experiments.advanced is empty"
-    return True, ""
+    if not pc.cfg.get("gpu.use_gpu"):
+        return False, "use_gpu is false"
+    return pc.cuda_ready()
 
 
 def advanced_run(pc) -> dict:
@@ -948,63 +994,78 @@ def _gpu_flag(key: str, why: str):
             return False, why
         if not pc.cfg.get("gpu.use_gpu"):
             return False, "use_gpu is false"
-        return True, ""
+        return pc.cuda_ready()                 # checked before any model is allocated
 
     return f
 
 
 def build_registry() -> StageRegistry:
+    """Declaration order = notebook order (ties of the topological sort follow it):
+
+    bootstrap, raw_data, native_grid, dem_inventory, geological_eda, segment_attributes, spatial_folds,
+    discovery_splits, feature_store, dem_pilot, baselines, advanced_models, discovery_validation, ensemble,
+    full_inference, submission, reports.
+
+    ``critical`` marks the data-preparation backbone (failure_policy "interactive" stops on its failure)."""
     R = StageRegistry()
     R.add(Stage("bootstrap", "Environment, Drive, workspace folders", run=bootstrap_run, validate=bootstrap_validate,
-                reuse=ALWAYS_RUN, resource=LIGHT, section="5", est_minutes="<1",
+                reuse=ALWAYS_RUN, resource=LIGHT, section="5", est_minutes="<1", critical=True,
                 outputs=lambda pc: ["environment/pipeline/config_snapshot.json", "reports/pipeline/environment_report.csv"],
                 recovery="mount Drive (drive.mount('/content/drive')) and re-run the bootstrap cell"))
     R.add(Stage("raw_data", "Competition files: locate, validate, download once", deps=("bootstrap",), run=raw_run,
                 validate=raw_validate, resource=NETWORK, requirement=RAW_REQUIRED, section="7", est_minutes="1-10",
+                critical=True,
                 outputs=lambda pc: ["data/raw/acquisition_manifest.json", "reports/pipeline/raw_data_acquisition.csv"],
                 recovery="configure fresh download URLs (Colab Secrets GEMS_URL_*) or upload the files to Drive"))
     R.add(Stage("native_grid", "Native 100 m grid, labels, template checks", deps=("raw_data",), run=native_run,
-                validate=native_validate, fingerprint=native_fp, resource=CPU, section="9", est_minutes="1-2",
-                outputs=lambda pc: [NATIVE_GRID_JSON, "reports/pipeline/native_band_table.csv"],
+                validate=native_validate, fingerprint=native_fp, resource=CPU, section="8", est_minutes="1-2",
+                critical=True, outputs=lambda pc: [NATIVE_GRID_JSON, "reports/pipeline/native_band_table.csv"],
                 stage_in=lambda pc: [NATIVE_GRID_JSON]))
-    R.add(Stage("geological_eda", "Phase-1 EDA dependency repair (minimal rebuild)", deps=("native_grid",),
-                run=eda_run, validate=eda_validate, fingerprint=eda_fp, enabled=_flag("stages.run_eda", "run_eda is false"),
-                outputs=eda_outputs, stage_in=lambda pc: list(EDA_STAGE_IN), resource=CPU_HEAVY, section="10",
-                est_minutes="15-45"))
-    R.add(Stage("segment_attributes", "Native-grid segment ids + attributes", deps=("geological_eda",), run=seg_run,
-                validate=seg_validate, outputs=lambda pc: list(SEG_RELS), stage_in=lambda pc: list(SEG_RELS),
-                resource=CPU, section="10", est_minutes="2-5"))
-    R.add(Stage("spatial_folds", "Geographic folds (Phase-2 protocol)", deps=("native_grid",), run=folds_run,
-                validate=folds_validate, fingerprint=lambda pc: fold_params(pc.cfg.get("validation"), pc.seed),
-                outputs=lambda pc: [pc.fold_rel], stage_in=lambda pc: [pc.fold_rel], versioned=True, resource=CPU,
-                section="11", est_minutes="1-3"))
-    R.add(Stage("discovery_splits", "Pseudo-discovery fault-system splits", deps=("native_grid",), run=splits_run,
-                validate=splits_validate, fingerprint=lambda pc: discovery_params(pc.cfg.get("validation"), pc.seed),
-                outputs=lambda pc: [pc.discovery_rel], stage_in=lambda pc: [pc.discovery_rel], versioned=True,
-                resource=CPU, section="11", est_minutes="1-3"))
-    R.add(Stage("feature_store", "Feature store: compute once, reuse", deps=("segment_attributes", "spatial_folds",
-                                                                          "discovery_splits"),
-                run=features_run, validate=features_validate, fingerprint=features_fp, outputs=features_outputs,
-                stage_in=features_stage_in, reuse=DELEGATED, resource=CPU_HEAVY, section="12", est_minutes="10-90"))
     R.add(Stage("dem_inventory", "USGS 1 m DEM inventory (metadata only)", deps=("native_grid",), run=dem_inv_run,
                 validate=dem_inv_validate, fingerprint=dem_inv_fp, enabled=dem_inv_enabled, requirement=OPTIONAL,
                 outputs=lambda pc: [DEM_INV_DIR, "data/raw/dem_1m/tnm_urls.json"], stage_in=lambda pc: [DEM_INV_DIR],
-                resource=LIGHT, section="8", est_minutes="1"))
+                resource=LIGHT, section="9", est_minutes="1"))
+    R.add(Stage("geological_eda", "Phase-1 EDA dependency repair (minimal rebuild)", deps=("native_grid",),
+                run=eda_run, validate=eda_validate, fingerprint=eda_fp, enabled=_flag("stages.run_eda", "run_eda is false"),
+                outputs=eda_outputs, stage_in=lambda pc: list(EDA_STAGE_IN), resource=CPU_HEAVY, section="10",
+                est_minutes="15-45", critical=True))
+    R.add(Stage("segment_attributes", "Native-grid segment ids + attributes", deps=("geological_eda",), run=seg_run,
+                validate=seg_validate, outputs=lambda pc: list(SEG_RELS), stage_in=lambda pc: list(SEG_RELS),
+                resource=CPU, section="10", est_minutes="2-5", critical=True))
+    R.add(Stage("spatial_folds", "Geographic folds (Phase-2 protocol)", deps=("native_grid",), run=folds_run,
+                validate=folds_validate, fingerprint=lambda pc: fold_params(pc.cfg.get("validation"), pc.seed),
+                outputs=lambda pc: [pc.fold_rel], stage_in=lambda pc: [pc.fold_rel], versioned=True, resource=CPU,
+                section="11", est_minutes="1-3", critical=True))
+    R.add(Stage("discovery_splits", "Pseudo-discovery fault-system splits", deps=("native_grid",), run=splits_run,
+                validate=splits_validate, fingerprint=lambda pc: discovery_params(pc.cfg.get("validation"), pc.seed),
+                outputs=lambda pc: [pc.discovery_rel], stage_in=lambda pc: [pc.discovery_rel], versioned=True,
+                resource=CPU, section="11", est_minutes="1-3", critical=True))
+    # feature_store needs the grid, folds and splits (research-context loader). The EDA is a *family-level*
+    # prerequisite (eda:* features, FAMILY_EDA_GROUPS), so it is a soft dependency: ordered first, never blocking
+    # the families that do not use it.
+    R.add(Stage("feature_store", "Feature store: compute once, reuse", deps=("spatial_folds", "discovery_splits"),
+                soft_deps=("geological_eda", "segment_attributes"),
+                run=features_run, validate=features_validate, fingerprint=features_fp, outputs=features_outputs,
+                stage_in=features_stage_in, reuse=DELEGATED, resource=CPU_HEAVY, section="12", est_minutes="10-90",
+                critical=True))
     R.add(Stage("dem_pilot", "1 m DEM pilot: selection, download, morphology, 100 m aggregation",
                 deps=("dem_inventory", "feature_store"), run=dem_pilot_run, validate=dem_pilot_validate,
                 enabled=dem_pilot_enabled, outputs=dem_pilot_rels, stage_in=dem_pilot_rels, reuse=DELEGATED,
-                resource=NETWORK_HEAVY, requirement=OPTIONAL, section="8", est_minutes="30-180"))
-    R.add(Stage("baselines", "Baselines: restore, verify, retrain on request", deps=("feature_store",),
+                resource=NETWORK_HEAVY, requirement=OPTIONAL, section="12", est_minutes="30-180"))
+    # baselines build the features each recipe needs (_ensure_features), so a G1 LightGBM can train while an
+    # unrelated feature family (e.g. eda:*) is still missing; recipes that need the EDA say so explicitly.
+    R.add(Stage("baselines", "Baselines: restore, verify, retrain on request", deps=("spatial_folds", "discovery_splits"),
+                soft_deps=("feature_store", "segment_attributes"),
                 run=baselines_run, validate=baselines_validate, enabled=_flag("stages.run_baselines", "run_baselines is false"),
                 outputs=baselines_rels, stage_in=baselines_rels, reuse=ALWAYS_RUN, resource=CPU, requirement=RETRAIN,
                 fingerprint=lambda pc: {"train": sorted(pc.cfg.get("stages.train_baselines") or [])},
                 section="13", est_minutes="scan <1; CPU baselines 20-60 each; CNNs 30-60 GPU each"))
     R.add(Stage("advanced_models", "PU / geometry / GeoStructureNet / multiscale experiments",
-                deps=("baselines",), run=advanced_run, validate=advanced_validate, fingerprint=advanced_fp,
-                enabled=advanced_enabled, outputs=advanced_rels, stage_in=advanced_rels, reuse=DELEGATED, resource=GPU,
-                requirement=RETRAIN, section="14-15", est_minutes="~60 GPU per experiment"))
+                deps=("feature_store", "baselines"), run=advanced_run, validate=advanced_validate,
+                fingerprint=advanced_fp, enabled=advanced_enabled, outputs=advanced_rels, stage_in=advanced_rels,
+                reuse=DELEGATED, resource=GPU, requirement=RETRAIN, section="14-15", est_minutes="~60 GPU per experiment"))
     R.add(Stage("discovery_validation", "Unified geographic + pseudo-discovery scoreboard", deps=("baselines",),
-                soft_deps=("advanced_models",), run=scoreboard_run, validate=scoreboard_validate,
+                soft_deps=("advanced_models", "segment_attributes"), run=scoreboard_run, validate=scoreboard_validate,
                 enabled=_flag("stages.run_scoreboard", "run_scoreboard is false"), outputs=scoreboard_rels,
                 stage_in=scoreboard_rels, reuse=DELEGATED, resource=CPU, section="16-17", est_minutes="5-20"))
     R.add(Stage("ensemble", "Discovery-aware ensembling + promotion gate", deps=("discovery_validation",),

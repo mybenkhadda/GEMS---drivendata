@@ -25,6 +25,16 @@ class PipelineStop(RuntimeError):
         self.recovery = recovery
 
 
+class StageFailed(PipelineStop):
+    """Raised by the notebook entry points under ``failure_policy: interactive`` when a critical stage fails:
+    stops "Run all" before dependent cells run. Completed artifacts stay on disk and Drive."""
+
+    def __init__(self, stage: str, message: str, recovery: str = "", location: str = ""):
+        super().__init__(f"stage '{stage}' failed: {message}", recovery)
+        self.stage = stage
+        self.location = location
+
+
 class GPURequired(PipelineStop):
     def __init__(self, what: str):
         super().__init__(
@@ -191,15 +201,27 @@ class PipelineContext:
             self._cache["data"] = load_native(BenchPaths(self.local).ensure())
         return self._cache["data"]
 
+    def has_segments(self) -> bool:
+        """Segment attributes loadable (native table, or the Phase-1 parquet it is derived from)."""
+        return ((self.local / "outputs/benchmark/datasets/segment_attributes.parquet").exists()
+                or (self.local / "outputs/eda/datasets/known_fault_segments.parquet").exists())
+
     def ctx5(self, refresh: bool = False):
-        """Full research context (Phase-4 loaders + Phase-5 store + zoo), shared by all experiments."""
+        """Full research context (Phase-4 loaders + Phase-5 store + zoo), shared by all experiments.
+
+        Segments are attached when they exist. They are only used by segment-stratified evaluation, so a
+        feature build or a LightGBM baseline does not wait for the Phase-1 EDA (``seg`` / ``seg_tab`` None)."""
         if refresh or "ctx5" not in self._cache:
             from ..models.zoo import register_aliases
             from ..paths import ProjectPaths
             from ..phase5_context import load_context5
 
             paths5 = ProjectPaths(self.local, self.code_root, self.drive).ensure()
-            ctx = load_context5(self.local, paths5=paths5, fold_dir=self.local / self.fold_rel,
+            seg = self.has_segments()
+            if not seg:
+                print("[pipeline] research context without segment attributes (geological_eda / "
+                      "segment_attributes not available yet): segment-stratified metrics are skipped")
+            ctx = load_context5(self.local, with_segments=seg, paths5=paths5, fold_dir=self.local / self.fold_rel,
                                 disc_dir=self.local / self.discovery_rel)
             register_aliases(ctx)
             self._cache["ctx5"] = ctx
@@ -226,6 +248,20 @@ class PipelineContext:
     def require_gpu(self, what: str) -> None:
         if not self.gpu().get("cuda"):
             raise GPURequired(what)
+
+    def cuda_ready(self) -> tuple[bool, str]:
+        """(True, "") when torch sees a CUDA device; otherwise the reason and the fix (no reinstall advice:
+        Colab's preinstalled torch is CUDA-enabled once a GPU runtime is attached)."""
+        g = self.gpu()
+        if g.get("cuda"):
+            return True, ""
+        if "torch" not in g:
+            why = f"PyTorch is not importable ({g.get('error', 'not installed')})"
+        elif not g.get("torch_cuda"):
+            why = f"the installed torch {g.get('torch')} is a CPU-only build"
+        else:
+            why = "no CUDA GPU is attached to this runtime"
+        return False, why + ": Runtime -> Change runtime type -> GPU, reconnect, re-run from section 1"
 
     def runtime_overrides(self) -> dict:
         """Non-semantic runtime block merged into experiment configs (never changes experiment ids)."""

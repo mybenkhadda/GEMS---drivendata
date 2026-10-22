@@ -49,7 +49,10 @@ def segment_id_raster(data: NativeData, max_dist_m: float = 300.0) -> np.ndarray
     gdf = gpd.read_file(data.paths.eda / "datasets" / "known_fault_segments.gpkg")
     if gdf.crs is not None and data.grid.crs is not None and gdf.crs != data.grid.crs:
         gdf = gdf.to_crs(data.grid.crs)
-    burned = rasterize(((g, int(s) + 1) for g, s in zip(gdf.geometry, gdf.seg_id) if g is not None),
+    shapes = [(g, int(s) + 1) for g, s in zip(gdf.geometry, gdf.seg_id) if g is not None and not g.is_empty]
+    if not shapes:                                      # rasterize() raises an opaque ValueError on no shapes
+        raise ValueError(f"{data.paths.eda / 'datasets' / 'known_fault_segments.gpkg'} has no non-empty geometry")
+    burned = rasterize(shapes,
                        out_shape=data.shape, transform=data.grid.transform, fill=0, dtype="int32",
                        all_touched=True)
     dist, (ir, ic) = ndimage.distance_transform_edt(

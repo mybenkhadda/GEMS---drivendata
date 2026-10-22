@@ -120,7 +120,12 @@ def test_real_registry_graph_is_complete():
     assert order.index("discovery_validation") < order.index("ensemble")
     assert order.index("full_inference") < order.index("submission")
     assert "feature_store" in ancestors(R, "dem_pilot")
-    assert {"geological_eda", "spatial_folds", "discovery_splits"} <= ancestors(R, "baselines")
+    assert order.index("native_grid") < order.index("dem_inventory") < order.index("geological_eda")
+    # G1 needs folds + splits (hard); the EDA / feature store are ordered first but never block it
+    assert {"spatial_folds", "discovery_splits"} <= ancestors(R, "baselines")
+    assert "geological_eda" not in ancestors(R, "baselines")
+    assert {"geological_eda", "feature_store"} <= ancestors(R, "baselines", soft=True)
+    assert "feature_store" in ancestors(R, "advanced_models")
     assert R["advanced_models"].expensive and R["dem_pilot"].expensive
     assert not R["feature_store"].expensive
 

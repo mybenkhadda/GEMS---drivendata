@@ -112,8 +112,8 @@ def environment_report() -> pd.DataFrame:
     from ..training.gpu import detect
 
     g = detect()
-    rows = {**provenance(), "python": sys.version.split()[0], "gpu": g.get("name"), "vram_gb": g.get("vram_gb"),
-            "capability": g.get("capability")}
+    rows = {**provenance(), "python": sys.version.split()[0], "cuda_available": g.get("cuda"), "gpu": g.get("name"),
+            "vram_gb": g.get("vram_gb"), "capability": g.get("capability")}
     try:
         import torch
 

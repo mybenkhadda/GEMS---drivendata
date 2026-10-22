@@ -60,6 +60,8 @@ class Stage:
     recovery: str = ""                       # human instruction when the stage cannot complete
     section: str = ""                        # notebook section the stage belongs to
     est_minutes: str = ""
+    critical: bool = False                   # data-preparation backbone: under failure_policy "interactive" a
+                                             # failure stops the run (nothing downstream can be valid)
 
     @property
     def expensive(self) -> bool:
@@ -107,4 +109,4 @@ class StageRegistry:
         return pd.DataFrame([{"stage": s.name, "title": s.title, "deps": ", ".join(s.deps),
                               "soft_deps": ", ".join(s.soft_deps), "resource": s.resource,
                               "requirement": s.requirement, "reuse": s.reuse, "versioned": s.versioned,
-                              "est": s.est_minutes} for s in self])
+                              "critical": s.critical, "est": s.est_minutes} for s in self])

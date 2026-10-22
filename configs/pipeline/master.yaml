@@ -10,6 +10,9 @@ seed: 2026
 # SETUP_ONLY | PREPARE_DATA | BASELINES | ADVANCED_RESEARCH | FULL_PIPELINE | RESUME | SUBMISSION_ONLY
 run_mode: RESUME
 rebuild_missing: true            # RESUME builds missing cheap stages; false = only continue started stages
+# interactive: a failed critical stage shows its full traceback and stops the run (notebook default)
+# batch: independent stages continue; blocked stages are grouped under the root failure (CLI default)
+failure_policy: batch
 
 paths:
   drive_root: /content/drive/MyDrive/GEMS_2     # durable mirror ("" = no Drive, local run)
