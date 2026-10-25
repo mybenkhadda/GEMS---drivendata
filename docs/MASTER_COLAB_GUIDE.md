@@ -77,6 +77,14 @@ cheaper profile (`REUSE_FULL`). Each SCREEN / VALIDATE candidate is compared wit
 profile, which the planner adds automatically. `pipe.research_dashboard()` and `pipe.shortlist('SCREEN')` show
 what earned the next level. Moving up is your explicit decision.
 
+### M6: model selection without training (section 18b)
+
+`M6_CONFIG` (validated against `configs/m6/model_selection.yaml`) drives a CPU-only analysis of the completed
+FULL runs: artifact audit, one consolidated scorecard, paired per-fold evidence, calibration, nested B0 + B1
+ensembles, complementarity and error analysis, optional postprocessing, and the selection gate against B0 and
+B1. Results go to `MyDrive/GEMS_2/reports/m6/`. Read them with `docs/M6_RESULTS_GUIDE.md`; the design and the
+leakage rules are in `docs/M6_RESEARCH_PLAN.md`.
+
 Feature families, the validation protocol and the experiment lists are in `configs/pipeline/master.yaml`. Override
 them with `Pipeline.from_notebook(CONFIG, DEM_CONFIG, overrides={...})`.
 
