@@ -145,6 +145,7 @@ class PipelineContext:
         if present:
             try:
                 self.sync.push(present)
+                self.sync.flush()                          # stage boundary: Drive ledger up to date
             except OSError as e:
                 print(f"[pipeline] Drive push failed ({e}); re-run the stage or pipe.push_all() before the session ends")
 
@@ -224,6 +225,9 @@ class PipelineContext:
             ctx = load_context5(self.local, with_segments=seg, paths5=paths5, fold_dir=self.local / self.fold_rel,
                                 disc_dir=self.local / self.discovery_rel)
             register_aliases(ctx)
+            if self.drive is not None and self.cfg.get("features.stage", "all") == "lazy":
+                # feature caches are copied from Drive on first read (features.FeatureStore.drive_mirror)
+                ctx.store.drive_mirror = (self.local, self.drive)
             self._cache["ctx5"] = ctx
         return self._cache["ctx5"]
 

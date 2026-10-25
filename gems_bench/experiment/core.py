@@ -158,7 +158,7 @@ class Experiment:
 
     def export(self, force: bool = False):
         out = self._run_stage("export", force)
-        self.rd.finalize_contract(self.config.kind)
+        self.rd.finalize_contract(self.config.kind, self.config.profile)
         self.persist()
         return out
 
@@ -173,6 +173,7 @@ class Experiment:
             return
         try:
             self.drive.push([self.paths.rel(self.rd.path), self.paths.rel(self.paths.registry)])
+            self.drive.flush()
         except OSError as e:
             print(f"[{self.id}] Drive push failed ({e}); re-run exp.persist() before the session ends")
 

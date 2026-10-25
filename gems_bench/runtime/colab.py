@@ -76,6 +76,16 @@ def feature_cache_rels(ctx_or_names, phase2_cache="outputs/benchmark/cache/featu
     return out
 
 
+def stage_features(names, local_root: str = LOCAL_ROOT, drive_root: str = DRIVE_ROOT) -> pd.DataFrame:
+    """Stage only the feature caches a run needs (unchanged files skipped by the ledger). The master pipeline
+    does this automatically with ``features.stage: lazy`` (copy on first read)."""
+    rels = [r for r in feature_cache_rels(names) if (Path(drive_root) / r).exists()]
+    missing = sorted(set(feature_cache_rels(names)) - set(rels))
+    if missing:
+        print(f"[stage] {len(missing)} caches not on Drive (built on demand): {missing[:5]}")
+    return sync(local_root, drive_root).stage_in(rels)
+
+
 def model_map_rels(drive_root: str, exp_dirs: list[str]) -> list[str]:
     """oof.tif / pred.tif / config.json / run.json of legacy experiment folders (models/ excluded)."""
     rels = []

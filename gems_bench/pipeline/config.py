@@ -34,8 +34,15 @@ FLAT = {
     "use_gpu": "gpu.use_gpu", "max_stage_minutes": "gpu.max_stage_minutes",
     "save_figures": "reports.save_figures", "save_intermediate": "reports.save_intermediate",
     "urls": "data.urls", "advanced_experiments": "experiments.advanced",
-    "feature_families": "features.families",
+    "feature_families": "features.families", "feature_stage": "features.stage",
+    # experiment fidelity (SCREEN / VALIDATE / FULL): orthogonal to run_mode, never overloads it
+    "experiment_profile": "experiments.profile", "fidelity_overrides": "experiments.fidelity_overrides",
+    "screening_rules": "experiments.screening", "checkpoint": "experiments.checkpoint",
+    "auto_provision_maps": "experiments.auto_provision_maps",
 }
+
+EXPERIMENT_PROFILES = ("SCREEN", "VALIDATE", "FULL")
+CHECKPOINT_KEYS = ("policy", "save_every_epochs", "sync_every_minutes")
 
 DEFAULTS: dict = {
     "version": 1,
@@ -59,7 +66,9 @@ DEFAULTS: dict = {
         "ignore_km": 1.0, "eval_km": 10.0,
     },
     "eda": {"max_dim": 2048, "seed": 7},
-    "features": {"families": ["raw", "phase2", "phase2_eda", "phase4_rs_used"], "extra": []},
+    # stage: all (copy every required cache to local disk before the stage) | lazy (copy a cache file from Drive
+    # the first time a run reads it; validation reads Drive headers)
+    "features": {"families": ["raw", "phase2", "phase2_eda", "phase4_rs_used"], "extra": [], "stage": "all"},
     "dem": {"enabled": False, "mode": "pilot", "inventory": True, "download": False, "pilot_tiles": 24,
             "max_tiles": 30, "max_gib": 15.0, "download_only_intersecting": True, "compute_morphology": True,
             "aggregate_to_100m": True, "inspect_headers": 10, "experiment": "f1_dem_pilot"},
@@ -67,7 +76,11 @@ DEFAULTS: dict = {
                                  "e1_gsn_parity"],
                     "scoreboard_models": ["G1", "G3", "RS05_G3_noSS_RS", "CNN_A_dti", "DL00_CNN_B_dti",
                                           "DL02_CNN_TMGB_dti", "P4_B_gated"],
-                    "ensemble": "g1_ensemble", "submission": "z_submission", "stop_on_failure": False},
+                    "ensemble": "g1_ensemble", "submission": "z_submission", "stop_on_failure": False,
+                    # fidelity of cnn5 research runs; FULL = committed YAMLs unchanged (historical behaviour)
+                    "profile": "FULL", "fidelity_overrides": {}, "screening": {},
+                    "auto_provision_maps": True,
+                    "checkpoint": {"policy": "best_and_latest", "save_every_epochs": 5, "sync_every_minutes": 15}},
     "gpu": {"use_gpu": True, "max_stage_minutes": 0, "overrides": {}},
     "sync": {"push_after_stage": True},
     "reports": {"save_figures": True, "save_intermediate": True},
@@ -103,7 +116,8 @@ def _deep_merge(base: dict, over: dict, path: str = "") -> dict:
 
 def _free_form(path: str) -> bool:
     """Sections whose keys are user-defined (URLs per file, GPU overrides)."""
-    return path in ("data.urls", "gpu.overrides")
+    return path in ("data.urls", "gpu.overrides", "experiments.fidelity_overrides", "experiments.screening",
+                    "experiments.checkpoint")
 
 
 def _set(d: dict, dotted: str, value) -> None:
@@ -189,6 +203,8 @@ class PipelineConfig:
         bad = [f for f in fam if f not in FEATURE_FAMILIES]
         if bad:
             raise ConfigError(f"unknown feature families {bad}; valid: {FEATURE_FAMILIES}")
+        if r["features"].get("stage", "all") not in ("all", "lazy"):
+            raise ConfigError("features.stage must be 'all' or 'lazy'")
         v = r["validation"]
         if int(v["n_folds"]) < 2 or int(v["n_discovery"]) < 1:
             raise ConfigError("validation.n_folds must be >= 2 and n_discovery >= 1")
@@ -216,6 +232,41 @@ class PipelineConfig:
         sm = [m for m in r["experiments"]["scoreboard_models"] if m not in BY_NAME and m not in RECIPES]
         if sm:
             raise ConfigError(f"experiments.scoreboard_models {sm} unknown")
+        self._validate_fidelity(r["experiments"])
+
+    @staticmethod
+    def _validate_fidelity(e: dict) -> None:
+        from .fidelity import FidelityError, make_fidelity
+        from .screening import DEFAULT_RULES
+
+        if not isinstance(e.get("profile"), str):
+            raise ConfigError("experiments.profile must be one of SCREEN / VALIDATE / FULL")
+        e["profile"] = e["profile"].upper()
+        if e["profile"] not in EXPERIMENT_PROFILES:
+            raise ConfigError(f"experiments.profile '{e['profile']}' not in {EXPERIMENT_PROFILES} "
+                              "(run_mode chooses the stages; the profile chooses the evidence level)")
+        ov = e.get("fidelity_overrides") or {}
+        if not isinstance(ov, dict):
+            raise ConfigError("experiments.fidelity_overrides must be {PROFILE: {knob: value}}")
+        for p, knobs in ov.items():
+            if str(p).upper() not in EXPERIMENT_PROFILES or not isinstance(knobs, dict):
+                raise ConfigError(f"experiments.fidelity_overrides key '{p}' must be a profile with a mapping")
+            try:
+                make_fidelity(str(p).upper(), knobs)
+            except FidelityError as err:
+                raise ConfigError(f"experiments.fidelity_overrides.{p}: {err}") from None
+        e["fidelity_overrides"] = {str(p).upper(): v for p, v in ov.items()}
+        bad = [k for k in (e.get("screening") or {}) if k not in DEFAULT_RULES]
+        if bad:
+            raise ConfigError(f"experiments.screening keys {bad} unknown; valid: {sorted(DEFAULT_RULES)}")
+        ck = e.get("checkpoint") or {}
+        bad = [k for k in ck if k not in CHECKPOINT_KEYS]
+        if bad:
+            raise ConfigError(f"experiments.checkpoint keys {bad} unknown; valid: {CHECKPOINT_KEYS}")
+        if ck.get("policy", "best_and_latest") not in ("best_and_latest", "rotating"):
+            raise ConfigError("experiments.checkpoint.policy must be 'best_and_latest' or 'rotating'")
+        if not isinstance(e.get("auto_provision_maps"), bool):
+            raise ConfigError("experiments.auto_provision_maps must be true/false")
 
     # -- access -------------------------------------------------------------------
     def get(self, dotted: str, default=None):

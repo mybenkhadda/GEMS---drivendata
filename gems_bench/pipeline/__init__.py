@@ -8,6 +8,10 @@
     pipe.explain("geological_eda")    # error, file:line, recovery, traceback of a stage (this or a past session)
     pipe.failure_report()             # root failures and the stages each one blocks
     pipe.dashboard()
+    pipe.inventory()                  # read-only: every experiment folder, profile, units, reusability, next action
+    pipe.plan_experiments()           # read-only: reuse-first plan at experiments.profile (SCREEN / VALIDATE / FULL)
+    pipe.compare_results()            # read-only: metrics comparison, paired deltas, shortlist -> reports/experiment_screening
+    pipe.research_dashboard()
 
 Modules: ``config`` (validated schema), ``registry`` (stage declarations), ``dependencies`` (graph, modes),
 ``manifests`` (stage records on Drive), ``executor`` (skip / build / resume / incompatible / blocked),
@@ -221,6 +225,47 @@ class Pipeline:
             except FileNotFoundError as e:
                 st.append({"error": str(e)})
         return pd.concat([cat, pd.DataFrame(st)], axis=1)
+
+    # -- research economy (fidelity, reuse, screening) -------------------------
+    def inventory(self, save: bool = True):
+        """Read-only table of every experiment folder on Drive: profile, units, metrics, reusability, next action."""
+        from .inventory import experiment_inventory
+
+        inv = experiment_inventory(self.pc)
+        if save:
+            inv.to_csv(self.pc.reports / "experiment_inventory.csv", index=False)
+            self.pc.push(["reports/pipeline/experiment_inventory.csv"])
+        return inv
+
+    def plan_experiments(self, profile: str | None = None, stems: list[str] | None = None):
+        """What ``advanced_models`` would do at ``profile`` (default: experiments.profile); read-only."""
+        from .experiments import plan_experiments
+
+        return plan_experiments(self.pc, stems, profile)
+
+    def compare_results(self):
+        """Read-only metrics comparison + paired deltas + resource usage + shortlist, exported to
+        reports/experiment_screening (CSV, PNG/SVG, SCREENING_REPORT.md). No training."""
+        from .screening import export_screening_report
+
+        return export_screening_report(self.pc)
+
+    def shortlist(self, from_profile: str = "SCREEN") -> list[str]:
+        """Experiments recommended for the next fidelity level (you decide whether to run them)."""
+        from .screening import shortlisted
+
+        return shortlisted(self.pc, from_profile)
+
+    def research_dashboard(self, save: bool = True) -> dict:
+        from .screening import research_dashboard
+
+        return research_dashboard(self.pc, save=save)
+
+    def ensure_map(self, name: str = "B0_lineament") -> dict:
+        """Find / verify / (re)build a label-free dependency map with its original CPU recipe."""
+        from .experiments import ensure_label_free_map
+
+        return ensure_label_free_map(self.pc, name, requested_by="manual")
 
 
 __all__ = ["Pipeline", "PipelineConfig", "PipelineContext", "PipelineStop", "StageFailed", "GPURequired",

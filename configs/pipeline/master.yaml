@@ -62,6 +62,7 @@ features:
   # raw | phase2 | phase2_eda | phase4_rs_used | phase4_rs_all | phase5_profiles | dem
   families: [raw, phase2, phase2_eda, phase4_rs_used]
   extra: []
+  stage: all                     # all = copy every required cache before the stage | lazy = copy on first read
 
 dem:
   enabled: false
@@ -83,6 +84,15 @@ experiments:
   ensemble: g1_ensemble
   submission: z_submission
   stop_on_failure: false
+  # Experiment fidelity (gems_bench.pipeline.fidelity; docs/EXPERIMENT_FIDELITY_AND_COST.md), orthogonal to run_mode:
+  #   SCREEN   1 fold, no discovery, <= 5 epochs x 80 steps, scored on 25 % of the held-out fold (proxy metrics)
+  #   VALIDATE 3 folds, discovery split 0, <= 10 epochs x 150 steps (proxy metrics)
+  #   FULL     the committed experiment YAMLs unchanged (section-17 evaluation; the only promotion-eligible level)
+  profile: FULL
+  fidelity_overrides: {}         # e.g. {SCREEN: {max_epochs: 4, validation_fraction: 0.5}}
+  screening: {}                  # shortlist heuristics, keys of pipeline.screening.DEFAULT_RULES
+  auto_provision_maps: true      # build a missing label-free dependency map (B0_lineament for B1) on CPU
+  checkpoint: {policy: best_and_latest, save_every_epochs: 5, sync_every_minutes: 15}
 
 gpu:
   use_gpu: true

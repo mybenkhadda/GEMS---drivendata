@@ -11,6 +11,8 @@ Added
 * full-state resume from ``CheckpointManager`` (model, optimizer, scheduler, scaler, teacher, NumPy / torch /
   CUDA RNG, best-so-far, history, current batch and accumulation): an interrupted Colab session continues at
   the last saved epoch with an identical sample stream;
+* checkpoint selection on the best *finite* inner-validation score (a NaN epoch counts as stale, never best);
+  without an inner-validation zone (pseudo-discovery: fixed epochs) the final model is the last epoch;
 * ``deadline`` (``time.monotonic`` seconds): stop at an epoch boundary, checkpoint, raise TrainingInterrupted;
 * CUDA OOM back-off: halve the batch, double ``grad_accum`` (effective batch unchanged), up to ``oom_retries``;
 * collapse guard: stop when the mean probability on unlabeled training pixels exceeds
@@ -33,6 +35,14 @@ from ..phase4_training import _forward, make_batch4, predict_mask4
 
 class TrainingInterrupted(RuntimeError):
     """Raised at an epoch boundary when the runtime budget is spent; the checkpoint is already saved."""
+
+
+def improved(score, best) -> bool:
+    """Checkpoint-selection rule: only a finite score strictly above the best so far (NaN / inf never wins)."""
+    try:
+        return bool(np.isfinite(score) and score > best)
+    except TypeError:
+        return False
 
 
 def _rng_state(rng) -> dict:
@@ -172,7 +182,8 @@ def train5(spec, gstack, gaux, aux_names: list[str], allowed, positives, valid, 
                        inner_dti_raw=dti_components(pv, inner_truth, eval_mask=inner_mask).dti,
                        inner_eval_s=round(time.perf_counter() - t1, 1))
             score = row["inner_dti_binary_best"] if spec.select_by == "binary_area" else row["inner_dti_raw"]
-            if score > st["best"]:
+            row["inner_score_valid"] = bool(np.isfinite(score))
+            if improved(score, st["best"]):
                 st.update(best=score, best_ep=ep + 1, stale=0,
                           best_state={k: v.detach().cpu().clone() for k, v in model.state_dict().items()})
             else:

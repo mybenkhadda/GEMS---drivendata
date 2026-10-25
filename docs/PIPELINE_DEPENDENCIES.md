@@ -53,11 +53,24 @@ reports (deps: bootstrap; soft: every stage)                        ┄ = soft d
 | `feature_store` family `phase2_eda` | EDA groups `lineaments`, `crossmodal` | `eda:*` features read `outputs/eda/features/{lineament_maps,crossmodal_orientation}.tif` (`stages.FAMILY_EDA_GROUPS`). If they are missing, this family is deferred and named in a `PipelineStop`; every other family is still built |
 | `dem_pilot` | `dem_inventory`, `feature_store` | the pilot runner uses the research context; the selection optionally uses G1 / CNN maps |
 | `baselines` | `spatial_folds`, `discovery_splits` | each recipe builds the features it needs (`baselines._ensure_features`); a recipe with `eda:*` inputs (B0_lineament, any `eda:` channel) stops with an explicit message when the EDA is missing, and other baselines continue |
-| `advanced_models` | `feature_store`, `baselines` | experiments need the full feature bank; B1 background evidence is the `B0_lineament` map; every `cnn5` base spec is `P4_B_gated` |
+| `advanced_models` | `feature_store`, `baselines` | experiments need the full feature bank; every `cnn5` base spec is `P4_B_gated`. B1's background evidence is the label-free `B0_lineament` map: `experiments.ensure_label_free_map` finds and verifies it (staged from Drive) or builds it with its original CPU recipe before B1 starts (`auto_provision_maps`). A supervised model's map is never substituted. The stage is `always_run` when enabled: `advanced_run` reads the experiment inventory, plans (`REUSE_FULL` / `DONE` / `RESUME` / `RUN` / `NOT_NEEDED`) at `experiments.profile`, and trains only `RUN` / `RESUME` items |
 | `discovery_validation` | `baselines` | scores every model with an OOF map under one protocol |
 | `ensemble` | `discovery_validation` | members need an OOF map plus every discovery map |
 | `full_inference` | `feature_store` | the registry champion's fold models predict from feature stacks |
 | `submission` | `full_inference` | exports the full-region map |
+
+### Experiment-level dependencies (inside `advanced_models`)
+
+| experiment | needs | at SCREEN / VALIDATE also needs |
+|---|---|---|
+| `b0_reference` | `P4_B_gated` spec (snapshot fallback); its own control `P4_B_gated` map for the FULL delta (`INCOMPARABLE` when absent) | – (it *is* the matched control) |
+| `b1_bg_weight` | `B0_lineament` map (auto-provisioned, CPU) | `b0_reference` at the same profile |
+| `b2_*`, `c1_geometry_heads`, `d2_*`, `e1_gsn_parity` | – | `b0_reference` at the same profile |
+| `c2_*`, `c3_*` | – | `c1_geometry_heads` at the same profile |
+| `e2_*` … `e5_*` | – | `e1_gsn_parity` at the same profile |
+
+A SCREEN or VALIDATE result never feeds a downstream stage: `discovery_validation`, `ensemble` and
+`full_inference` see only FULL maps (`manifest["maps"]`).
 
 ### G1 readiness without the advanced feature bank
 
