@@ -196,7 +196,14 @@ class P4Context(P3Context):
                 return p
         return None
 
+    @staticmethod
+    def disc_key(model: str, d: int) -> str:
+        """``_maps`` key of an in-memory discovery map (M6 registers memory-mapped / derived maps under it)."""
+        return f"_disc:{model}:{d}"
+
     def discovery_pred(self, model: str, d: int) -> np.ndarray | None:
+        if self.disc_key(model, d) in self._maps:
+            return self._maps[self.disc_key(model, d)]
         if model == "B0_lineament":
             return super().discovery_pred(model, d)       # label-free map, valid for every split
         p = self._disc_path(model, d)
@@ -205,7 +212,8 @@ class P4Context(P3Context):
     def has_discovery(self, model: str) -> bool:
         if model == "B0_lineament":
             return True
-        return all(self._disc_path(model, d) is not None for d in range(self.splits.n_splits))
+        return all(self.disc_key(model, d) in self._maps or self._disc_path(model, d) is not None
+                   for d in range(self.splits.n_splits))
 
 
 def load_yaml(path: Path) -> dict:

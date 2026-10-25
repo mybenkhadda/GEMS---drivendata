@@ -1,0 +1,97 @@
+# M6: scientific model selection, ensemble optimisation and geological error analysis on EXISTING FULL runs.
+# No neural training. Loaded by gems_bench.pipeline.m6.load_m6_config; the notebook's M6_CONFIG overrides these
+# keys (unknown keys are rejected, as in configs/pipeline/master.yaml). Outputs: <drive_root>/reports/m6/.
+version: 1
+enabled: true
+mode: ANALYZE_EXISTING            # the only mode: M6 reads saved predictions, it never trains
+train_models: false               # must stay false (refused otherwise)
+
+# experiment stems (configs/experiments/<stem>.yaml); the map name is each YAML's model_name
+models: [b0_reference, b1_bg_weight, b2_nnpu_p010, c1_geometry_heads]
+primary_pair: [b0_reference, b1_bg_weight]
+controls: [b0_reference, b1_bg_weight]        # every candidate is gated against both
+optional_models: [e1_gsn_parity]              # inventoried only (parity check, not a candidate)
+baselines: [B0_lineament, G1, G3]             # inventoried; COMPLETE ones join the comparison as reference rows
+compare_baselines: true
+
+run_calibration: true
+run_ensemble: true
+run_complementarity: true
+run_postprocessing: true
+run_promotion_audit: true
+
+overwrite_existing: false         # false: every analysis unit with a matching fingerprint is reused
+save_figures: true
+save_csv: true
+save_parquet: true
+save_rasters: selected            # selected (primary ensemble + recommended candidate) | all | none
+output_dir: reports/m6            # relative to the workspace (mirrored to Drive)
+cache_dir: cache/m6               # local memory-mapped copies of prediction rasters (never pushed)
+
+# shared evaluation protocol (must equal the section-17 protocol: configs/validation/phase5_protocol.yaml)
+match_frac: 0.05
+budgets: [0.01, 0.02, 0.05, 0.10]           # identical-area comparisons (complementarity)
+policies: [excl, retained_fp]
+primary_policy: excl
+
+uncertainty:
+  block_km: null                  # null = the folds' own block size (fold_params.json block_km, 20 km)
+  n_boot: 1000
+  seed: 2026
+
+calibration:
+  models: primary_pair            # primary_pair | all
+  families: [raw, rank, robust_quantile, linear, temperature, isotonic, hard_threshold]
+  threshold_transfer: true
+
+ensemble:
+  weights: [0.0, 0.25, 0.5, 0.75, 1.0]
+  normalisations: [rank, robust]
+  discovery_weights: [geo_masked, loso]        # first = primary; both are reported
+  refine: true                    # finer local grid around each fold's own dev-selected weight (dev folds only)
+  refine_step: 0.05
+  refine_halfwidth: 0.2
+  extended_sets:                  # considered only after B0 + B1; must beat the best pair candidate
+    - [b0_reference, b1_bg_weight, b2_nnpu_p010]
+    - [b0_reference, b1_bg_weight, c1_geometry_heads]
+    - [b0_reference, b1_bg_weight, b2_nnpu_p010, c1_geometry_heads]
+  simplex_step: 0.25
+  min_member_gain: 0.003          # an extra member must add >= this geo AND not reduce primary discovery DTI
+
+complementarity:
+  sample_px: 300000
+  recovered_k: 0.5                # segment / system counts as recovered at mean TP support >= 0.5
+  contrast_bands: []              # [] = first bands whose names contain mag / grav / bouguer
+  case_studies:
+    n_per_kind: 2
+    half_px: 60                   # 12 km windows at 100 m
+    context_band: det_elev        # hillshade underlay
+    geophysics_band: null         # null = first contrast band
+
+postprocessing:
+  models: primary_pair            # primary_pair | primary_pair+ensemble
+  fracs: [0.02, 0.05, 0.10]
+  max_short_recall_drop: 0.01     # an operation that costs more < 2 km recall is not combined
+  grid:
+    remove_small: [{min_px: 3}, {min_px: 6}, {min_px: 12}]
+    close_gaps: [{radius_px: 1}, {radius_px: 2}]
+    directional_close: [{length_px: 5}, {length_px: 9}]
+    link_endpoints: [{max_gap_px: 4}, {max_gap_px: 8}]
+    skeleton_width: [{width_px: 1}, {width_px: 2}]
+    min_length: [{min_km: 0.5}, {min_km: 1.0}]
+    orientation_filter: [{min_coherence: 0.3}, {min_coherence: 0.5}]
+
+gate:
+  rules: {}                       # overrides of the section-17 rules (evaluation.scoreboard.DEFAULT_RULES)
+  max_short_recall_drop: 0.01
+  max_area_ratio: 1.5
+  max_inference_cost_ratio: 4.0
+  min_p_positive: 0.5
+
+# Numbers from the previous notebook review. Used ONLY to report discrepancies against the persisted and
+# recomputed scores (tables/reference_check.csv); never used in any computation or decision.
+reference_observations:
+  P5_B0_gated: {geo_dti: 0.16456, worst_fold: 0.15341, discovery_dti: 0.20304, retained_fp_dti: 0.09635, short_recall: 0.19240}
+  P5_B1_bgw: {geo_dti: 0.16788, worst_fold: 0.16309, discovery_dti: 0.20860, retained_fp_dti: 0.09128, short_recall: 0.17954}
+  P5_B2_nnpu_p010: {geo_dti: 0.13618, worst_fold: 0.12436, discovery_dti: 0.20808, retained_fp_dti: 0.09003, short_recall: 0.15444}
+  P5_C1_heads: {geo_dti: 0.14246, worst_fold: 0.11691, discovery_dti: 0.19573, retained_fp_dti: 0.09512, short_recall: 0.14651}

@@ -12,6 +12,7 @@
     pipe.plan_experiments()           # read-only: reuse-first plan at experiments.profile (SCREEN / VALIDATE / FULL)
     pipe.compare_results()            # read-only: metrics comparison, paired deltas, shortlist -> reports/experiment_screening
     pipe.research_dashboard()
+    pipe.m6(M6_CONFIG).run()         # M6: audit, paired comparison, calibration, ensembles, errors, gate (no training)
 
 Modules: ``config`` (validated schema), ``registry`` (stage declarations), ``dependencies`` (graph, modes),
 ``manifests`` (stage records on Drive), ``executor`` (skip / build / resume / incompatible / blocked),
@@ -266,6 +267,13 @@ class Pipeline:
         from .experiments import ensure_label_free_map
 
         return ensure_label_free_map(self.pc, name, requested_by="manual")
+
+    # -- M6: model selection on existing FULL runs (no training) ------------------
+    def m6(self, config: dict | None = None):
+        """M6 analysis object (``.run()`` / single phases); reads saved FULL predictions, writes reports/m6."""
+        from .m6 import M6Analysis
+
+        return M6Analysis(self.pc, config)
 
 
 __all__ = ["Pipeline", "PipelineConfig", "PipelineContext", "PipelineStop", "StageFailed", "GPURequired",

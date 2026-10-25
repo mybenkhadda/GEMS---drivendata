@@ -1,136 +1,87 @@
-# Next-session handoff (2026-10-25: experiment fidelity, reuse, cheaper Colab runs)
+# Next-session handoff (2026-10-25: M6 model selection on existing FULL runs)
 
-Code authored only. **Nothing was executed**: no notebook, script, test, training or download. Every runtime
-claim below comes from the saved Colab notebook (commits fae15c4 / 8bccce0 / 88c97ed, the run at code commit
-8bccce0 on 2026-10-22) or is marked as unverified.
+Code authored only. **Nothing was executed**: no notebook, script, test, training, raster processing or download.
+No M6 number exists yet. The scoreboard quoted in `docs/M6_RESEARCH_PLAN.md` comes from the previous notebook
+review; it lives in `configs/m6/model_selection.yaml` under `reference_observations` and is used only for
+`reference_check.csv`. Branch: `m6-model-selection` (from `origin/main` 8bab38b).
 
-## State found (saved notebook, 88c97ed)
+## What M6 is
 
-| experiment | id | evidence in the saved log |
+M6 is section **18b** of the master notebook (`pipe.m6(M6_CONFIG).run()`). It is CPU-only, reads the saved FULL
+predictions of `b0_reference`, `b1_bg_weight`, `b2_nnpu_p010` and `c1_geometry_heads` (model names
+`P5_B0_gated`, `P5_B1_bgw`, `P5_B2_nnpu_p010`, `P5_C1_heads`), and writes only to `reports/m6/` (pushed to Drive)
+and `cache/m6/` (local `.npy`).
+
+| unit | module | output tables (reports/m6/tables unless noted) |
 |---|---|---|
-| `b0_reference` | `b0_reference__d54e938a` | 3 CV folds (17 epochs) + 3 discovery splits (11) trained, evaluated, exported; train 57 min. Evaluated with **1 map**: its control `P4_B_gated` is not on Drive, so its delta is `INCOMPARABLE` |
-| `b1_bg_weight` | `b1_bg_weight__7755635b` | failed: `B0_lineament` map not available |
-| `b2_nnpu_p010` | `b2_nnpu_p010__e0173a9a` | complete (2 maps: candidate + `P5_B0_gated`); train 36 min |
-| `c1_geometry_heads` | `c1_geometry_heads__9a77180d` | complete (2 maps); train 55 min |
-| `e1_gsn_parity` | `e1_gsn_parity__b8b8c3db` | fold 0 at epoch 14 when the log ends; completion not established |
+| audit (always re-run) | `evaluation/comparative.py` | `../artifact_inventory.csv`, `../provenance_audit.csv`, `../model_compatibility.csv`, `../missing_artifacts.csv` |
+| scorecard | `scoreboard.evaluate_models` (reused) | `processed/scorecard/*` |
+| paired | `comparative.py` | `model_comparison`, `fold_metrics`, `discovery_metrics`, `paired_deltas`, `paired_summary`, `spatial_bootstrap`, `reference_check`, `persisted_scores` |
+| calibration | `evaluation/calibration.py` (+ `p3.transforms`) | `calibration_results`, `calibration_per_fold`, `calibration_invariance`, `threshold_transfer`, `score_distribution` |
+| ensembles | `discovery/nested_selection.py` (+ `ensemble5` conventions) | `ensemble_candidates`, `ensemble_selection_*`, `ensemble_index_audit`, `ensemble_bootstrap` |
+| complementarity | `evaluation/complementarity.py`, `evaluation/geological_errors.py` | `model_complementarity`, `fault_system_analysis`, `fault_system_summary`, `discovery_system_classes`, `fp_distance_profile`, `error_attribution`, `case_study_windows` |
+| postprocessing | `postprocess/topology.py` | `postprocessing_ablation`, `postprocessing_selection_audit` |
+| gate | `evaluation/selection_gate.py` (wraps section-17 `promotion_decision`) | `promotion_decisions`, `manifests/recommendation.json` |
+| report | `pipeline/m6_report.py` | `M6_RESEARCH_REPORT.md` |
 
-Baseline status in that run: every legacy baseline (B0_lineament, G1, G3, RS05, CNN_A, DL00, DL02, P4_B_gated)
-= `NOT_AVAILABLE` ("no run folder"), and `train_baselines` was empty. Feature store: 139 caches (raw 19,
-phase2 48, phase2_eda 5, phase4_rs 67).
+Orchestration: `gems_bench/pipeline/m6.py` provides the config loader with unknown-key rejection,
+`Workspace` (atomic CSV / Parquet / JSON / GeoTIFF, per-unit fingerprints and outputs), `PredictionCache`
+(memory-mapped `.npy`), `M6Analysis` and `pipe.m6()`.
 
-## Findings
+## Decisions made this session
 
-* **B1 root cause.** The `B0_lineament` recipe exists (label-free: rank-normalised `eda:fused_score`, CPU), but
-  nothing built it: it was not in `train_baselines`, and `check_prerequisites` only raised. Fix:
-  `experiments.ensure_label_free_map`. It looks for the map in the session context, then on Drive (staged +
-  `baseline_status` verification: run finished, native grid, fold provenance). Otherwise it builds the map with the
-  original recipe (`baselines.train_baseline`), pushes it, and re-verifies. Only `losses.pu.LABEL_FREE_MAPS` are
-  accepted. An `INCOMPATIBLE` copy is never overwritten. The earlier failure stopped in the prerequisite check,
-  before `Experiment` opened, so no B1 folder should exist. A FULL B1 run would use `b1_bg_weight__7755635b` (its
-  config hash is unchanged); B1 at SCREEN gets its own `__screen__` folder.
-* **E1 audit.** `e1_gsn_parity` *is* routed to `GeoStructureNet`: `type: geostructurenet`, gated fusion, no
-  long-range block, no context. Widths 24/32 equal P4_B_gated's legacy spec (`dual`, enc 24, dec 32, gated,
-  context false). `GeoStructureNet.__init__` registers the same blocks (`Encoder` ×2 → `GatedFuse` ×5 →
-  `Decoder` → head) in the same order as `GeoUNet` with the same seed, so the initial weights and the forward pass
-  are identical. The identical fold-0 losses and inner DTI (14 epochs, 4 decimals) are therefore the **expected
-  parity result**, not a routing bug. No model was changed. E1 is now catalogued as `role="parity_check"`, removed
-  from the notebook's default candidate list, and given a `PARITY_CONFIRMED` shortlist decision. A full E1 run
-  costs about 60 GPU min and adds no evidence beyond parity. Test:
-  `tests/test_fidelity.py::test_e1_parity_model_is_numerically_identical_at_init`.
-
-## Changes in this session
-
-New modules:
-
-* `gems_bench/pipeline/fidelity.py`: SCREEN / VALIDATE / FULL profiles, validation, `apply_fidelity`
-  (semantic block, FULL = YAML unchanged), deterministic leakage-free block subsampling, mask digests, protocol
-  hash, eligibility.
-* `gems_bench/pipeline/inventory.py`: read-only `experiment_inventory` (profile, compatibility against the
-  current config, units cross-checked with final model files, metrics, reusable, next action),
-  `remaining_units`, `last_checkpoint`.
-* `gems_bench/pipeline/screening.py`: `evaluate_fidelity_run` (proxy metrics, no registry),
-  `metrics_comparison`, `paired_deltas` (identical protocols only; `NOT_EVALUATED` for missing values),
-  `resource_usage`, `shortlist` (configurable triage heuristics, recorded reasons), `export_screening_report`
-  (→ `reports/experiment_screening/`), `research_dashboard`.
-* `gems_bench/pipeline/resource_budget.py`: static GPU-memory estimate → `data_on_gpu` placement; GPU-minute
-  estimates per profile.
-
-Modified:
-
-* `experiment/config.py`: `profile`; non-FULL ids `<name>__<profile>__<hash8>`.
-* `experiment/runners/cnn5.py`: budget caps, selected folds / splits, fidelity masks, checkpoint policy from
-  `runtime.checkpoint`, one shared tensor stack per stage, non-FULL maps only in `manifest["fidelity_maps"]`,
-  proxy evaluation below FULL.
-* `experiment/core.py`, `artifacts/store.py`: contract stubs say `not_evaluated` below FULL; ledger flush on
-  persist.
-* `training/cv.py`: `fold_ids` / `split_ids` / `fidelity` / `ckpt_policy`; integrity-checked unit skip
-  (`final_ok`); `fidelity_coverage.csv`; stack placement honours `data_on_gpu`; unit-scoped Drive pushes.
-* `training/checkpoint.py`: `best_and_latest` policy (latest + prev + best, pointer sha256, fallback, legacy
-  `_ep` resume). `rotating` is kept as the class default for older callers.
-* `training/trainer.py`: `improved()` (NaN / inf never best).
-* `artifacts/sync.py`: include / exclude filters, `STAGE_SCOPES`, `push_stage`, throttled Drive ledger +
-  `flush()`.
-* `features/__init__.py`: `FeatureStore.drive_mirror` lazy staging (copy on first read).
-* `pipeline/config.py`, `configs/pipeline/master.yaml`: `experiments.{profile, fidelity_overrides, screening,
-  auto_provision_maps, checkpoint}`, `features.stage`; flat keys `experiment_profile`, `fidelity_overrides`,
-  `screening_rules`, `checkpoint`, `auto_provision_maps`, `feature_stage`.
-* `pipeline/experiments.py`: roles, `control_stem`, `session_fidelity`, profile-aware `experiment_config`,
-  `ensure_label_free_map`, `plan_experiments` (reuse-first; adds matched controls only when needed).
-* `pipeline/stages.py`: `advanced_models` = `always_run` (plans, trains only RUN / RESUME, writes the
-  screening report); profile-aware validate / fingerprint (FULL fingerprint unchanged); lazy feature
-  validation / stage-in.
-* `pipeline/__init__.py`: `pipe.inventory()`, `plan_experiments()`, `compare_results()`, `shortlist()`,
-  `research_dashboard()`, `ensure_map()`.
-* `pipeline/context.py`: lazy feature mirror on `ctx5`; ledger flush after stage pushes.
-* `runtime/colab.py`: `stage_features(names)`.
-* Notebook `GEMS_MASTER_PIPELINE.ipynb`: fidelity controls (SCREEN default, E1 out of the candidate list,
-  `feature_stage='lazy'`), section 14–15 rewritten (inventory → compare → plan → step), a new dashboard /
-  promotion cell. Saved outputs were cleared; the run with outputs is commit 88c97ed.
-* Tests (authored, **not run**): `tests/test_fidelity.py`.
-* Docs: `EXPERIMENT_FIDELITY_AND_COST.md` (new), `MASTER_COLAB_GUIDE.md`, `PIPELINE_DEPENDENCIES.md`,
-  `ARTIFACT_RECOVERY.md`, this file.
-
-## Architectural decisions
-
-1. FULL ≡ the committed YAML: no fidelity block, the same config hash, the same ids, so old runs stay reusable
-   and resumable. Fidelity applies to `cnn5` only.
-2. Fidelity is semantic (it changes the id); the checkpoint policy and cadence are runtime (they never change
-   the id).
-3. Proxy metrics never share a table, map registry or gate with section-17 results.
-4. `training_fraction` defaults to 1.0 in every profile: area does not drive GPU cost (documented).
-5. Shortlists recommend; moving up a level and promoting for submission are explicit human steps.
-6. `advanced_models` is always run when enabled: the planner, not the executor fingerprint, decides reuse.
+1. The ensemble selector lives in `gems_bench/discovery/nested_selection.py` (next to `ensemble5.py`). A
+   `gems_bench/ensemble/` package would shadow the existing `gems_bench/ensemble.py` module.
+2. The only core change: `P4Context.discovery_pred` / `has_discovery` first check `_maps["_disc:<model>:<d>"]`,
+   so memory-mapped and derived discovery maps are served without re-reading GeoTIFFs. Behaviour is unchanged
+   when the key is absent.
+3. `M6_CONFIG` has its own schema (`configs/m6/model_selection.yaml`) instead of extending `PipelineConfig`.
+4. Prespecified primary candidate: B0+B1 nested weighted rank with `geo_masked` discovery weights. The final
+   recommendation rule is "highest primary discovery DTI among candidates that PROMOTE against both B0 and B1",
+   otherwise "no candidate passes".
+5. A leakage subtlety was fixed in design: a fold's coarse weight choice is restricted to the coarse grid, because
+   weights added by another fold's refinement were centred using this fold's labels.
+6. The audit is strictly read-only: `RegistryView` reads `registry.csv` (`ModelRegistry` would create folders).
+7. Rasters: `save_rasters: selected` stores only the primary ensemble (OOF + 3 discovery maps), the area-budget
+   masks of B0 / B1 and the best postprocessed masks. Other candidates are reproducible from
+   `manifests/ensemble_weights.json`.
 
 ## Run next
 
-1. Locally: `pytest tests/test_fidelity.py tests/test_pipeline_engine.py tests/test_pipeline_recovery.py
-   tests/test_phase5_infrastructure.py tests/test_phase5_science.py`.
-2. Colab (GPU): open the master notebook from `main`, keep `experiment_profile='SCREEN'`, run all. Expected plan:
-   `b2_nnpu_p010` / `c1_geometry_heads` → `REUSE_FULL`; `b1_bg_weight` → `RUN` (B0_lineament built first, CPU);
-   `b0_reference` → `RUN` at SCREEN (matched control).
-3. Read `reports/experiment_screening/SCREENING_REPORT.md`, then promote shortlisted names to VALIDATE
-   explicitly.
+1. Locally: `pytest tests/test_m6.py`, then the earlier suites (`tests/test_fidelity.py`,
+   `test_pipeline_engine.py`, `test_pipeline_recovery.py`, `test_phase5_infrastructure.py`,
+   `test_phase5_science.py`). None of these has ever been run.
+2. Colab (a CPU runtime is enough; high-RAM recommended): open the notebook from `m6-model-selection` (or `main`
+   after merge), run cells 1–4 and sections 7–12 (cached), then section 18b. Expect the audit to show B0, B2, C1
+   as COMPLETE. **B1 is the open question:** the 88c97ed log showed B1 failing on `B0_lineament`, but the
+   reviewed scoreboard has B1 numbers, so a FULL B1 run must exist on Drive. If the audit says MISSING / PARTIAL,
+   the error names the gap.
+3. Read `reports/m6/M6_RESEARCH_REPORT.md`, starting with "Central question" and `reference_check`.
 
-## Unverified at runtime
+## Unverified at runtime (everything)
 
-* The whole fidelity path (caps, masks, proxy evaluation, `fidelity_maps`) on Colab.
-* `BinaryCurve` on a block-subsampled mask (bbox padding near block edges) and on `withheld & labels` truth.
-* `best_and_latest` resume on Drive FUSE (os.replace of a 136 MB file, pointer sha256 timing).
-* Lazy feature staging: `has()` true for Drive-only files during `ensure_channels` / `build` skips; the first-read
-  copy time on FUSE.
-* `placement_overrides` thresholds (estimates; the T4 run measured peaks in `gpu_memory_profile.csv`).
-* `ensure_label_free_map` → `train_baseline('B0_lineament')` on the rebuilt EDA (`eda:fused_score` present?).
-* Whether `phase4_context` resolves `B0_lineament` from the regenerated canonical folder (expected:
-  `b0_lineament_fused_s2026/oof.tif`).
-* Dashboard Drive-usage walk: rglob over `experiments/` on FUSE may take tens of seconds.
+* Every module above. Specific risks:
+  * `fold_metrics` assumes the `frac_fold<k>` columns of `budget.crossfit_area`.
+  * `discovery_metrics` assumes the `disc_per_split` columns produced by `evaluate_models`.
+  * CSV round-trip of the scorecard (dtypes of `zone`, `target_frac`).
+* Runtime estimates (not measured):
+  * consolidated scorecard: several minutes;
+  * ensemble curves: 2 normalisations × 5–13 weights × 14 budgets × 3 folds;
+  * postprocessing: 14 operations × 3 budgets × 3 folds, plus about 30 full-grid EDTs per model for short recall;
+  * isotonic calibration: 2 M-pixel fits.
+* `link_endpoints` / `directional_close` speed on full fold crops; `segment_attributes` band gradient on the full raster.
+* `fig_case_study` windowed reads of `det_elev` and the auto-picked geophysics band (`mag` / `grav` / `bouguer` name
+  match; set `complementarity.contrast_bands` if none matches).
+* Parquet export of object columns (`_parquet_safe` stringifies; failures only print).
+* Drive push of `reports/m6` after each unit (`pc.push`).
 
-## Known limitations / risks
+## Known limitations / risks (unchanged from before, still open)
 
-* SCREEN (5 epochs, 25 % of one fold) is noisy. A `REVIEW` is inconclusive, not negative. PU / consistency ideas
-  with ramp-ups may need a larger `max_epochs`.
-* `b0_reference`'s own FULL control (`P4_B_gated`) is absent from Drive, so its trainer-variance delta stays
-  `INCOMPARABLE` until the legacy Phase-4 folder is uploaded or P4_B_gated is retrained (GPU).
-* Drive still holds the old `_ep005.pt` resume files of the first run (never deleted automatically, ~136 MB
-  each).
-* Earlier risks remain: signed URLs in history (expired), rebuilt EDA ≠ historical EDA, regenerated folds vs
-  local folds, `SubmissionRunner` supports only `cnn5` / LightGBM champions.
+* `b0_reference`'s own control `P4_B_gated` is absent from Drive. Irrelevant for M6, which compares B0 and B1
+  directly.
+* Rebuilt EDA ≠ historical EDA; regenerated folds vs local folds; signed URLs in history (expired).
+* G1 / G3 baselines are still `NOT_AVAILABLE` unless retrained (`train_baselines=['G1','G3']`, CPU). M6
+  inventories them and includes them only if COMPLETE.
+* `SubmissionRunner` supports only `cnn5` / LightGBM champions. An M6 ensemble champion would need an ensemble
+  submission path: fold models of both members plus the recorded weights, applied with the all-fold weight rule.
+  It is not implemented.
