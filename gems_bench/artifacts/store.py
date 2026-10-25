@@ -134,11 +134,14 @@ class RunDir:
             print(line)
 
     # -- contract ---------------------------------------------------------
-    def finalize_contract(self, kind: str) -> list[str]:
-        """Write a stub for every REQUIRED_TABLE the experiment did not produce; returns the stub names."""
+    def finalize_contract(self, kind: str, profile: str = "FULL") -> list[str]:
+        """Write a stub for every REQUIRED_TABLE the experiment did not produce; returns the stub names.
+        Below FULL fidelity the stub says ``not_evaluated`` (the table exists only for full-protocol runs)."""
         stubs = []
         for t in REQUIRED_TABLES:
             if not self.has_table(t):
-                self.save_table(pd.DataFrame([{"not_applicable": True, "experiment_kind": kind}]), t)
+                row = {"not_applicable": True, "experiment_kind": kind} if profile == "FULL" else \
+                    {"not_evaluated": True, "experiment_kind": kind, "fidelity_profile": profile}
+                self.save_table(pd.DataFrame([row]), t)
                 stubs.append(t)
         return stubs

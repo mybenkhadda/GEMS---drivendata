@@ -152,12 +152,37 @@ class FeatureStore:
         self._src: dict[str, np.ndarray] = {}
         self._mm: dict[str, np.ndarray] = {}
 
+    # -- lazy staging: (local_root, drive_root); a cache file missing locally but present on the Drive mirror
+    # counts as available and is copied (atomic, size-verified) on first read. None = local files only.
+    drive_mirror: tuple | None = None
+
+    def _mirror_src(self, name: str) -> Path | None:
+        if self.drive_mirror is None:
+            return None
+        local_root, drive_root = (Path(x) for x in self.drive_mirror)
+        try:
+            rel = self.path(name).resolve().relative_to(local_root.resolve())
+        except ValueError:
+            return None
+        src = drive_root / rel
+        return src if src.exists() else None
+
+    def _staged(self, name: str) -> Path:
+        p = self.path(name)
+        if not p.exists():
+            src = self._mirror_src(name)
+            if src is not None:
+                from ..artifacts.atomic import atomic_copy
+
+                atomic_copy(src, p, "size")
+        return p
+
     # -- paths / availability -------------------------------------------
     def path(self, name: str) -> Path:
         return self.dir / _fname(name)
 
     def has(self, name: str) -> bool:
-        return self.path(name).exists()
+        return self.path(name).exists() or self._mirror_src(name) is not None
 
     @property
     def available(self) -> set[str]:
@@ -243,7 +268,7 @@ class FeatureStore:
     # -- reading --------------------------------------------------------
     def get(self, name: str) -> np.ndarray:
         if name not in self._mm:
-            self._mm[name] = np.load(self.path(name), mmap_mode="r")
+            self._mm[name] = np.load(self._staged(name), mmap_mode="r")
         return self._mm[name]
 
     def rows(self, names: list[str], r0: int, r1: int) -> np.ndarray:

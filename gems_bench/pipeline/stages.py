@@ -379,16 +379,27 @@ def features_validate(pc, root) -> V.Report:
     cat = feature_catalogue(pc, root)
     names = set(required_features(pc, cat))
     prov = V.read_json(root / FEATURE_PROVENANCE, {}) or {}
+    lazy = _lazy_features(pc)
     for r in cat[cat.name.isin(names)].itertuples():
-        c = rep.add(V.check_npy(root / r.rel, shape=(g["height"], g["width"])))
+        f = root / r.rel
+        if lazy and not f.exists() and (pc.drive / r.rel).exists():
+            f = pc.drive / r.rel                     # header-only check of the Drive copy (staged on first read)
+        c = rep.add(V.check_npy(f, shape=(g["height"], g["width"])))
         old = (prov.get(r.name) or {}).get("spec_hash")
         if c.ok and old and old != r.spec_hash:
             c.status, c.reason = V.INCOMPATIBLE, "cached under another feature definition (spec hash differs)"
     return rep
 
 
+def _lazy_features(pc) -> bool:
+    return pc.drive is not None and pc.cfg.get("features.stage", "all") == "lazy"
+
+
 def features_stage_in(pc) -> list[str]:
     root = pc.drive or pc.local
+    if _lazy_features(pc):                           # registries only; arrays staged when a run reads them
+        return [f"{FEATURE_DIRS['phase2']}/feature_registry.csv", f"{FEATURE_DIRS['phase4']}/rs_feature_registry.csv",
+                f"{FEATURE_DIRS['phase5']}/p5_feature_registry.csv", FEATURE_REGISTRY, FEATURE_PROVENANCE]
     try:
         cat = feature_catalogue(pc, root if pc.raw_path("features", root).exists() else pc.local)
     except Exception:
@@ -727,11 +738,23 @@ def advanced_enabled(pc) -> tuple[bool, str]:
 
 
 def advanced_run(pc) -> dict:
+    """Reuse-first: inventory -> plan -> train only RUN / RESUME items at the session profile -> screening report.
+    A completed compatible FULL run is never retrained for a cheaper profile; a failure in one experiment never
+    re-runs another's finished units."""
     from ..training.trainer import TrainingInterrupted
-    from .experiments import run_experiment
+    from .experiments import plan_experiments, run_experiment
+    from .screening import export_screening_report
 
-    rows, failed = [], {}
-    for stem in _advanced(pc):
+    plan = plan_experiments(pc)
+    _save_table(pc, plan, "experiment_plan")
+    print("[advanced] plan (" + str(pc.cfg.get("experiments.profile")) + "): " +
+          ", ".join(f"{r.experiment}={r.action}" for r in plan.itertuples()))
+    todo = list(plan[plan.action.isin(["RUN", "RESUME"])].experiment)
+    rows = [{"experiment": r.experiment, "experiment_id": r.experiment_id if isinstance(r.experiment_id, str) else "",
+             "profile": r.profile, "action": r.action, "reason": r.reason}
+            for r in plan.itertuples() if r.experiment not in todo]
+    failed = {r.experiment: r.reason for r in plan.itertuples() if r.action == "CONFIG_ERROR"}
+    for stem in todo:
         try:
             rows.append(run_experiment(pc, stem))
         except TrainingInterrupted:
@@ -745,16 +768,31 @@ def advanced_run(pc) -> dict:
                 break
         finally:
             _save_table(pc, pd.DataFrame(rows), "experiment_status")
+    try:
+        export_screening_report(pc)                  # read-only consolidation of every saved result
+    except Exception as e:                           # reporting never fails the training stage
+        print(f"[advanced] screening report skipped: {type(e).__name__}: {e}")
     if failed:
         raise PipelineStop(f"experiments not completed: {list(failed)}", "; ".join(f"{k}: {v}" for k, v in failed.items()))
-    return {"completed": [r["experiment"] for r in rows]}
+    return {"completed": [r["experiment"] for r in rows], "trained": todo}
 
 
 def advanced_validate(pc, root) -> V.Report:
-    from .experiments import experiment_config, experiment_state
+    from .experiments import experiment_config, experiment_state, plan_experiments
 
     r = V.Report("advanced_models")
+    try:
+        reused = {p.experiment: p for p in plan_experiments(pc).itertuples()        # Drive inventory
+                  if p.action in ("REUSE_FULL", "REUSE_HIGHER", "NOT_NEEDED")}
+    except Exception:
+        reused = {}
     for stem in _advanced(pc):
+        if stem in reused:
+            p = reused[stem]
+            rid = getattr(p, "reuse_id", None)
+            rid = rid if isinstance(rid, str) and rid else p.experiment_id
+            r.add(V.Check(f"experiments/{rid}", V.OK, f"{p.action}: {p.reason}"))
+            continue
         try:
             st = experiment_state(root, experiment_config(pc, stem))
         except FileNotFoundError as e:
@@ -780,7 +818,9 @@ def advanced_rels(pc) -> list[str]:
 
 
 def advanced_fp(pc) -> dict:
-    return {"experiments": _advanced(pc)}
+    p = str(pc.cfg.get("experiments.profile") or "FULL").upper()
+    # FULL keeps the historical fingerprint (records made before fidelity existed stay consistent)
+    return {"experiments": _advanced(pc)} if p == "FULL" else {"experiments": _advanced(pc), "profile": p}
 
 
 # =============================================================================== scoreboard / ensemble
@@ -1063,7 +1103,9 @@ def build_registry() -> StageRegistry:
     R.add(Stage("advanced_models", "PU / geometry / GeoStructureNet / multiscale experiments",
                 deps=("feature_store", "baselines"), run=advanced_run, validate=advanced_validate,
                 fingerprint=advanced_fp, enabled=advanced_enabled, outputs=advanced_rels, stage_in=advanced_rels,
-                reuse=DELEGATED, resource=GPU, requirement=RETRAIN, section="14-15", est_minutes="~60 GPU per experiment"))
+                # always run when enabled: advanced_run plans from the inventory and trains only missing work
+                reuse=ALWAYS_RUN, resource=GPU, requirement=RETRAIN, section="14-15",
+                est_minutes="per experiment (estimates): SCREEN ~5, VALIDATE ~30, FULL ~60 GPU"))
     R.add(Stage("discovery_validation", "Unified geographic + pseudo-discovery scoreboard", deps=("baselines",),
                 soft_deps=("advanced_models", "segment_attributes"), run=scoreboard_run, validate=scoreboard_validate,
                 enabled=_flag("stages.run_scoreboard", "run_scoreboard is false"), outputs=scoreboard_rels,

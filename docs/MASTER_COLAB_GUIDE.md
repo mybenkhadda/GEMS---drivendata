@@ -54,6 +54,28 @@ valid key, so a typo cannot silently turn off a safety switch.
 | `run_scoreboard`, `run_ensemble` | `True` | CPU evaluation of the available models |
 | `run_full_inference`, `run_submission` | `False` | promoted model → full map → GeoTIFFs (never uploaded) |
 | `use_gpu`, `max_stage_minutes` | `True`, `0` | GPU stages on or off; a per-stage time budget gives a clean, resumable stop |
+| `experiment_profile` | `SCREEN` in the notebook (`FULL` in `master.yaml`) | evidence level of each GPU research run: `SCREEN` / `VALIDATE` / `FULL` (independent of `run_mode`; see below) |
+| `fidelity_overrides` | `{}` | per-profile budget knobs, e.g. `{'SCREEN': {'max_epochs': 4}}` (none allowed for FULL) |
+| `screening_rules` | `{}` | shortlist heuristics (`pipeline.screening.DEFAULT_RULES`) |
+| `auto_provision_maps` | `True` | build a missing label-free dependency map (`B0_lineament` for B1, CPU, minutes) |
+| `checkpoint` | `{'policy': 'best_and_latest', 'save_every_epochs': 5, 'sync_every_minutes': 15}` | checkpoint retention / Drive sync cadence (never changes an experiment id) |
+| `feature_stage` | `lazy` in the notebook (`all` in `master.yaml`) | `lazy`: copy each feature cache from Drive on first read; `all`: stage every required cache up front |
+
+### Research experiments: fidelity and reuse
+
+`run_mode` says *which stages* run. `experiment_profile` says *how much evidence* each GPU research run
+produces (`docs/EXPERIMENT_FIDELITY_AND_COST.md`):
+
+* `SCREEN`: fold 0 only, no discovery, ≤ 5 epochs × 80 steps, proxy metrics on 25 % of the held-out fold.
+* `VALIDATE`: 3 folds + discovery split 0, ≤ 10 epochs × 150 steps, proxy metrics.
+* `FULL`: the committed YAMLs, section-17 evaluation. Only FULL runs reach the scoreboard, registry and promotion
+  gate.
+
+Section 14–15 runs `pipe.inventory()` and `pipe.compare_results()` (read-only), then `pipe.plan_experiments()`,
+then `pipe.step('advanced_models')`. Completed FULL runs (B0, B2, C1) are **reused, never retrained** for a
+cheaper profile (`REUSE_FULL`). Each SCREEN / VALIDATE candidate is compared with B0 trained under the same
+profile, which the planner adds automatically. `pipe.research_dashboard()` and `pipe.shortlist('SCREEN')` show
+what earned the next level. Moving up is your explicit decision.
 
 Feature families, the validation protocol and the experiment lists are in `configs/pipeline/master.yaml`. Override
 them with `Pipeline.from_notebook(CONFIG, DEM_CONFIG, overrides={...})`.
@@ -127,9 +149,11 @@ Run sections 1–4 again, then the same cells, or `pipe.run()`.
   checkpoints at most every `ckpt_sync_min` minutes.
 * A new VM has an empty `/content/gems_work`. Records are read from Drive, and outputs are staged back
   (unchanged files are skipped, using the sync ledger).
-* An interrupted experiment restarts at its next unit and resumes training from the last checkpoint.
-  Experiments are opened with `resume_policy="config"`: the configuration hash must match, while a newer code
-  commit is only recorded as a warning.
+* An interrupted experiment restarts at its next unit and resumes training from the last checkpoint
+  (`<unit>_latest.pt`, or the `_ep<NNN>.pt` files of older runs). Finished units are never re-run because another
+  unit failed. Experiments are opened with `resume_policy="config"`: the configuration hash must match, while a
+  newer code commit is only recorded as a warning. A SCREEN / VALIDATE run has its own folder
+  (`<name>__screen__<hash>`), so a profile change can never resume an incompatible checkpoint.
 * `pipe.status()`, `pipe.record('<stage>')`, `pipe.events()` and `reports/pipeline/PIPELINE_REPORT.md` show the
   state.
 

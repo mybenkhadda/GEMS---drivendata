@@ -6,11 +6,17 @@ train     geographic CV (3 resumable fold units) + pseudo-discovery (3 resumable
 evaluate  shared scorecard / scoreboard / promotion vs ``control`` + kind-specific diagnostics:
           geometry metrics (always), orientation error (``export_heads``), PU diagnostics (``pu`` != none)
 export    registry update, figures, required-table contract
+
+Fidelity (``pipeline.fidelity``, recorded in the config's ``fidelity`` block): FULL is the protocol above, unchanged.
+SCREEN / VALIDATE cap the spec's epochs / steps, train only the selected folds / splits on the fidelity masks, and
+are scored by ``pipeline.screening.evaluate_fidelity_run`` (labelled proxy metrics). Their maps are recorded under
+``manifest["fidelity_maps"]`` - never ``manifest["maps"]`` - so they cannot enter the model zoo, a scoreboard, an
+ensemble or the registry / promotion gate.
 """
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import numpy as np
 import pandas as pd
@@ -25,14 +31,33 @@ class Cnn5Runner(Runner):
     def model_name(self) -> str:
         return self.cfg.get("model_name", self.cfg.name)
 
+    @property
+    def fidelity(self):
+        from ...pipeline.fidelity import fidelity_of
+
+        return fidelity_of(self.cfg)
+
+    @property
+    def ckpt_policy(self) -> str:
+        return str(self.cfg.get("runtime.checkpoint.policy", "rotating"))
+
     def spec(self):
         if getattr(self, "_spec", None) is None:
+            from ...pipeline.resource_budget import placement_overrides
             from ...training.gpu import autoconfig
             from ...training.spec import spec_from_experiment, with_gpu
 
-            s = spec_from_experiment(self.ctx, self.cfg.get("model"), self.model_name, self.cfg.seed)
+            s = self.fidelity.cap_spec(spec_from_experiment(self.ctx, self.cfg.get("model"), self.model_name,
+                                                            self.cfg.seed))
+            ck = self.cfg.get("runtime.checkpoint", {}) or {}
+            if ck.get("save_every_epochs"):
+                s = replace(s, ckpt_every=int(ck["save_every_epochs"]))
+            if ck.get("sync_every_minutes"):
+                s = replace(s, ckpt_sync_min=float(ck["sync_every_minutes"]))
             gpu = {**autoconfig(patch_px=s.patch_px, effective_batch=s.batch_size * max(s.grad_accum, 1),
-                                n_channels=len(s.channels)), **(self.cfg.get("runtime.gpu", {}) or {})}
+                                n_channels=len(s.channels))}
+            gpu.update(placement_overrides(s, gpu))
+            gpu.update(self.cfg.get("runtime.gpu", {}) or {})          # explicit YAML overrides win
             self._gpu = gpu
             self._spec = with_gpu(s, gpu)
         return self._spec
@@ -57,24 +82,47 @@ class Cnn5Runner(Runner):
             except Exception:
                 pass
         self.rd.save_table(pd.DataFrame(rows), "architecture")
-        self.rd.save_json({"gpu_overrides": self._gpu}, "runtime_config")
-        return {"spec_hash": spec_hash(spec), "n_params": rows[0]["n_params"]}
+        fid = self.fidelity
+        self.rd.save_json({"gpu_overrides": self._gpu, "checkpoint_policy": self.ckpt_policy,
+                           "fidelity": {"profile": fid.profile, **fid.semantic_block()},
+                           "budget": {"epochs": spec.epochs, "steps_per_epoch": spec.steps_per_epoch,
+                                      "min_epochs": spec.min_epochs, "batch_size": spec.batch_size,
+                                      "grad_accum": spec.grad_accum, "data_on_gpu": spec.data_on_gpu}},
+                          "runtime_config")
+        self.exp.manifest.data["fidelity"] = {"profile": fid.profile, **fid.semantic_block(),
+                                              "protocol_hash": fid.protocol_hash(self.cfg.get("validation.folds_dir", ""),
+                                                                                 self.cfg.get("validation.discovery_dir", ""))}
+        self.exp.manifest.save()
+        return {"spec_hash": spec_hash(spec), "n_params": rows[0]["n_params"], "profile": fid.profile}
 
     def train(self):
-        from ...training.cv import discovery_epochs, prepare_stack5, run_cv5, run_discovery5, runtime_tables
+        from ...training.cv import (discovery_epochs, prepare_stack5, run_cv5, run_discovery5, runtime_tables,
+                                    tensor_stack5)
 
         spec, rd, m = self.spec(), self.rd, self.exp.manifest
-        stack = prepare_stack5(self.ctx, spec, rd)
+        fid = self.fidelity
+        stack = tensor_stack5(self.ctx, spec, rd, prepare_stack5(self.ctx, spec, rd))   # one copy for every unit
         dl = self.exp.deadline()
-        run_cv5(self.ctx, rd, spec, sync=self.exp.drive, deadline=dl, stack=stack, mark=m.mark_unit)
+        folds = fid.fold_ids(self.ctx.fold_ids)
+        run_cv5(self.ctx, rd, spec, sync=self.exp.drive, deadline=dl, stack=stack, mark=m.mark_unit,
+                fold_ids=folds, fidelity=fid, ckpt_policy=self.ckpt_policy)
         disc = {}
-        if self.cfg.get("discovery", True):
+        splits = fid.split_ids(self.ctx.splits.n_splits) if self.cfg.get("discovery", True) else []
+        if splits:
             ep = int(self.cfg.get("discovery_epochs") or discovery_epochs(rd, spec.min_epochs))
-            run_discovery5(self.ctx, rd, spec, ep, sync=self.exp.drive, deadline=dl, stack=stack, mark=m.mark_unit)
-            disc = {d: rd.raster_path(f"disc{d}") for d in range(self.ctx.splits.n_splits)}
-        self.register_maps(self.model_name, rd.raster_path("oof"), disc)
+            ep = min(ep, spec.epochs)
+            run_discovery5(self.ctx, rd, spec, ep, sync=self.exp.drive, deadline=dl, stack=stack, mark=m.mark_unit,
+                           split_ids=splits, fidelity=fid, ckpt_policy=self.ckpt_policy)
+            disc = {d: rd.raster_path(f"disc{d}") for d in splits}
+        if fid.is_full:
+            self.register_maps(self.model_name, rd.raster_path("oof"), disc)
+        else:                                       # never visible to the zoo / scoreboards / registry
+            m.data["fidelity_maps"] = {"model": self.model_name, "profile": fid.profile, "folds": folds,
+                                       "oof": self.rel(rd.raster_path("oof")),
+                                       "disc": {str(d): self.rel(p) for d, p in disc.items()}}
+            m.save()
         runtime_tables(rd)
-        return {"oof": "predictions/oof.tif", "discovery_splits": len(disc)}
+        return {"oof": "predictions/oof.tif", "folds": folds, "discovery_splits": len(disc), "profile": fid.profile}
 
     def _orient_oof(self) -> tuple[np.ndarray, np.ndarray] | None:
         """OOF orientation rasters from the fold models (only for models with an orientation head)."""
@@ -113,6 +161,10 @@ class Cnn5Runner(Runner):
         ev = self.cfg.get("evaluation", {}) or {}
         control = ev.get("control")
         name = self.model_name
+        if not self.fidelity.is_full:               # proxy metrics only: no scoreboard, no registry, no gate
+            from ...pipeline.screening import evaluate_fidelity_run
+
+            return evaluate_fidelity_run(self)
         out = self.standard_evaluation(list(ev.get("models", [])) + [name], [name], control)
         ctx = self.eval_ctx()
         frac = float(ev.get("match_frac", 0.05))

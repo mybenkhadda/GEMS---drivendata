@@ -5,7 +5,8 @@
 * ``config_hash`` covers everything that can change a result. Runtime knobs (``runtime``, ``drive``, ``notes``,
   ``description``) are excluded, so moving a run from a T4 to an A100 or changing the Drive path does not
   invalidate a resume; changing a loss weight, a channel or a fold design does.
-* ``experiment_id`` = ``<name>__<hash8>`` unless ``id`` is set explicitly.
+* ``experiment_id`` = ``<name>__<hash8>`` unless ``id`` is set explicitly; a SCREEN / VALIDATE config (``fidelity``
+  block, see ``pipeline.fidelity``) is ``<name>__<profile>__<hash8>``.
 """
 from __future__ import annotations
 
@@ -98,8 +99,17 @@ class ExperimentConfig:
             self._hash = hashlib.sha256(s.encode()).hexdigest()[:12]
         return self._hash
 
+    @property
+    def profile(self) -> str:
+        """Fidelity profile (``pipeline.fidelity``); a config without a ``fidelity`` block is FULL."""
+        return str((self.raw.get("fidelity") or {}).get("profile", "FULL")).upper()
+
     def experiment_id(self) -> str:
-        return self.raw.get("id") or f"{self.name}__{self.hash()[:8]}"
+        if self.raw.get("id"):
+            return self.raw["id"]
+        if self.profile != "FULL":                      # a cheap run never shares a folder with a FULL run
+            return f"{self.name}__{self.profile.lower()}__{self.hash()[:8]}"
+        return f"{self.name}__{self.hash()[:8]}"
 
     def to_yaml(self) -> str:
         import yaml

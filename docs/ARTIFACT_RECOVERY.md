@@ -82,6 +82,22 @@ CRS, shape). It stops with a recovery message when:
 | regenerated baseline on other folds | `INCOMPATIBLE` | never reused | move the folder aside and retrain under the current folds |
 | `P4_B_gated` `config.json` (base of every `cnn5` experiment) | absent | `base_spec_dict` falls back to the committed snapshot automatically | – |
 | Phase 5 experiment state | interrupted | `Experiment` resumes at the next unit and from the last checkpoint | – |
+| `B0_lineament` map needed by B1 (previous run: `b1_bg_weight needs the B0_lineament map, which is not available`) | `NOT_AVAILABLE` | `ensure_label_free_map`: staged from Drive and verified (run finished, native grid, fold provenance), else rebuilt with the original recipe (rank-normalised `eda:fused_score`, CPU, minutes) and pushed | `train_baselines=['B0_lineament']` |
+| a completed FULL experiment while `experiment_profile` is SCREEN / VALIDATE | `REUSE_FULL` | reused for reporting; never retrained | – |
+| a resume checkpoint whose sha256 differs from `<unit>_latest.json` | corrupt / truncated | falls back to `<unit>_latest.prev.pt` or the older `_ep<NNN>.pt` files | – |
+| a resume checkpoint written by another spec | incompatible | refused (`RuntimeError`), never loaded | start a new experiment id (change of profile = new folder automatically) |
+| a final unit model (`<unit>_model.pt`) that cannot be read | invalid | that unit is retrained; other finished units are kept | – |
+| SCREEN / VALIDATE folders (`<name>__screen__<hash>`) | – | never adopted as FULL results, never scored on the leaderboard | delete only by hand on Drive if no longer wanted |
+
+### Inspect before you spend GPU time
+
+```python
+pipe.inventory()          # every experiment folder: profile, completed folds / splits, metrics, reusable, next action
+pipe.plan_experiments()   # what this session would train at experiments.profile
+pipe.compare_results()    # reports/experiment_screening: metrics, paired deltas, resource usage, shortlist, figures
+```
+
+All three are read-only.
 | promoted model | none | `full_inference` stops: promotion is a manual decision | `promote('<model>', '<experiment_id>')` after reading `promotion_decisions.csv` |
 
 ## Restoring legacy results from the local project (optional, saves GPU time)
