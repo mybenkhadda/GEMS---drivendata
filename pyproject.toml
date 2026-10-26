@@ -38,6 +38,8 @@ torch = ["torch>=2.1"]
 geo = ["geopandas>=0.14", "pyogrio>=0.7"]
 colab = ["geopandas>=0.14", "pyogrio>=0.7"]
 smp = ["segmentation-models-pytorch>=0.3"]
+m9 = ["xgboost>=2.0", "catboost>=1.2"]                 # M9 section 15 (LightGBM is a core dependency)
+rl = ["gymnasium>=0.29", "stable-baselines3>=2.2"]      # M9 section 13 (optional challenger only)
 dev = ["pytest>=7", "ruff>=0.4"]
 all = ["torch>=2.1", "geopandas>=0.14", "pyogrio>=0.7", "pytest>=7", "ruff>=0.4"]
 

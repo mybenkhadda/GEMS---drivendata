@@ -1,0 +1,409 @@
+# GEMS M9: GeoFault production system (notebooks/colab/GEMS_M9_GEOFAULT_PRODUCTION.ipynb).
+# Loaded by gems_bench.m9.config.load_m9_config; the notebook's M9_CONFIG overrides these keys (unknown keys are
+# rejected, except inside `shared`, which is validated by the M7 loader, and the free-form blocks listed in
+# config.OPEN). Outputs: <drive_root>/outputs/m9_geofault_production/. Guide: docs/M9_GEOFAULT_PRODUCTION.md.
+#
+# Central hypothesis (to be EVALUATED, not assumed): a multiscale, physics-aware network trained to recognise and
+# reconstruct incomplete fault systems, augmented by structured tracing and candidate-level verification, recovers
+# fault geometry missed by historical-label segmentation. The B0/B1 champion stays the benchmark and the fallback.
+version: 1
+enabled: true
+mode: GEOFAULT_PRODUCTION                  # the only mode
+profile: PILOT                             # PILOT | FULL: computational scope only (see `profiles`)
+seed: 2026
+
+output_dir: outputs/m9_geofault_production
+cache_dir: cache/m9                        # memory-mapped input cube, spectral / cross-modal layers (rebuilt if lost)
+m7_output_dir: outputs/m7_discovery_first  # READ-ONLY (never written)
+m8_output_dir: outputs/m8_physics_probabilistic   # READ-ONLY (gate tables are recorded, never assumed)
+legacy_gems3_dir: reports/gems3            # read-only: full-region member maps reused when fingerprints match
+overwrite_existing: false                  # true recomputes M9 stages (immutable tables are still never replaced)
+save_figures: true                         # PNG + SVG, with the plotting data as CSV
+save_csv: true
+save_parquet: true
+save_rasters: true
+push_to_drive: true
+display_figures: true
+
+# ------------------------------------------------------------------------------------------------- stages / sections
+# A stage is a group of sections (m9.run(stage='TRAIN')). Every section is independently resumable (fingerprints).
+stages:
+  PREPARE: [s01_baseline, s02_features, s03_spectral, s04_dataset, s05_corruption]
+  TRAIN: [s06_architecture, s07_losses, s08_training]
+  VALIDATE: [s09_validation, s10_dense_analysis]
+  TRACE: [s11_tracing, s12_monte_carlo, s13_rl]
+  RANK: [s14_candidate_features, s15_gbm_benchmark, s16_fusion]
+  INFER: [s17_inference]
+  SUBMIT: [s18_submission, s19_reports]
+sections:
+  s01_baseline: true                       # B0/B1 champion recovery + metric verification + Gate 0 fallback GeoTIFF
+  s02_features: true                       # feature pyramid: families, redundancy, cross-modal evidence, scaler
+  s03_spectral: true                       # Fourier / wavelet / continuation layers + Gate 1
+  s04_dataset: true                        # input cube, targets, CV-A..F manifests
+  s05_corruption: true                     # corruption operators: audit samples + CV-C benchmark sets
+  s06_architecture: true                   # model build, parameter count, channel groups (no training)
+  s07_losses: true                         # loss / curriculum manifest (no training)
+  s08_training: false                      # GPU: geographic CV + discovery units (resumable); off until enabled
+  s09_validation: true                     # held-out maps, nested selection, CV-A..F, Gates 2 and 3
+  s10_dense_analysis: true                 # orientation / endpoint / junction diagnostics
+  s11_tracing: true                        # deterministic + beam tracing, oracle (Gate 4)
+  s12_monte_carlo: false                   # P2: MC-A / MC-B (Gate 5); off in production unless it earns its place
+  s13_rl: false                            # P2: optional RL tracer (Gate 5)
+  s14_candidate_features: true             # one row per candidate (needs Gate 4 CONTINUE or tracing.force_rank)
+  s15_gbm_benchmark: true                  # XGBoost / LightGBM / CatBoost on identical tables
+  s16_fusion: true                         # dense + structured (+ legacy) cross-fitted fusion, Gate 6
+  s17_inference: false                     # full-area tiled inference (GPU recommended)
+  s18_submission: false                    # validated GeoTIFFs: champion + fallback (never uploaded)
+  s19_reports: true                        # report, gates, model registry
+
+# ------------------------------------------------------------------------------------------------- profiles
+# A profile changes HOW MUCH is computed. Units, masks, metric, budget domain, gate thresholds and operator
+# definitions are identical in every profile; results under PILOT are labelled PROVISIONAL and are evaluated only
+# on the zones the profile trains (paired with the champion on the same zones).
+profiles:
+  PILOT:
+    train_folds: [0]                       # geographic folds trained (CV-A); [] = none, all = every fold
+    train_splits: [0]                      # discovery splits trained (CV-B)
+    epochs: 12
+    steps_per_epoch: 80
+    variants: [core]                       # training variants (see `variants`)
+    n_seeds: 1
+    max_seeds_per_unit: 3000               # tracing seeds per unit
+    stochastic_realizations: 4
+    mc_realizations: 16
+    rl_episodes: 200
+    n_boot: 200
+    full_region_traces: false
+    audit_samples: 16
+  FULL:
+    train_folds: all
+    train_splits: all
+    epochs: 40
+    steps_per_epoch: 150
+    variants: [core, recon_off, stage_c, no_spectral]
+    n_seeds: 1
+    max_seeds_per_unit: 12000
+    stochastic_realizations: 8
+    mc_realizations: 32
+    rl_episodes: 2000
+    n_boot: 500
+    full_region_traces: true
+    audit_samples: 48
+profile_overrides: {}                      # scope keys only, e.g. {epochs: 20}
+
+# ------------------------------------------------------------------------------------------------- shared M7 engine
+# Passed verbatim to gems_bench.m7.config.load_m7_config (configs/m7/discovery_first.yaml schema). Defines the
+# protocol every M9 number shares with M7 / M8: units, eligible budget domain, nested grids, promotion rules.
+shared:
+  models: [b0_reference, b1_bg_weight]
+  seed: 2026
+  overwrite_existing: false
+  push_to_drive: false
+  evaluation:
+    tasks: [geo, disc_official, disc_retained_fp]
+    primary_task: disc_official
+    folds: all
+    splits: all
+    budget_domain: eligible
+    include_template_mask: true
+    area_fracs: [0.0025, 0.005, 0.01, 0.015, 0.02, 0.03, 0.05, 0.075, 0.10, 0.15]
+    fusion_weights: [0.0, 0.25, 0.5, 0.75, 1.0]
+    ring_px: [0, 1, 2, 3]
+    ridge_sigma_px: 1.0
+    system_recovered_support: 0.5
+    system_recovered_frac: 0.5
+    short_system_km: 2.0
+    block_km: 20.0
+    n_boot: 500
+    proximity_bands_km: [1.0, 3.0]
+  comparison:
+    champion_reference: fusion_thin
+    min_zones_for_claim: 3
+  decision:
+    promote_if: {min_pooled_gain: 0.01, min_zone_win_share: 0.67, worst_zone_delta: -0.01, max_geo_drop: 0.01,
+                 min_boot_p_positive: 0.8, max_short_recall_drop: 0.02}
+    reject_if: {pooled_gain_below: -0.005, worst_zone_delta_below: -0.03}
+  submission:
+    source: oof_stitched                   # B0/B1 full-region maps: oof_stitched (CPU) | fold_average (GPU)
+    area_frac_source: geo
+    outside_valid: template
+    device: auto
+
+# Offline values recorded in earlier sessions (NOT leaderboard results). Shown next to recomputed values; never
+# reconciled, never claimed as reproduced unless recomputed in this run.
+recorded:
+  geo_dti: {b0: 0.165, b1: 0.168, fusion: 0.178, fusion_crest: 0.183}
+  disc_official_dti: {b0_raw: 0.104, b1_raw: 0.092, fusion_crest: 0.162, fusion_thin_ring300: 0.198}
+  m7_candidate_system_recall: 0.0417
+  m7_systems_recovered: 5
+  m7_systems_total: 120
+  m7_missed_by_both_recovered: 0
+  m7_missed_by_both_total: 93
+
+# ------------------------------------------------------------------------------------------------- section 01
+baseline:
+  reuse_m7_selection: true
+  champion: fusion_thin                    # System A / fallback
+  gate0_export_fallback: true              # write + validate the fallback GeoTIFF in section 01 (Gate 0)
+  read_m8_gates: true                      # record M8's saved gate decisions (read-only) when present
+
+# ------------------------------------------------------------------------------------------------- section 02
+features:
+  build_missing: false                     # false: only cached store features are used (missing ones are logged)
+  raw_local: [mag_anom, rtp, tmi, tmi_hg, tmi_vg, tc, iso_grav_anom, iso_grav_anom_hg, iso_grav_anom_vg,
+              iso_grav_anom_slope, det_elev, det_elev_slope, cond_surf, depth_to_base_surf]
+  raw_context: [geod_2ndinv, geod_shearrate, geod_dilaterate, deq_n100a15, ieq_n100a15, depth_to_base_surf, cond_surf]
+  families:                                # first matching rule wins (regular expressions on store names)
+    - {family: dem, pattern: "^dem:"}
+    - {family: profiles, pattern: "^p5:"}
+    - {family: regional_context, pattern: "(smooth@|@10km|@20km)"}
+    - {family: persistence, pattern: "persistence"}
+    - {family: crossmodal, pattern: "^(rs:xmod:|eda:)"}
+    - {family: coherence, pattern: "coherence"}
+    - {family: directional, pattern: "(log_gabor|gabor_bank|dirderiv|:dog@)"}
+    - {family: tilt_normalized, pattern: "(:tilt@|tilt_edge|:tdx@)"}
+    - {family: ridge_crest, pattern: "(ridge|slope_break|geomorphon)"}
+    - {family: curvature, pattern: "(curvature|curv_|laplacian|mexhat)"}
+    - {family: potential_gradients, pattern: "^(magnetic|gravity|basement|conductivity|rs:magnetic|rs:gravity|rs:basement):.*(thdr|analytic_signal)"}
+    - {family: terrain_morphology, pattern: "^(terrain:|rs:terrain:)"}
+  exclude_families: [dem, profiles, regional_context]   # regional context goes to the low-resolution branch only
+  exclude_patterns: ["hillshade"]          # illumination-azimuth dependent: not invariant under the rot180 augmentation
+  context_families: [regional_context]
+  max_per_family: 6
+  prefer: P4_B_gated                       # channels of this legacy spec are kept first when pruning redundancy
+  redundancy: {max_abs_spearman: 0.92, sample_px: 200000}
+  scaler: {kind: robust, clip: 6.0, sample_px: 300000}   # fitted per training unit on its permitted geography only
+  crossmodal:                              # new label-free evidence (cached in cache/m9/layers)
+    enabled: true
+    scale_km: [1.0, 2.0]
+    tolerance_m: [300, 800]
+    orient_tol_deg: 20.0
+    contrast_window_km: 5.0
+    persistence_scales_km: [0.5, 1.0, 2.0, 4.0]
+    persistence_q: 0.85
+  family_screen:                           # nested pixel-level diagnostic (labels of training zones only)
+    enabled: true
+    sample_px_per_zone: 120000
+    lgbm: {num_leaves: 31, learning_rate: 0.05, n_estimators: 250, min_child_samples: 100, subsample: 0.8,
+           subsample_freq: 1, colsample_bytree: 0.8, seed: 2026}
+    frac: 0.03
+
+# ------------------------------------------------------------------------------------------------- section 03
+spectral:
+  enabled: true
+  fields: {magnetic: rtp, gravity: iso_grav_anom}
+  fft:
+    window_px: 64                          # 6.4 km windows (Hann taper, plane detrend, NaN filled by the window mean)
+    stride_px: 16                          # overlapping windows; outputs bilinearly resampled to 100 m
+    n_sectors: 8
+    short_km: [0.4, 1.6]                   # wavelength band (km) of the "short" energy
+    long_km: [1.6, 6.4]
+    min_valid_frac: 0.6
+  wavelet:
+    wavelengths_km: [0.4, 0.8, 1.6, 3.2]   # log-Gabor centre wavelengths
+    n_orient: 6
+    bandwidth: 0.55                        # sigma_on_f of the radial log-Gabor
+    angular_sigma_deg: 20.0
+    persistence_q: 0.8
+  stft: {enabled: false, window_px: 32, stride_px: 8}   # ablation only
+  continuation: {enabled: true, heights_km: [0.5, 1.0, 2.0], bands: [[0.5, 2.0]]}
+  compare_with: ["magnetic:log_gabor@2km", "magnetic:log_gabor@5km", "gravity:log_gabor@2km",
+                 "magnetic:coherence@2km", "rs:magnetic:dog@1km", "rs:magnetic:gabor_bank_entropy@1km"]
+  include_in_model: auto                   # auto (Gate 1) | always | never
+  max_channels: 12                         # cap after label-free redundancy pruning
+
+# ------------------------------------------------------------------------------------------------- section 04
+data:
+  patch_px: 256
+  context_factor: 4                        # low-resolution branch: 4x average-pooled stack, 4x wider extent
+  context_strict: true                     # training: context inputs outside the permitted geography are zeroed
+  min_valid_frac: 0.3
+  pos_patch_frac: 0.6
+  kernel_radius_m: 300
+  rot180: true                             # 180 deg rotation keeps strike families (flips do not)
+  orientation: {scale_km: 0.3, min_coherence: 0.7, junction_px: 3.0, min_length_km: 1.0}
+  topology: {sigma_px: 1.5, boundary_margin_px: 6, min_length_km: 0.5}
+  pu:
+    unlabeled_weight: 0.5                  # weak-negative weight of unlabeled background (never confirmed negative)
+    use_bg_weights: true                   # label-free background down-weighting where structure is strong
+    bg_evidence: "feature:eda:fused_score"
+    bg_lambda: 0.5
+    bg_q0: 0.8
+    bg_min_weight: 0.2
+  domains: {k: 3, block_km: 20.0}          # CV-E label-free geological domains
+  length_bins_km: [1.0, 2.0, 5.0]          # CV-D strata
+
+# ------------------------------------------------------------------------------------------------- section 05
+corruption:
+  mixture: {none: 0.35, partial: 0.40, heavy: 0.25}   # map context absent / partially / heavily damaged
+  partial_strength: 0.25                   # probability that an eligible element is damaged
+  heavy_strength: 0.6
+  operators:
+    endpoint_truncation: {weight: 1.0, km: [0.3, 1.5]}
+    interior_removal: {weight: 1.0, km: [0.5, 2.0]}
+    segment_omission: {weight: 1.0}
+    branch_omission: {weight: 0.7, max_km: 3.0}
+    local_displacement: {weight: 0.5, px: [1, 2]}
+    whole_system_removal: {weight: 0.7}
+  context_pixel_weight: 0.1                # seg-loss weight on pixels shown as context (copying earns little)
+  reconstruction_weight: 2.0               # L6 weight on the kernel neighbourhood of removed geometry
+  eval:                                    # CV-C benchmark sets (m7.corruption classes, systems split by fold first)
+    sample_frac: 0.15
+    trim_endpoint_km: [0.5, 1.5]
+    delete_segment_km: [1.0, 3.0]
+    shift_px: 1
+    branch_max_km: 3.0
+    short_fault_km: 2.0
+    eval_radius_km: 5.0
+
+# ------------------------------------------------------------------------------------------------- section 06
+model:
+  stem_width: 16
+  widths: [32, 64, 128, 192]
+  context_width: 48
+  fusion: gated                            # gated | concat
+  dropout: 0.1
+  dem_branch: false                        # optional DEM stem with a missingness channel
+
+# ------------------------------------------------------------------------------------------------- section 07
+loss:
+  focal_gamma: 1.5
+  pos_weight: 3.0
+  tversky: {alpha: 0.2, beta: 0.8}
+  weights: {l1: 1.0, l2: 0.5, l3: 0.2, l4: 0.2, l5: 0.2, l6: 1.0, l7: 0.1}
+  curriculum: {stage_a_end: 0.3, stage_b_end: 0.6}    # epoch fractions: A dense + recon, B + orient / topology, C
+  stage_c: {l2: true, l3: false}           # enabled only after the stage_c variant shows benefit
+  l3_mode: skeleton_recall                 # skeleton_recall | cldice
+  consistency: {enabled: false, ema_decay: 0.99, shift_px: 8, noise: 0.05, rampup: 5}
+
+# ------------------------------------------------------------------------------------------------- section 08
+training:
+  batch_size: 16
+  grad_accum: 1
+  lr: 0.001
+  weight_decay: 0.0001
+  clip_grad: 1.0
+  amp: true
+  min_epochs: 5
+  patience: 6
+  select_frac: 0.03                        # inner-validation checkpoint score: binary top-frac DTI, no map context
+  ckpt_policy: best_and_latest
+  ckpt_sync_min: 10.0
+  max_runtime_min: 0                       # 0 = unlimited; >0 = clean, resumable stop at an epoch boundary
+  oom_retries: 2
+  collapse_max_unlabeled_mean: 0.35
+  infer_batch: 16
+  stride_frac: 0.5
+variants:                                  # every variant is a full model family with its own held-out maps
+  core: {}
+  recon_off: {corruption: {mixture: {none: 1.0, partial: 0.0, heavy: 0.0}}}          # Gate 3 control
+  stage_c: {loss: {stage_c: {l2: true, l3: true}}}                                  # Stage C ablation
+  no_spectral: {spectral: {include_in_model: never}}                                # Gate 1 network check
+  dense_only: {loss: {weights: {l4: 0.0, l5: 0.0}}}                                 # topology heads ablation
+
+# ------------------------------------------------------------------------------------------------- section 09
+validation:
+  context_modes: [none, known]             # disc units scored without and with the retained-map context
+  production_context: known                # what the submission uses (the known map is given at test time)
+  representations: {binary: {select: top}, crest_1px: {select: crest}}
+  area_fracs: [0.005, 0.01, 0.015, 0.02, 0.03, 0.05, 0.075, 0.10]
+
+# ------------------------------------------------------------------------------------------------- section 11
+tracing:
+  force_rank: false                        # true trains rankers after a Gate-4 STOP (not recommended)
+  evidence_sigma_px: 0.7
+  seed_quantile: 0.92                      # crest seeds above this per-unit quantile of the dense evidence
+  seed_nms_px: 4
+  step_px: 1.0
+  turn_deg: 7.5
+  n_turns: 2                               # headings phi + {-2, -1, 0, 1, 2} x turn_deg
+  beam_width: 8
+  max_len_km: 25.0
+  min_len_km: 0.5
+  w_evidence: 1.0
+  w_orient: 0.6
+  w_curvature: 0.3
+  gap_quantile: 0.6                        # evidence below this per-unit quantile counts as a gap step
+  max_gap_px: 6
+  branch: {enabled: true, min_angle_deg: 20.0, min_score_ratio: 0.85, max_per_trace: 2}
+  stochastic: {enabled: true, temperature: 0.35}
+  mcp_baseline: {enabled: true, gap_px: 10, max_angle_deg: 30.0, pad_px: 6, crest_quantile: 0.85}
+  dedup: {radius_px: 2, overlap: 0.6}
+  oracle: {density_caps_km_per_100km2: [5, 10, 20, 40, 80, 160], gate_density: 40}
+
+# ------------------------------------------------------------------------------------------------- section 12
+monte_carlo:
+  mc_a:                                    # structural-evidence uncertainty (spatially correlated, per source)
+    noise_frac: [0.0, 0.10]
+    noise_corr_px: [2, 4, 8]
+    smooth_sigma_px: [0.5, 1.5]
+    registration_px_sigma: 1.0
+    seed_quantile_jitter: 0.03
+    orient_tol_jitter_deg: 5.0
+  match_radius_px: 2
+  convergence_tol: 0.02                    # stop increasing realisations when stability changes less than this
+  max_realizations: 64
+
+# ------------------------------------------------------------------------------------------------- section 13
+rl:
+  algorithm: bc                            # bc (behavioural cloning) | ppo | dqn (stable-baselines3 if installed)
+  window_px: 15
+  max_steps: 300
+  turn_deg: 15.0
+  reward: {on_target: 1.0, off_target: -0.3, step: -0.02, connect: 2.0, stop_near_end: 1.0}
+  learned_edge_cost: true
+
+# ------------------------------------------------------------------------------------------------- section 14
+candidates:
+  side_offsets_m: [200, 400, 800]
+  fields: {magnetic: rtp, gravity: iso_grav_anom, terrain: det_elev, conductivity: cond_surf, basement: depth_to_base_surf}
+  context_bands: [geod_2ndinv, geod_shearrate, deq_n100a15, ieq_n100a15]
+  positive_kd: 0.5
+  negative_dist_km: 1.5
+
+# ------------------------------------------------------------------------------------------------- section 15
+gbm:
+  libraries: [xgboost, lightgbm, catboost]
+  n_estimators: 300
+  learning_rate: 0.05
+  max_depth: 4                             # xgboost / catboost depth; lightgbm num_leaves = 2^depth - 1
+  min_child: 40
+  subsample: 0.8
+  colsample: 0.8
+  reg_lambda: 1.0
+  negative_weight: 0.5
+  exclude_buffer_km: 2.0
+  lambdamart: {enabled: false, group_block_km: 20.0}
+  choose: {tolerance: 0.003}               # within this DTI of the best, the steadier library (worst zone) wins
+
+# ------------------------------------------------------------------------------------------------- section 16
+fusion:
+  weight_step: 0.25
+  representations: [binary, crest_1px]
+  ring_px: [0, 3]                          # evaluated SEPARATELY; never in the champion unless allowed below
+  allow_ring_in_champion: false
+  false_length_dist_km: 1.0                # predicted px farther than this from ANY mapped fault (upper bound)
+
+# ------------------------------------------------------------------------------------------------- section 17
+inference:
+  source: fold_average                     # fold_average (CV checkpoints of the promoted variant) | full_model
+  tile_px: 1024
+  halo_px: 64
+  device: auto
+  save_heads: true
+
+# ------------------------------------------------------------------------------------------------- section 18
+submission:
+  area_frac_source: geo                    # geo all-zone choice | <float> share of eligible pixels
+  min_positive_frac: 0.0001                # refuse near-empty maps
+  max_positive_frac: 0.25                  # refuse near-full maps
+  export_m9_if: PROMOTE                    # PROMOTE | NEVER
+
+# ------------------------------------------------------------------------------------------------- gates
+gates:
+  provisional_profiles: [PILOT]
+  g1_representation: {min_conditional_gain: 0.003, min_unique_systems: 2}
+  g2_dense: {min_fusion_gain: 0.005, min_unique_systems: 3}
+  g3_reconstruction: {min_recall_gain: 0.02, max_discovery_drop: 0.005, max_geo_drop: 0.005}
+  g4_tracing: {min_system_recall: 0.30, min_additional_systems: 3}
+  g5_extensions: {min_unique_systems: 2, min_dti_gain: 0.003}

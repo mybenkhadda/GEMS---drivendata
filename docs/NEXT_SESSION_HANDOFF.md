@@ -1,6 +1,14 @@
 # Next-session handoff
 
-**Newest (M7):** `notebooks/colab/GEMS_M7_DISCOVERY_FIRST.ipynb` + `gems_bench/m7/`; guide `docs/M7_DISCOVERY_FIRST.md`.
+**Newest (M9, 2026-10-26):** `notebooks/colab/GEMS_M9_GEOFAULT_PRODUCTION.ipynb` + `gems_bench/m9/` + `configs/m9/
+geofault_production.yaml`; guide `docs/M9_GEOFAULT_PRODUCTION.md` (reuse matrix, stages, gates, first experiments).
+New multiscale reconstruction network + tracing + GBM benchmark + fusion; B0/B1 stay the fallback. Nothing executed;
+`tests/test_m9.py` never run. Only existing-code change: `Pipeline.m9()` + optional extras `m9` / `rl` in pyproject.
+
+**M8:** `notebooks/colab/GEMS_M8_PHYSICS_PROBABILISTIC_DISCOVERY.ipynb` + `gems_bench/m8/` (no saved outputs in the
+local checkout; M9 section 00 records whatever M8 left on Drive).
+
+**M7:** `notebooks/colab/GEMS_M7_DISCOVERY_FIRST.ipynb` + `gems_bench/m7/`; guide `docs/M7_DISCOVERY_FIRST.md`.
 Shared submission fixes (template NaN mask, eligible-pixel budget, area ledger) apply to GEMS3 too. Nothing executed.
 
 ## GEMS 3.0 (2026-10-26: discovery-first research)
