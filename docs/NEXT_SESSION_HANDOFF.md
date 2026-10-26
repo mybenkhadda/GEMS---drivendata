@@ -1,4 +1,9 @@
-# Next-session handoff (2026-10-26: GEMS 3.0 discovery-first research)
+# Next-session handoff
+
+**Newest (M7):** `notebooks/colab/GEMS_M7_DISCOVERY_FIRST.ipynb` + `gems_bench/m7/`; guide `docs/M7_DISCOVERY_FIRST.md`.
+Shared submission fixes (template NaN mask, eligible-pixel budget, area ledger) apply to GEMS3 too. Nothing executed.
+
+## GEMS 3.0 (2026-10-26: discovery-first research)
 
 Code authored only. **Nothing was executed**: no notebook, test, training, inference or raster processing. No
 GEMS3 or M6 number exists yet. Working tree on branch `m6-model-selection`, **uncommitted** (see "Git").

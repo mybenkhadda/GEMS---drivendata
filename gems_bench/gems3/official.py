@@ -142,6 +142,11 @@ class Unit:
         t = self.truth & self.ev
         return t & ~self.exclude if self.exclude is not None else t
 
+    def scored_mask(self) -> np.ndarray:
+        """Pixels whose predictions the scorer counts: ``ev`` minus the exclusion (pixel-exact known faults for
+        ``disc_official``). The eligible budget domain starts from this mask."""
+        return self.ev & ~self.exclude if self.exclude is not None else self.ev.copy()
+
 
 def _dilate(mask: np.ndarray, metres: float) -> np.ndarray:
     return ndimage.distance_transform_edt(~mask, sampling=(100.0, 100.0)) <= metres

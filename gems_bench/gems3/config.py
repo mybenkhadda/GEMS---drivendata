@@ -74,6 +74,8 @@ def validate(cfg: dict) -> None:
         raise GEMS3ConfigError("submission.source must be fold_average | oof_stitched")
     if sub["outside_valid"] not in ("template", "nan"):
         raise GEMS3ConfigError("submission.outside_valid must be template | nan")
+    if sub.get("budget_domain", "eligible") not in ("eligible", "evaluation_zone"):
+        raise GEMS3ConfigError("submission.budget_domain must be eligible | evaluation_zone")
     afs = sub["area_frac_source"]
     if not (afs in ("geo", "primary") or (isinstance(afs, (int, float)) and 0 < afs < 1)):
         raise GEMS3ConfigError("submission.area_frac_source must be geo | primary | a fraction in (0, 1)")

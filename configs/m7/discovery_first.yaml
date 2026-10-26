@@ -1,0 +1,242 @@
+# GEMS M7: discovery-first research (notebooks/colab/GEMS_M7_DISCOVERY_FIRST.ipynb).
+# Loaded by gems_bench.m7.config.load_m7_config; the notebook's M7_CONFIG overrides these keys (unknown keys are
+# rejected). Outputs: <drive_root>/outputs/m7_discovery_first/. Guide: docs/M7_DISCOVERY_FIRST.md.
+# Central question: can new geological candidate generators recover fault systems that B0 / B1 miss?
+version: 1
+enabled: true
+mode: DISCOVERY_FIRST                 # the only mode
+models: [b0_reference, b1_bg_weight]  # experiment stems whose FULL OOF + discovery maps are reused (never retrained)
+retrain_existing_cnns: false          # must stay false (refused otherwise)
+seed: 2026
+
+output_dir: outputs/m7_discovery_first
+cache_dir: cache/m7                   # label-free full-grid caches (candidate layers); local, rebuilt if lost
+legacy_gems3_dir: reports/gems3       # read-only: earlier GEMS3 artifacts reused when their fingerprints match
+overwrite_existing: false             # true recomputes stages; immutable tables are still never overwritten
+save_figures: true                    # PNG + SVG, with the plotting data as CSV
+save_csv: true
+save_parquet: true
+save_rasters: true
+push_to_drive: true
+
+# ---------------------------------------------------------------------------------------------- section switches
+sections:
+  s01_baseline: true                  # B0 / B1 / fusion / thinning / ring, one eligible-pixel protocol
+  s02_failure_analysis: true          # which systems are missed, by whom, why; case-study panels
+  s03_candidates: true                # multiscale geological candidate generator (label-free)
+  s04_oracle: true                    # coverage audit: THE scientific gate
+  s05_dem_inventory: true             # DEM inventory + representative pilot selection (no download)
+  s06_dem_morphology: false           # streams the pilot tiles (needs dem.download or tiles already on disk)
+  s07_dem_increment: false            # geophysics vs DEM vs combined candidates on DEM-covered pixels
+  s08_network_analysis: true          # known-fault network: endpoints, gaps, parallels, continuation hypotheses
+  s09_corruption_benchmark: true      # synthetic damaged maps, deterministic completion first
+  s10_candidate_features: true        # candidate-level feature table (runs after a GO, or with ranking.force)
+  s11_candidate_ranking: true         # label-free control + LightGBM ablations
+  s12_rasterization: true             # candidate -> raster representations, eligible budget, cross-fitted
+  s13_comparison: true                # every method, every protocol, per zone, paired + bootstrap
+  s14_decision_report: true           # PROMOTE / RETAIN / REJECT / INCONCLUSIVE + research report
+  s15_submission_export: false        # full-region GeoTIFFs (GPU recommended unless full maps are cached)
+  s16_probe_packages: false           # up to three leaderboard probes + leaderboard_log.csv template
+stop_after_oracle_if_inadequate: true # sections 10-12 refuse to run after an oracle NO-GO unless ranking.force
+
+# ---------------------------------------------------------------------------------------------- evaluation protocol
+evaluation:
+  tasks: [geo, disc_official, disc_retained_fp]   # gems3.official.TASKS; disc_official = hidden-test analogue
+  primary_task: disc_official
+  folds: all                          # all | list of geographic fold ids used everywhere (reported separately)
+  splits: all                         # all | list of discovery split ids
+  budget_domain: eligible             # eligible (valid & template-finite & not known & not ring) | evaluation_zone
+  include_template_mask: true         # eligible also drops pixels where the official template is NaN
+  area_fracs: [0.0025, 0.005, 0.01, 0.015, 0.02, 0.03, 0.05, 0.075, 0.10, 0.15]
+  fusion_weights: [0.0, 0.25, 0.5, 0.75, 1.0]     # weight of models[0] (B0) in the per-zone rank fusion
+  ring_px: [0, 1, 2, 3]               # suppression ring around KNOWN faults (3 px = 300 m); experimental, disc only
+  ridge_sigma_px: 1.0
+  system_recovered_support: 0.5       # a truth pixel is 'hit' when its TP support >= this
+  system_recovered_frac: 0.5          # a system is recovered when >= this share of its scored pixels are hit
+  short_system_km: 2.0
+  block_km: 20.0                      # spatial bootstrap blocks
+  n_boot: 500
+  proximity_bands_km: [1.0, 3.0]      # truth / FP split by distance to known faults: <1, 1-3, >3 km
+
+# offline numbers recorded in earlier sessions (NOT leaderboard scores, never overwritten, only compared)
+recorded_reference:
+  geo_dti: {b0: 0.16456, b1: 0.16788, b2_nnpu: 0.13618, c1_geometry: 0.14246, fusion: 0.178, fusion_thinning: 0.183}
+  disc_official_dti: {b1_raw: 0.092, b0_raw: 0.104, rank_fusion: 0.122, fusion_skeleton_1px: 0.159,
+                      fusion_ring_300m: 0.192, candidate_pool_oracle_100m: 0.237}
+  candidate_system_recall: 0.125
+  missed_by_both_share: 0.78
+
+# ---------------------------------------------------------------------------------------------- section 01
+baseline:
+  thinning_reps: [crest_1px, skeleton_1px]        # 1-px representations compared with the binary top-a map
+  ring_rep: best_thin                 # representation the ring is tested on: best_thin | binary
+  representations:                    # gems3.representation syntax
+    binary:       {select: top}
+    crest_1px:    {select: crest}
+    skeleton_1px: {select: top, post: [[skeleton, {width_px: 0}]]}
+
+# ---------------------------------------------------------------------------------------------- section 02
+failure:
+  method_budget: selected             # selected (each method's own held-out choice) | <float> common area fraction
+  context_bands: {magnetic: rtp, gravity: iso_grav_anom, terrain: det_elev}
+  gradient_features: {magnetic: "magnetic:thdr@1km", gravity: "gravity:thdr@2km", terrain: "terrain:thdr@0.5km"}
+  morphology_features: {slope: "raw:det_elev_slope", relief: "terrain:relief@2km", curvature: "terrain:curvature@1km"}
+  agreement_feature: "eda:edge_agreement_count"
+  parallel_max_km: 3.0
+  parallel_max_angle_deg: 15.0
+  case_studies_per_class: 3
+  case_margin_km: 4.0
+  case_min_half_km: 6.0
+
+# ---------------------------------------------------------------------------------------------- section 03
+candidates:
+  scales_m: [200, 400, 800, 1600]     # Gaussian scale of each edge / ridge detector
+  sources:                            # label-free; raw bands are read on demand, features from the feature store
+    - {name: mag_edge,   band: rtp,                modality: magnetic,     mode: edge}
+    - {name: grav_edge,  band: iso_grav_anom,      modality: gravity,      mode: edge}
+    - {name: terr_edge,  band: det_elev,           modality: terrain,      mode: edge}
+    - {name: terr_line,  band: det_elev,           modality: terrain,      mode: ridge_valley}
+    - {name: cond_edge,  band: cond_surf,          modality: conductivity, mode: edge}
+    - {name: base_edge,  band: depth_to_base_surf, modality: basement,     mode: edge, scales_m: [800, 1600, 3200]}
+    - {name: mag_line,   feature: "magnetic:tilt@2km", modality: magnetic, mode: ridge_valley, scales_m: [200, 400]}
+    - {name: eda_fused,  feature: "eda:fused_score",   modality: fused,    mode: ridge, scales_m: [200, 400]}
+  model_sources:                      # per-unit honest maps (geo: OOF, disc: the split's discovery map)
+    - {name: b0_line, model: b0_reference, scales_m: [200, 400]}
+    - {name: b1_line, model: b1_bg_weight, scales_m: [200, 400]}
+  tip_extension_km: [1.0, 2.0, 4.0]   # straight extensions of the faults KNOWN to the unit (disc: retained; full: all)
+  tip_tail_px: 5
+  top_frac_per_scale: 0.08            # strongest share of each (source, scale) response kept before NMS
+  strong_frac: 0.02                   # single-scale responses this strong are kept without persistence
+  min_coherence: 0.35                 # structure-tensor coherence of the response (lineament, not blob)
+  min_persistence: 2                  # number of scales a line must persist at (within the scale tolerance)
+  link_gap_px: 4                      # fragment linking: endpoint gap and tangent agreement
+  link_angle_deg: 30.0
+  min_len_km: 0.6
+  dedup_radius_px: 2
+  dedup_overlap: 0.7
+  agreement_radius_px: 2
+  max_candidates_per_source: 60000    # safety cap (longest first)
+
+# ---------------------------------------------------------------------------------------------- section 04
+oracle:
+  density_caps_km_per_100km2: [2.5, 5, 10, 20, 40, 80, 160]   # recall-density curve (label-free confidence order)
+  kd_thresholds: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]          # oracle subset: mean k(dist to truth) >= t
+  max_density_km_per_100km2: 80       # the gate reads coverage at this density (the full pool may be denser)
+  go_if:
+    system_recall: 0.30               # pooled withheld-system recall of the candidate pool at max density
+    incremental_recall_missed_by_both: 0.10   # share of B0+B1-missed systems the pool recovers
+    oracle_dti_gain: 0.02             # oracle DTI over the best cross-fitted baseline of section 01
+  require: [system_recall, any_of_increment_or_gain]   # system recall AND (increment OR oracle gain)
+
+# ---------------------------------------------------------------------------------------------- sections 05-07
+dem:
+  inventory_csv: data/raw/dem_1m/inventory/dem_inventory.csv  # written by the master pipeline (section 9)
+  urls_json: data/raw/dem_1m/tnm_urls.json
+  coverage_mode: pilot                # pilot | expanded
+  n_pilot_tiles: 8
+  min_pilot_tiles: 5
+  max_pilot_tiles: 10
+  expanded_max_tiles: 40
+  max_gib: 6.0                        # refuse to download more than this
+  min_free_disk_gib: 15.0
+  download: false                     # explicit approval after reading the pilot table and the storage estimate
+  overlap_policy: latest
+  quotas: {fault_rich: 2, fault_poor: 1, low_relief_basin: 1, mountain_front: 2, disagreement: 1, missed_by_both: 2}
+  morphology:
+    work_res_m: 2.0                   # 1 m tiles are block-averaged to this before the filters (speed, memory)
+    block_px: 1500                    # block side at work resolution
+    halo_px: 64                       # halo at work resolution (largest filter support)
+    scales_m: [4.0, 16.0, 48.0]       # multiscale TPI / curvature / persistence
+    openness_radius_m: 60.0
+    n_directions: 8
+    scarp_slope_deg: 12.0
+    scarp_coherence: 0.55
+    save_block_seconds: true
+  save_1m_scarp_vectors: false        # 1 m scarp polylines per tile (heavy; off by default)
+  min_scarp_vector_m: 60.0
+  min_coverage: 0.9
+  candidate_layers: [scarp_response_q3, dirdisc_max_q3, scarp_density, openness_diff_q3]   # mosaic band names
+  go_if:
+    min_systems_covered: 3            # fewer withheld systems inside the pilot = INCONCLUSIVE
+    additional_systems: 2             # systems recovered by DEM candidates and not by geophysics candidates
+    incremental_system_recall: 0.05
+    max_full_hours: 60.0              # projected full-coverage processing time
+    max_full_gib: 250.0
+
+# ---------------------------------------------------------------------------------------------- sections 08-09
+map_completion:
+  gap_max_km: 2.0
+  gap_max_angle_deg: 30.0
+  extension_km: [1.0, 2.0, 4.0]
+  angle_hypotheses_deg: [-15.0, 0.0, 15.0]
+  evidence_guided: true
+  evidence_cone_deg: 25.0
+  evidence_layers: ["magnetic:thdr@1km", "gravity:thdr@2km", "terrain:thdr@0.5km", "eda:fused_score"]
+  parallel_offset_km: [0.5, 3.0]
+  parallel_max_angle_deg: 15.0
+  corruption:
+    seed: 2026
+    n_realisations: 2
+    sample_frac: 0.15
+    trim_endpoint_km: [0.5, 1.5]
+    delete_segment_km: [1.0, 3.0]
+    shift_px: 1
+    branch_max_km: 3.0
+    short_fault_km: 2.0
+    eval_radius_km: 5.0
+  learned_if: {recall_crossfit: 0.15, dti_crossfit: 0.05}   # a learned completer only above these
+  learned:
+    lgbm: {num_leaves: 15, learning_rate: 0.05, n_estimators: 200, min_child_samples: 30, seed: 2026}
+
+# ---------------------------------------------------------------------------------------------- sections 10-11
+features:
+  side_offsets_m: [300, 600]
+  side_fields: {magnetic: rtp, gravity: iso_grav_anom, terrain: det_elev}
+  regional_block_km: 20.0
+  parallel_radius_km: 3.0
+ranking:
+  force: false                        # true runs 10-12 even after an oracle NO-GO
+  positive_kd: 0.5                    # label 1: mean k(dist to truth) >= this
+  negative_dist_km: 1.5               # label 0: median distance to truth >= this; otherwise unlabeled (dropped)
+  negative_weight: 0.5                # mapped faults are incomplete: negatives are down-weighted, not trusted
+  run_pu_sensitivity: false
+  pu_negative_weights: [0.25, 0.5, 1.0]
+  exclude_eval_buffer_km: 2.0         # training rows (and their linked networks) near the held-out zone are dropped
+  use_catboost: false
+  lgbm: {num_leaves: 15, learning_rate: 0.05, n_estimators: 300, min_child_samples: 40, subsample: 0.8,
+         subsample_freq: 1, colsample_bytree: 0.8, reg_lambda: 1.0, seed: 2026}
+  catboost: {iterations: 400, depth: 5, learning_rate: 0.05, seed: 2026}
+  ablations: [label_free, neural_support, geom_geophys, geom_geophys_dem, geom_geophys_dem_neural, plus_completion]
+
+# ---------------------------------------------------------------------------------------------- section 12
+rasterization:
+  representations:
+    centerline_1px:    {kind: centerline}
+    corridor_decay_1px: {kind: corridor, width_px: 1, decay: linear}
+    corridor_decay_2px: {kind: corridor, width_px: 2, decay: linear}
+    confidence_width:  {kind: confidence_width, hi_quantile: 0.7, extra_px: 1}
+    subpixel_aa:       {kind: antialiased}
+  fusion_weights: [[1.0, 0.0, 0.0], [0.6, 0.2, 0.2], [0.4, 0.3, 0.3]]   # ranker / label-free / neural rank blend
+  area_fracs: [0.0025, 0.005, 0.01, 0.015, 0.02, 0.03, 0.05]
+  ring_px: [0, 1, 3]
+  hybrid_shares: [0.25, 0.5, 0.75]    # share of the budget given to candidate lines in the hybrid with the fusion
+
+# ---------------------------------------------------------------------------------------------- sections 13-14
+comparison:
+  champion_reference: fusion_thin     # the baseline every new method is paired against
+  min_zones_for_claim: 3
+decision:
+  promote_if: {min_pooled_gain: 0.01, min_zone_win_share: 0.67, worst_zone_delta: -0.01, max_geo_drop: 0.01,
+               min_boot_p_positive: 0.8, max_short_recall_drop: 0.02}
+  reject_if: {pooled_gain_below: -0.005, worst_zone_delta_below: -0.03}
+
+# ---------------------------------------------------------------------------------------------- sections 15-16
+submission:
+  source: fold_average                # fold_average (CV checkpoints, GPU) | oof_stitched (CPU fallback, OOF maps)
+  area_frac_source: geo               # geo | primary | <float>: share of the ELIGIBLE full-region pixels
+  outside_valid: template
+  device: auto
+  candidates: [probe_a, probe_b, probe_c]
+probes:
+  max_probes: 3
+  conservative_fallback: fusion_binary   # probe C when no new method passed its promotion gate
