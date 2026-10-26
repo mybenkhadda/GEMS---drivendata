@@ -289,6 +289,13 @@ class Pipeline:
 
         return M7Research(self.pc, config)
 
+    # -- M8: physics-guided probabilistic discovery (reads M7 artifacts; no CNN retraining) -----------------------
+    def m8(self, config: dict | None = None):
+        """M8 research object (one method per notebook section); writes outputs/m8_physics_probabilistic."""
+        from ..m8.run import M8Research
+
+        return M8Research(self.pc, config)
+
 
 __all__ = ["Pipeline", "PipelineConfig", "PipelineContext", "PipelineStop", "StageFailed", "GPURequired",
            "ConfigError", "MODES"]

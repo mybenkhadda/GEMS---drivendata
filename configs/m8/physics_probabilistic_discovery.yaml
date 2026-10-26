@@ -1,0 +1,403 @@
+# GEMS M8: physics-guided probabilistic fault discovery (notebooks/colab/GEMS_M8_PHYSICS_PROBABILISTIC_DISCOVERY.ipynb).
+# Loaded by gems_bench.m8.config.load_m8_config; the notebook's M8_CONFIG overrides these keys (unknown keys are
+# rejected, except inside `shared`, which is validated by the M7 loader). Outputs: <drive_root>/outputs/m8_physics_probabilistic/.
+# Guide: docs/M8_PHYSICS_PROBABILISTIC_DISCOVERY.md.
+#
+# Central question: do physically meaningful potential-field signals, Monte Carlo stability and network completion
+# recover withheld fault systems that B0 / B1 and the M7 generator miss, at a manageable prediction density, and does
+# that turn into a cross-fitted official-style DTI gain? The CNN champion (B0/B1 fusion + crest thinning) stays the
+# benchmark and the fallback.
+version: 1
+enabled: true
+mode: PHYSICS_PROBABILISTIC_DISCOVERY      # the only mode
+profile: PILOT                             # PILOT | VALIDATE | FULL: computational scope only (see `profiles`)
+seed: 2026
+
+output_dir: outputs/m8_physics_probabilistic
+cache_dir: cache/m8                        # label-free full-grid layer cache (memory-mapped .npy); rebuilt if lost
+m7_output_dir: outputs/m7_discovery_first  # READ-ONLY source of M7 artifacts (never written)
+legacy_gems3_dir: reports/gems3            # read-only: full-region member maps reused when fingerprints match
+overwrite_existing: false                  # true recomputes M8 stages (immutable tables are still never replaced)
+save_figures: true                         # PNG + SVG, with the plotting data as CSV
+save_csv: true
+save_parquet: true
+save_rasters: true
+push_to_drive: true
+display_figures: true                      # the notebook shows the saved PNGs inline
+
+# ------------------------------------------------------------------------------------------------- section switches
+sections:
+  s01_baseline: true                       # recover B0 / B1 / fusion / thinning / ring + M7 artifacts, compatibility
+  s02_signal_recovery: true                # where does geological information disappear? (system x stage matrix)
+  s03_potential_fields: true               # magnetic / gravity / terrain operators (tilt, TDX, AS, LCN, ...)
+  s03b_structural_worms: true              # multiscale worms (upward continuation scale-space)
+  s04_multimodal: true                     # magnetic-gravity alignment, surface-subsurface, context
+  s05_fault_normal_profiles: true          # candidate-oriented transects
+  s06_candidates: true                     # high-recall proposal families + mandatory oracle gate (Gate 2)
+  s07_monte_carlo_signal: true             # Monte Carlo geophysical uncertainty (Gate 3, part 1)
+  s08_monte_carlo_completion: true         # stochastic fault-network completion (corruption benchmark + disc units)
+  s09_dem_pilot: true                      # DEM pilot reuse + incremental value (Gate 4); never blocks other sections
+  s10_candidate_features: true             # candidate feature table (needs Gate 2 GO or ranking.force)
+  s11_ranking: true                        # LightGBM ablations against label-free / CNN-only controls (Gate 5)
+  s12_graph: false                         # optional fragment graph (only after s11 succeeds)
+  s13_rasterization: true                  # probabilistic rasterisation, eligible budget, nested selection
+  s14_ensemble: true                       # Systems A / B / C, cross-fitted fusion, PROMOTE / RETAIN / ... (Gate 6)
+  s15_submission: false                    # validated GeoTIFFs (never uploaded)
+stop_ranking_if_coverage_inadequate: true  # sections 10-13 refuse after a Gate-2 NO_GO unless ranking.force
+
+# ------------------------------------------------------------------------------------------------- profiles
+# A profile only changes HOW MUCH is computed (realisations, extents, samples, gallery sizes). Evaluation units,
+# masks, metric, budget domain, gate thresholds and operator definitions are identical in every profile; the profile
+# is recorded in every fingerprint, manifest and gate row, and gates decided under PILOT are labelled provisional.
+profiles:
+  PILOT:
+    mc_realizations: 16
+    mc_window: "unit:disc_official:0"      # processing extent of the Monte Carlo engine
+    completion_samples: 16                 # stochastic paths per endpoint
+    corruption_realisations: 1
+    case_studies_per_class: 2
+    gallery_per_group: 12
+    persist_transects_max: 200
+    full_region_candidates: false          # full-region pool (needed only for the physics submission)
+    signal_recovery_tasks: [disc_official]
+    n_boot: 200
+    run_pu_sensitivity: false
+  VALIDATE:
+    mc_realizations: 64
+    mc_window: eval_units                  # one region per primary-task unit (geo rows get has_mc = 0)
+    completion_samples: 48
+    corruption_realisations: 2
+    case_studies_per_class: 3
+    gallery_per_group: 30
+    persist_transects_max: 1000
+    full_region_candidates: true
+    signal_recovery_tasks: [disc_official, geo]
+    n_boot: 500
+    run_pu_sensitivity: true
+  FULL:
+    mc_realizations: 128
+    mc_window: full
+    completion_samples: 96
+    corruption_realisations: 3
+    case_studies_per_class: 4
+    gallery_per_group: 60
+    persist_transects_max: 3000
+    full_region_candidates: true
+    signal_recovery_tasks: [disc_official, geo]
+    n_boot: 1000
+    run_pu_sensitivity: true
+profile_overrides: {}                      # e.g. {mc_realizations: 32}: still scope keys only
+
+# ------------------------------------------------------------------------------------------------- shared M7 engine
+# Passed verbatim to gems_bench.m7.config.load_m7_config (configs/m7/discovery_first.yaml schema; unknown keys
+# rejected there). These keys define the protocol every M8 number shares with M7 (units, eligible budget domain,
+# nested selection grids, PU labels, promotion rules). M8 never calls an M7 stage that writes.
+shared:
+  models: [b0_reference, b1_bg_weight]
+  seed: 2026
+  overwrite_existing: false
+  push_to_drive: false
+  evaluation:
+    tasks: [geo, disc_official, disc_retained_fp]
+    primary_task: disc_official
+    folds: all
+    splits: all
+    budget_domain: eligible
+    include_template_mask: true
+    area_fracs: [0.0025, 0.005, 0.01, 0.015, 0.02, 0.03, 0.05, 0.075, 0.10, 0.15]
+    fusion_weights: [0.0, 0.25, 0.5, 0.75, 1.0]
+    ring_px: [0, 1, 2, 3]
+    ridge_sigma_px: 1.0
+    system_recovered_support: 0.5
+    system_recovered_frac: 0.5
+    short_system_km: 2.0
+    block_km: 20.0
+    n_boot: 500
+    proximity_bands_km: [1.0, 3.0]
+  ranking:
+    positive_kd: 0.5
+    negative_dist_km: 1.5
+    negative_weight: 0.5
+    exclude_eval_buffer_km: 2.0
+    use_catboost: false
+    lgbm: {num_leaves: 15, learning_rate: 0.05, n_estimators: 300, min_child_samples: 40, subsample: 0.8,
+           subsample_freq: 1, colsample_bytree: 0.8, reg_lambda: 1.0, seed: 2026}
+  rasterization:
+    area_fracs: [0.0025, 0.005, 0.01, 0.015, 0.02, 0.03, 0.05]
+  comparison:
+    champion_reference: fusion_thin
+    min_zones_for_claim: 3
+  decision:
+    promote_if: {min_pooled_gain: 0.01, min_zone_win_share: 0.67, worst_zone_delta: -0.01, max_geo_drop: 0.01,
+                 min_boot_p_positive: 0.8, max_short_recall_drop: 0.02}
+    reject_if: {pooled_gain_below: -0.005, worst_zone_delta_below: -0.03}
+  dem:
+    download: false                        # explicit approval (pilot ~2.61 GiB estimated by M7)
+    n_pilot_tiles: 8
+    max_gib: 6.0
+  submission:
+    source: oof_stitched                   # oof_stitched = CPU (stitched OOF maps); fold_average needs a GPU
+    area_frac_source: geo
+    outside_valid: template
+    device: auto
+
+# Offline values recorded in earlier M7 runs (NOT leaderboard results). Reported next to recomputed values in
+# section 01; never overwritten, never reconciled, never claimed as reproduced unless recomputed here.
+recorded_m7:
+  disc_official_dti: {b0_raw: 0.10392, b1_raw: 0.09174, fusion_binary: 0.12254, fusion_skeleton_1px: 0.12797,
+                      fusion_crest_1px: 0.16158, fusion_thin_ring300: 0.19831}
+  candidate_withheld_system_recall: 0.0417
+  candidate_systems_recovered: 5
+  candidate_systems_total: 120
+  candidate_missed_by_both_recovered: 0
+  candidate_missed_by_both_total: 93
+  candidate_oracle_dti: 0.1735
+  candidate_oracle_density_constrained_dti: 0.0613
+  map_completion_standalone_dti: 0.0144
+
+# ------------------------------------------------------------------------------------------------- section 01
+baseline:
+  reuse_m7_selection: true                 # reuse M7 baseline_selection.json when its protocol keys match
+  methods: [b0_raw, b1_raw, b0_binary, b1_binary, fusion_binary, fusion_crest_1px, fusion_skeleton_1px,
+            fusion_thin, fusion_thin_ring300, fusion_thin_ring_sel]
+  champion: fusion_thin                    # System A
+
+# ------------------------------------------------------------------------------------------------- bands / physics
+bands:
+  verify_derivatives: true
+  sample_px: 200000
+  consistency_rho: 0.80                    # |Spearman| needed to call a provided derivative consistent with its parent
+  unit_ratio_tolerance: 3.0                # max ratio between hg / vg scale factors before combining them physically
+  verified: {}                             # user-confirmed definitions, e.g. {tmi_hg: "THDR of tmi (nT/km)"}
+  units: {}                                # user-confirmed units, e.g. {rtp: nT, iso_grav_anom: mGal}
+  families:                                # one physical survey = one family (never perturbed independently)
+    magnetic: {field: rtp, alternates: [tmi, mag_anom], parent_of_derivatives: tmi, hgrad: tmi_hg, vgrad: tmi_vg,
+               effective_resolution_m: 400, potential_field: true}
+    gravity: {field: iso_grav_anom, parent_of_derivatives: iso_grav_anom, hgrad: iso_grav_anom_hg,
+              vgrad: iso_grav_anom_vg, slope: iso_grav_anom_slope, effective_resolution_m: 2000, potential_field: true}
+    terrain: {field: det_elev, parent_of_derivatives: det_elev, slope: det_elev_slope, effective_resolution_m: 100,
+              potential_field: false}
+    conductivity: {field: cond_surf, effective_resolution_m: 1000, potential_field: false}
+    basement: {field: depth_to_base_surf, effective_resolution_m: 2000, potential_field: false}
+  context: [geod_2ndinv, geod_shearrate, geod_dilaterate, deq_n100a15, ieq_n100a15, cond_surf, depth_to_base_surf]
+
+physics:
+  scales_m: [100, 200, 400, 800, 1600, 3200]   # Gaussian sigma (m) of the derivative operators
+  min_scale_factor: 0.5                    # scales below factor x effective resolution are not computed (logged)
+  operators:                               # competing definitions; *_band only when the derivative bands are verified
+    magnetic: [thdr, tilt_edge, tdx, analytic_signal, theta, lcn, tilt_edge_band, analytic_signal_band]
+    gravity: [thdr, tilt_edge, tdx, analytic_signal, lcn, tilt_edge_band]
+    terrain: [thdr, lcn]
+    conductivity: [thdr, lcn]
+    basement: [thdr]
+  lcn_window_m: 5000                       # local contrast normalisation window (Gaussian sigma = window / 2)
+  amplitude_floor_quantile: 0.02           # tilt / TDX / theta undefined (NaN) where AS is below this quantile
+  save_layers: ["magnetic:tilt_edge@400", "magnetic:tdx@400", "magnetic:analytic_signal@400", "magnetic:lcn@200",
+                "gravity:thdr@1600", "gravity:tilt_edge@1600", "terrain:thdr@200"]
+  resolution_snr: 3.0                      # spectral effective-resolution estimate: power / noise floor >= this
+
+worms:
+  scale_space: {magnetic: upward, gravity: upward, terrain: gaussian}
+  levels_m: [100, 200, 400, 800, 1600, 3200]   # upward-continuation heights (potential fields) or Gaussian sigma
+  families: [magnetic, gravity, terrain]
+  local_block_km: 20.0                     # local percentile threshold blocks
+  local_quantile: 0.85
+  coherence_min: 0.3
+  link_tolerance_factor: 0.5               # cross-level link distance = factor x level (>= 1 px)
+  link_angle_deg: 20.0
+  min_levels: 2
+
+multimodal:
+  tolerances_m: [300, 800]                 # magnetic-gravity peaks need not coincide (gravity ~2 km resolution)
+  orient_tol_deg: 20.0
+  terrain_tolerance_m: 300
+  context_sigma_km: 10.0
+
+# ------------------------------------------------------------------------------------------------- section 02
+signal_recovery:
+  modalities: [magnetic, gravity, terrain, conductivity, basement]
+  raw_definitions: [contrast, gradient, variance]
+  raw_consensus: any                       # a system is 'raw present' if ANY definition is present (absent = all absent)
+  contrast_offset_m: 300
+  variance_window_m: 500
+  variance_regional_m: 10000
+  null_shifts: 24                          # rigid translations of the same trace (system-matched null)
+  null_shift_km: [3.0, 12.0]
+  null_min_valid: 0.8
+  present_percentile: 0.80
+  stage_scale_m: 200
+  tolerance_px: 1                          # stage masks dilated by this many px (support >= 0.5 within 150 m)
+  covered_frac: 0.5
+  large_scale_m: 1600                      # regional-artifact heuristic
+  long_candidate_km: 30.0
+
+profiles_fn:                               # section 05 fault-normal profiles
+  offsets_m: [100, 200, 300, 500, 800, 1200]
+  station_step_px: 2
+  smooth_px: 5
+  tangent_px: 4
+  fields: {magnetic: rtp, gravity: iso_grav_anom, conductivity: cond_surf, terrain: det_elev,
+           basement: depth_to_base_surf}
+  continuity_threshold: 0.5
+  min_valid_share: 0.99
+  gallery_min_len_km: 2.0
+  unlabelled_min_dist_km: 2.0
+
+# ------------------------------------------------------------------------------------------------- section 06
+generation:
+  scales_m: [200, 400, 800, 1600]
+  min_len_km: 0.4                          # short fragments are preserved (M7: 0.6)
+  top_frac_per_scale: 0.10
+  strong_frac: 0.02
+  min_coherence: 0.25
+  min_persistence: 1                       # persistence is a FEATURE in M8, not a filter
+  local_threshold_block_km: 20.0           # local percentile thresholds (0 = global)
+  link_variants: [[2, 25.0], [5, 35.0]]    # (gap px, angle deg): duplicates are absorbed with provenance
+  max_curvature_deg_per_km: 60.0           # paths are split where they bend more than this
+  dedup_radius_px: 2
+  dedup_overlap: 0.7
+  agreement_radius_px: 3
+  max_candidates_per_source: 60000
+  tip_tail_px: 5
+  tip_extension_km: [1.0, 2.0, 4.0]
+  families:                                # label-free (full grid, cached)
+    - {name: mag_thdr, layer: "magnetic:thdr", modality: magnetic}
+    - {name: mag_tilt, layer: "magnetic:tilt_edge", modality: magnetic}
+    - {name: mag_tdx, layer: "magnetic:tdx", modality: magnetic}
+    - {name: grav_thdr, layer: "gravity:thdr", modality: gravity, scales_m: [800, 1600, 3200]}
+    - {name: grav_tilt, layer: "gravity:tilt_edge", modality: gravity, scales_m: [1600, 3200]}
+    - {name: terr_edge, band: det_elev, modality: terrain, mode: edge}
+    - {name: terr_line, band: det_elev, modality: terrain, mode: ridge_valley}
+    - {name: terr_slope, band: det_elev_slope, modality: terrain, mode: ridge}
+    - {name: cond_edge, band: cond_surf, modality: conductivity, mode: edge, scales_m: [800, 1600]}
+    - {name: xmod_agree, layer: "agree:mag_grav@800", modality: crossmodal, scales_m: [100, 200]}
+    - {name: worm_mag, layer: "worms:magnetic", modality: magnetic, scales_m: [100, 200]}
+    - {name: worm_grav, layer: "worms:gravity", modality: gravity, scales_m: [200, 400]}
+  model_families:                          # per unit (honest maps only)
+    - {name: cnn_b0, model: b0_reference, scales_m: [200, 400]}
+    - {name: cnn_b1, model: b1_bg_weight, scales_m: [200, 400]}
+    - {name: cnn_disagree, kind: disagreement, scales_m: [200, 400]}
+  include_tips: true
+  include_completion: true                 # section 08 hypotheses (when computed)
+  include_dem: true                        # DEM crests inside the DEM footprint (when a mosaic exists)
+
+oracle:
+  density_caps_km_per_100km2: [2.5, 5, 10, 20, 40, 80, 160]
+  kd_thresholds: [0.1, 0.3, 0.5, 0.7]
+  gate_density_km_per_100km2: 80
+  regional_block_km: 20.0
+  regional_cap_km_per_100km2: 160
+  go_if:
+    system_recall: 0.30                    # pooled withheld-system recall at the gate density
+    gain_over_m7_at_matched_density: 0.05  # system-recall gain over the M7 pool at the same density
+    missed_by_both_coverage: 0.10          # share of B0 + B1 missed systems covered at the gate density
+  require: [system_recall, any_of_gain_or_missed]
+
+# ------------------------------------------------------------------------------------------------- section 07
+monte_carlo:
+  tile_px: 1536
+  halo_px: 96
+  checkpoint_every: 4                      # aggregates checkpointed (and pushed) every n realisations: resumable
+  families:
+    - {family: magnetic, operators: [thdr, tilt_edge, tdx], scales_m: [200, 400, 800]}
+    - {family: gravity, operators: [thdr, tilt_edge], scales_m: [800, 1600, 3200]}
+    - {family: terrain, operators: [thdr], scales_m: [200, 400]}
+  distributions:                           # ASSUMPTIONS (heuristic sensitivity unless measured_noise is given)
+    noise_frac: {dist: uniform, lo: 0.0, hi: 0.10}          # x robust std of the high-pass field of the family
+    noise_corr_m: {dist: choice, values: [200, 400, 800]}   # spatially correlated noise (Gaussian kernel sigma)
+    registration_factor: {dist: normal, sigma: 0.25}        # shift sigma = factor x effective resolution, per family
+    sigma_log_jitter: {dist: normal, sigma: 0.2}            # multiplicative jitter of the operator scale
+    operator: {dist: choice}                                 # uniform among the family's operators
+    top_frac_factor: {dist: uniform, lo: 0.7, hi: 1.4}
+    min_coherence: {dist: uniform, lo: 0.2, hi: 0.4}
+    link_gap_px: {dist: choice, values: [2, 3, 5]}
+    link_angle_deg: {dist: choice, values: [20.0, 30.0, 40.0]}
+    min_persistence: {dist: choice, values: [1, 2]}
+  measured_noise: {}                       # {family: sigma in field units} from survey metadata -> 'measured'
+  match_radius_px: 2
+  detect_frac: 0.5
+  occupancy_extra_threshold: 0.5           # MC-only structures: occupancy crests >= this, outside the pool
+  min_extra_len_km: 0.6
+  gate:
+    min_unique_systems: 2                  # systems covered only by MC-only structures at matched density
+    min_ranking_gain: 0.003                # physics_mc - physics_only cross-fitted DTI (section 11)
+
+# ------------------------------------------------------------------------------------------------- section 08
+completion:
+  max_len_km: 4.0
+  headings_deg: [-15.0, -7.5, 0.0, 7.5, 15.0]
+  temperature: 0.15
+  curvature_penalty: 0.15
+  orientation_weight: 0.3
+  cone_deg: 30.0
+  stop_evidence: 0.35
+  stop_patience_px: 6
+  min_len_km: 0.3
+  shift_px: [1, 2, 3]                      # displaced-trace hypotheses (normal shifts of known segments)
+  shift_min_gain: 0.05
+  occupancy_thresholds: [0.1, 0.25, 0.5]
+  gap_attraction: 0.5
+  evidence_layers: ["magnetic:tilt_edge@400", "gravity:thdr@1600", "terrain:thdr@200"]
+  orientation_layer: "magnetic:thdr@400"
+  use_dem: true
+
+# ------------------------------------------------------------------------------------------------- section 09
+dem_pilot:
+  reuse_m7: true                           # pilot tables + mosaic from M7 outputs (read-only) when present
+  stream: false                            # process the pilot tiles here (needs shared.dem.download or tiles on disk)
+  matched_density_km_per_100km2: 40.0
+  go_if: {min_systems_covered: 3, additional_systems: 2, incremental_system_recall: 0.05}
+
+# ------------------------------------------------------------------------------------------------- sections 10-12
+features:
+  physics_layers: ["magnetic:thdr@200", "magnetic:tilt_edge@400", "magnetic:tdx@400", "magnetic:analytic_signal@400",
+                   "magnetic:lcn@200", "gravity:thdr@1600", "gravity:tilt_edge@1600", "gravity:lcn@1600",
+                   "terrain:thdr@200", "terrain:lcn@200"]
+  worm_families: [magnetic, gravity, terrain]
+  agreement_layers: ["agree:mag_grav@300", "agree:mag_grav@800"]
+  include_profiles: true
+  include_mc: true
+  include_completion: true
+
+ranking:
+  force: false                             # true runs 10-13 after a Gate-2 NO_GO (not recommended)
+  ablations: [label_free, cnn_only, physics_only, physics_mc, physics_dem, physics_cnn, all]
+  pu_negative_weights: [0.25, 0.5, 1.0]
+  gate:
+    min_gain_over_controls: 0.005          # best learned ranker - max(label_free, cnn_only)
+
+graph:
+  link_radius_px: 8
+  max_angle_deg: 35.0
+  edge_model: heuristic                    # heuristic | lgbm
+  propagate_weight: 0.5
+  min_gain: 0.005
+
+# ------------------------------------------------------------------------------------------------- section 13
+rasterization:
+  representations:
+    centerline: {kind: centerline}
+    occupancy_weighted: {kind: occupancy, alpha: 0.5}
+    uncertainty_spread: {kind: uncertainty, max_px: 2}
+    confidence_corridor: {kind: confidence_width, hi_quantile: 0.8, extra_px: 1}
+    crest: {kind: crest}
+  regional_beta: [0.0, 0.5]                # 0 = global rank; 0.5 = half regional-block rank (density control)
+  regional_block_km: 20.0
+  ring_px: [0, 3]
+  score: best                              # best learned ranker of section 11 (else label_free)
+
+# ------------------------------------------------------------------------------------------------- section 14
+ensemble:
+  weight_step: 0.25
+  representations: [binary, crest_1px]
+  systems: {A: s01_fusion_thin, B: m8_physics, C: m8_completion}
+  false_length_dist_km: 1.0                # candidate false-length density: predicted px > this from ANY mapped fault
+
+gates:
+  g1_signal_recovery: {min_additional_systems: 3, min_additional_share: 0.05}
+  provisional_profiles: [PILOT]            # gates decided under these profiles are labelled PROVISIONAL
+
+# ------------------------------------------------------------------------------------------------- section 15
+submission:
+  ring_variants: [0, 3]                    # CNN baseline without / with the 300 m known-fault ring
+  export_physics_if: PROMOTE               # the physics champion is exported only with this verdict
