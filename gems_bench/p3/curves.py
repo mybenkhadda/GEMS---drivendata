@@ -23,7 +23,8 @@ c_j(g) = max p over offsets at distance <= d_j. For the mask {p >= t}:
 
 so all thresholds are answered by sorting c_j and the FP weights once. Conventions match
 ``metric.MaskedScorer`` exactly (eval mask zeroes predictions outside it; excluded pixels
-neither count as truth nor as FP, but may still support TP) — see tests/test_phase3_scoring.py.
+neither count as truth nor as FP, but may still support TP unless ``exclude_supports_tp=False``,
+the official reading of the organizers' known-fault mask) — see tests/test_phase3_scoring.py.
 """
 from __future__ import annotations
 
@@ -64,7 +65,8 @@ class BinaryCurve:
     def __init__(self, pred: np.ndarray, truth: np.ndarray, eval_mask: np.ndarray, exclude_mask: np.ndarray | None = None,
                  *, far_mask: np.ndarray | None = None, radius_m: float = DTI_RADIUS_M,
                  pixel_m: tuple[float, float] = (100.0, 100.0), tolerances=(100.0, 200.0, 300.0),
-                 alpha: float = DTI_ALPHA, beta: float = DTI_BETA, eps: float = DTI_EPS):
+                 alpha: float = DTI_ALPHA, beta: float = DTI_BETA, eps: float = DTI_EPS,
+                 exclude_supports_tp: bool = True):
         self.alpha, self.beta, self.eps, self.radius_m, self.pixel_m = alpha, beta, eps, radius_m, pixel_m
         ev_full = np.asarray(eval_mask, bool)
         pad = int(np.ceil(radius_m / min(pixel_m))) + 1
@@ -74,6 +76,8 @@ class BinaryCurve:
         p = np.asarray(pred, np.float64)[self.sl]
         p = np.where(np.isfinite(p), np.clip(p, 0.0, 1.0), 0.0)
         p = np.where(ev, p, -np.inf)                       # outside eval: never in a mask, never supports TP
+        if not exclude_supports_tp:                         # official reading: a masked pixel has no effect at all
+            p = np.where(ex, -np.inf, p)
         self.ev_px = int(ev.sum())
         G = np.asarray(truth, bool)[self.sl] & ev & ~ex
         self.G_rc = np.argwhere(G)

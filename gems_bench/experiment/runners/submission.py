@@ -40,28 +40,15 @@ class SubmissionRunner(Runner):
 
     def train(self):
         """Full-region probability map (predictions/full_region.tif)."""
-        from ...cnn import device_of
-        from ...training.checkpoint import CheckpointManager
-        from ...training.trainer import load_unit_model
+        from ...inference.full_raster import cnn5_full_region, cv_checkpoints
 
         row = self._model_row()
         ctx = self.ctx
         if self.rd.raster_path("full_region").exists():
             return {"full_region": "exists"}
         exp_dir = self.exp.paths.experiments / str(row["experiment_id"])
-        ck = sorted((exp_dir / "checkpoints").glob("cv_fold*_model.pt"))
-        if row["kind"] == "cnn5" and ck:
-            from ...inference.full_raster import full_region_map
-            from ...phase4_training import pooled_context, to_tensor_stack
-            from ...training.cv import prepare_stack5
-
-            dev = device_of()
-            models = [load_unit_model(CheckpointManager(exp_dir / "checkpoints", f.name.replace("_model.pt", "")), dev)
-                      for f in ck]
-            spec = models[0][0]
-            g = to_tensor_stack(prepare_stack5(ctx, spec), dev)
-            gctx = pooled_context(g, spec.context_factor) if spec.context else None
-            p = full_region_map(models, g, ctx.data.valid, dev, gctx)
+        if row["kind"] == "cnn5" and cv_checkpoints(exp_dir):
+            p = cnn5_full_region(ctx, exp_dir)
         elif row["kind"] in ("lgbm5", "lgbm"):
             import lightgbm as lgb
 
