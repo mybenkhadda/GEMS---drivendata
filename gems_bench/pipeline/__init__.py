@@ -296,6 +296,14 @@ class Pipeline:
 
         return M8Research(self.pc, config)
 
+    # -- M9: GeoFault production (multiscale reconstruction network + tracing + ranking; reads M7 / M8 artifacts) --
+    def m9(self, config: dict | None = None):
+        """M9 research object (one method per notebook section, stages PREPARE..SUBMIT);
+        writes outputs/m9_geofault_production."""
+        from ..m9.run import M9Research
+
+        return M9Research(self.pc, config)
+
 
 __all__ = ["Pipeline", "PipelineConfig", "PipelineContext", "PipelineStop", "StageFailed", "GPURequired",
            "ConfigError", "MODES"]
