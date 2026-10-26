@@ -252,27 +252,36 @@ class GEMS3Research:
             from .._version import provenance
 
             out = []
+            dom = sub.get("budget_domain", "eligible")
             for fill in sorted({False, bool(sub["known_fill"])}):
-                score, q = S.transform(maps, self.ctx.data, params, rep, known_fill=fill,
-                                       sigma_px=cfg["metric_opt"].get("ridge_sigma_px", 1.0))
-                name = S.candidate_name(params, fill)
+                score, q, ledger = S.transform(maps, self.ctx.data, params, rep, known_fill=fill,
+                                               sigma_px=cfg["metric_opt"].get("ridge_sigma_px", 1.0), domain=dom)
+                name = S.candidate_name(params, fill, dom)
                 man = {"members": metas, "parameters": params, "representation": rep, "known_fill": fill,
+                       "budget_domain": dom,
                        "selection": {"task": cfg["primary_task"],
                                      "dti_crossfit": sel["choice"][cfg["primary_task"]]["dti_crossfit"],
                                      "dti_insample": sel["choice"][cfg["primary_task"]]["dti_insample"]},
                        "code": provenance(), "protocol_hash": self.m6.protocol_hash,
                        "submission_source": sub["source"], "uploaded": False}
-                info = S.export(self.ws, name, score, q, self.ctx.data, man, sub["outside_valid"])
+                info = S.export(self.ws, name, score, q, self.ctx.data, man, sub["outside_valid"], ledger,
+                                int(params.get("ring", 0) or 0))
+                fin = info["area_ledger"][-1]
                 out.append({"candidate": name, "file": info["submission"], "raw_score": info["raw_score"],
-                            "known_fill": fill, **{k: v for k, v in params.items()},
+                            "known_fill": fill, "budget_domain": dom, **{k: v for k, v in params.items()},
                             "positive_frac_valid": info["validation"]["positive_frac_valid"],
+                            "final_frac_of_eligible": fin["frac_of_eligible"], "final_on_known_px": fin["on_known_px"],
                             "checks_failed": ";".join(info["validation"]["checks_failed"])})
             tab = pd.DataFrame(out)
-            self.ws.save_table(tab, "submission_candidates", "submissions")
+            self.ws.save_table(tab, self._sub_table(), "submissions")
             return tab
 
         fp = self._fp(sub, cfg["metric_opt"]["representations"], (self.selection() or {}).get("choice"))
-        return self._stage("submission", fp, fn, lambda: self.ws.load_table("submission_candidates", "submissions"))
+        return self._stage("submission", fp, fn, lambda: self.ws.load_table(self._sub_table(), "submissions"))
+
+    def _sub_table(self) -> str:
+        """Index of submission files; the corrected (eligible) budget rule writes its own index."""
+        return "submission_candidates" + ("_elig" if self.cfg["submission"].get("budget_domain") == "eligible" else "")
 
     # =========================================================================== 5. candidates
     def _candidate_units(self):

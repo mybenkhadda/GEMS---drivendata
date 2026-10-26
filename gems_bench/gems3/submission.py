@@ -76,26 +76,84 @@ def member_full_map(ctx, ws, member: dict, source: str = "fold_average", device=
     return p, {**meta, "reused": False}
 
 
+BUDGET_DOMAINS = ("eligible", "evaluation_zone")
+
+
+def ring_zone(known: np.ndarray, ring_px: int) -> np.ndarray:
+    """Pixels within ``ring_px`` of a known fault, the known pixels themselves excluded (an experimental
+    suppression region; NOT an organizer exclusion: the official mask is the known pixels only)."""
+    from scipy import ndimage
+
+    from ..postprocess.topology import _disk
+
+    known = np.asarray(known, bool)
+    if ring_px <= 0 or not known.any():
+        return np.zeros(known.shape, bool)
+    return ndimage.binary_dilation(known, structure=_disk(int(ring_px))) & ~known
+
+
+def eligible_mask(data, ring_px: int = 0, domain: str = "eligible") -> np.ndarray:
+    """Budget domain of a full-region submission.
+
+    ``eligible``         valid & template finite & not a known fault (masked pixel-exactly by the scorer) & not in the
+                         optional suppression ring: every selected pixel can change the score.
+    ``evaluation_zone``  valid & template finite (historical rule: known pixels compete for the budget)."""
+    if domain not in BUDGET_DOMAINS:
+        raise KeyError(f"budget domain {domain!r}; known {BUDGET_DOMAINS}")
+    m = np.asarray(data.valid, bool) & np.asarray(data.template_valid, bool)
+    if domain == "evaluation_zone":
+        return m
+    return m & ~np.asarray(data.labels, bool) & ~ring_zone(data.labels, int(ring_px or 0))
+
+
+def area_ledger(q: np.ndarray, data, ring_px: int = 0, step: str = "") -> dict:
+    """Positive (q > 0) area of one prediction state, split by pixel class, as counts and fractions.
+
+    Fractions are reported both as a share of the valid footprint and as a share of the eligible domain, so a
+    budget leaking onto masked pixels (known faults, ring, template nodata, outside the footprint) is visible."""
+    a = np.nan_to_num(np.asarray(q, np.float32), nan=0.0) > 0
+    valid, tv, known = (np.asarray(x, bool) for x in (data.valid, data.template_valid, data.labels))
+    ring = ring_zone(known, int(ring_px or 0))
+    elig = valid & tv & ~known & ~ring
+    n_valid, n_elig = max(int(valid.sum()), 1), max(int(elig.sum()), 1)
+    return {"step": step, "positive_px": int(a.sum()), "frac_of_valid": float((a & valid).sum() / n_valid),
+            "frac_of_eligible": float((a & elig).sum() / n_elig), "eligible_px": int(elig.sum()),
+            "on_eligible_px": int((a & elig).sum()), "on_known_px": int((a & known).sum()),
+            "on_ring_px": int((a & ring).sum()), "on_template_nodata_px": int((a & ~tv).sum()),
+            "outside_valid_px": int((a & ~valid).sum())}
+
+
 def transform(maps: list[np.ndarray], data, params: dict, rep: dict, *, known_fill: bool = False,
-              sigma_px: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
-    """(fused score, transformed prediction) on the full footprint with the development rule."""
+              sigma_px: float = 1.0, domain: str = "eligible") -> tuple[np.ndarray, np.ndarray, list[dict]]:
+    """(fused score, transformed prediction, area ledger) on the full footprint with the development rule.
+
+    The area fraction counts pixels of the budget domain (``eligible_mask``); the ledger records the positive
+    area after every step (selection, ring, fill) so the effect of each masking operation is explicit."""
     valid = data.valid
+    ring = int(params.get("ring", 0) or 0)
     s = R.fuse(R.rank01(maps[0], valid), R.rank01(maps[1], valid), float(params["w"]))
-    q = R.apply(R.with_ring(rep, int(params.get("ring", 0) or 0)), s, valid, float(params["frac"]),
-                known=data.labels, sigma_px=sigma_px)
+    elig = eligible_mask(data, ring, domain)
+    q = R.apply(R.with_ring(rep, ring), s, valid, float(params["frac"]), known=data.labels, sigma_px=sigma_px,
+                eligible=elig)
+    ledger = [area_ledger(q, data, ring, f"selected+post (domain={domain})")]
     if known_fill:
         q = R.op_known_fill(q, {}, {"known": data.labels})
-    return np.where(valid, s, np.nan).astype(np.float32), q
+        ledger.append(area_ledger(q, data, ring, "known_fill"))
+    return np.where(valid, s, np.nan).astype(np.float32), q, ledger
 
 
 def finalise(q: np.ndarray, data, outside_valid: str = "template") -> np.ndarray:
-    """float32 in [0, 1] on the footprint; outside it 0 where the template is finite ('template') or NaN."""
+    """float32 in [0, 1]; NaN where the official template is NaN (outside the competition bounds), 0 where the
+    template is finite but the data footprint is not (``'template'``), or NaN outside the data footprint too
+    (``'nan'``). The template decides nodata: a finite value is never written where the template is NaN, even
+    inside the data footprint (the earlier rule ``~valid & ~template_valid`` let such pixels through)."""
     out = np.clip(np.nan_to_num(np.asarray(q, np.float32), nan=0.0), 0.0, 1.0).astype(np.float32)
+    tv = np.asarray(data.template_valid, bool)
     if outside_valid == "template":
-        out[~data.valid & ~data.template_valid] = np.nan
-        out[~data.valid & data.template_valid] = 0.0
+        out[~tv] = np.nan
+        out[tv & ~data.valid] = 0.0
     else:
-        out[~data.valid] = np.nan
+        out[~data.valid | ~tv] = np.nan
     return out
 
 
@@ -113,11 +171,16 @@ def validate(path: Path, data, outside_valid: str = "template") -> dict:
                "same_shape": (src.height, src.width) == (t["height"], t["width"])}
     fin = np.isfinite(a)
     v = a[fin]
+    tv, valid = np.asarray(data.template_valid, bool), np.asarray(data.valid, bool)
+    scored = valid & tv                                       # inside the bounds AND inside the data footprint
     res.update(min=float(v.min()) if v.size else np.nan, max=float(v.max()) if v.size else np.nan,
-               has_inf=bool(np.isinf(a).any()), finite_inside_valid=float(fin[data.valid].mean()),
-               nan_where_template_nan=bool((~fin[~data.template_valid]).all()) if (~data.template_valid).any() else True,
-               finite_where_template_finite=float(fin[data.template_valid].mean()) if data.template_valid.any() else np.nan,
-               positive_frac_valid=float((a[data.valid] > 0).mean()), mean_valid=float(np.nanmean(a[data.valid])),
+               has_inf=bool(np.isinf(a).any()), finite_inside_valid=float(fin[valid].mean()),
+               finite_inside_scored=float(fin[scored].mean()) if scored.any() else np.nan,
+               valid_but_template_nan_px=int((valid & ~tv).sum()),
+               nan_where_template_nan=bool((~fin[~tv]).all()) if (~tv).any() else True,
+               finite_where_template_finite=float(fin[tv].mean()) if tv.any() else np.nan,
+               positive_frac_valid=float((a[valid] > 0).mean()), mean_valid=float(np.nanmean(a[valid])),
+               positive_px_on_known=int(((np.nan_to_num(a) > 0) & np.asarray(data.labels, bool)).sum()),
                unique_values_sample=int(len(np.unique(v[:1_000_000]))) if v.size else 0)
     fails = []
     if res["count"] != 1 or res["dtype"] != "float32":
@@ -132,9 +195,9 @@ def validate(path: Path, data, outside_valid: str = "template") -> dict:
         fails.append("values outside [0, 1]")
     if res["has_inf"]:
         fails.append("infinite values")
-    if res["finite_inside_valid"] < 1.0:
-        fails.append("NaN inside the data footprint")
-    if outside_valid == "template" and not res["nan_where_template_nan"]:
+    if scored.any() and res["finite_inside_scored"] < 1.0:
+        fails.append("NaN inside the data footprint (where the template is finite)")
+    if not res["nan_where_template_nan"]:
         fails.append("finite values where the template is NaN")
     if outside_valid == "template" and res["finite_where_template_finite"] < 1.0:
         fails.append("NaN where the template is finite")
@@ -143,7 +206,8 @@ def validate(path: Path, data, outside_valid: str = "template") -> dict:
     return res
 
 
-def export(ws, name: str, score: np.ndarray, q: np.ndarray, data, manifest: dict, outside_valid: str = "template") -> dict:
+def export(ws, name: str, score: np.ndarray, q: np.ndarray, data, manifest: dict, outside_valid: str = "template",
+           ledger: list[dict] | None = None, ring_px: int = 0) -> dict:
     from gems_eda.io import write_geotiff
 
     from ..submission import write_submission
@@ -152,19 +216,23 @@ def export(ws, name: str, score: np.ndarray, q: np.ndarray, data, manifest: dict
     atomic_save(raw_p, lambda t: write_geotiff(t, {"fused_rank_score": np.asarray(score, np.float32)}, data.grid))
     ws._track(raw_p)
     arr = finalise(q, data, outside_valid)
+    led = list(ledger or []) + [area_ledger(arr, data, ring_px, f"finalised (outside_valid={outside_valid})")]
     sub_p = ws.root / "submissions" / f"{name}.tif"
     atomic_save(sub_p, lambda t: write_submission(arr, data, Path(t)))
     ws._track(sub_p)
     checks = validate(sub_p, data, outside_valid)
     info = {**manifest, "candidate": name, "submission": sub_p.name, "raw_score": raw_p.name,
-            "outside_valid": outside_valid, "validation": checks, "written": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            "outside_valid": outside_valid, "area_ledger": led, "validation": checks,
+            "written": time.strftime("%Y-%m-%dT%H:%M:%S")}
     ws.save_json(json.loads(json.dumps(info, default=str)), f"submissions/{name}.json")
     return info
 
 
-def candidate_name(params: dict, known_fill: bool) -> str:
+def candidate_name(params: dict, known_fill: bool, domain: str = "evaluation_zone") -> str:
+    """File stem; the eligible budget domain gets its own suffix so files of the historical rule are never
+    overwritten by the corrected one."""
     s = f"gems3_{params['rep']}_w{float(params['w']):g}_f{float(params['frac']):g}_r{int(params.get('ring', 0) or 0)}"
-    return s + ("_knownfill" if known_fill else "")
+    return s + ("_elig" if domain == "eligible" else "") + ("_knownfill" if known_fill else "")
 
 
 def resolve_parameters(selection: dict, sub_cfg: dict, primary_task: str) -> dict:

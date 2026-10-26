@@ -282,6 +282,13 @@ class Pipeline:
 
         return GEMS3Research(self.pc, config)
 
+    # -- M7: discovery-first research (candidate coverage before ranking; no CNN retraining) ---------------------
+    def m7(self, config: dict | None = None):
+        """M7 research object (one method per notebook section); writes outputs/m7_discovery_first."""
+        from ..m7.run import M7Research
+
+        return M7Research(self.pc, config)
+
 
 __all__ = ["Pipeline", "PipelineConfig", "PipelineContext", "PipelineStop", "StageFailed", "GPURequired",
            "ConfigError", "MODES"]

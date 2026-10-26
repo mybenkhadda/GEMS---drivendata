@@ -172,16 +172,21 @@ SOFT_OPS = ("two_level", "soft_top")
 
 
 def apply(rep: dict, score: np.ndarray, ev: np.ndarray, frac: float | None = None, *, known: np.ndarray | None = None,
-          crest: np.ndarray | None = None, sigma_px: float = 1.0) -> np.ndarray:
-    """Prediction raster (float32 in [0, 1], 0 outside ``ev``) of one representation."""
+          crest: np.ndarray | None = None, sigma_px: float = 1.0, eligible: np.ndarray | None = None) -> np.ndarray:
+    """Prediction raster (float32 in [0, 1], 0 outside ``ev``) of one representation.
+
+    ``eligible`` (subset of ``ev``) is the budget domain: the top-``frac`` selection is made among, and counted on,
+    eligible pixels only (scored, non-masked pixels: no template nodata, no pixel-exact known fault, no suppression
+    ring). ``None`` keeps the historical behaviour (budget = share of ``ev``, known pixels compete for it)."""
     sel = rep.get("select", "top")
+    dom = ev if eligible is None else (np.asarray(eligible, bool) & ev)
     if sel == "raw":
         q = np.clip(np.nan_to_num(score, nan=0.0), 0.0, 1.0).astype(np.float32)
     elif sel == "top":
-        q = top_mask(score, ev, frac).astype(np.float32)
+        q = top_mask(score, dom, frac).astype(np.float32)
     elif sel == "crest":
         c = crest if crest is not None else crest_map(score, ev, sigma_px)
-        q = crest_top(score, ev, frac, c).astype(np.float32)
+        q = crest_top(score, dom, frac, c).astype(np.float32)
     else:
         raise KeyError(sel)
     aux = {"score": score, "ev": ev, "known": known}

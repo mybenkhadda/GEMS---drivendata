@@ -61,7 +61,9 @@ submission:
   area_frac_source: geo            # geo | primary | <float>: fraction of the full footprint to predict
   known_ring_px: selected          # selected | <int>
   known_fill: false                # true writes 1 on known-fault pixels (neutral under the official reading)
-  outside_valid: template          # template: 0 where the template is finite, NaN where it is NaN | nan
+  outside_valid: template          # template: NaN wherever the template is NaN, 0 where it is finite but outside the data
+  budget_domain: eligible          # eligible: the area fraction is counted and selected on valid & template-finite &
+                                   # non-known & non-ring pixels | evaluation_zone: historical rule (known pixels compete)
   device: auto
 
 candidates:

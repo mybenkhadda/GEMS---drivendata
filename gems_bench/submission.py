@@ -61,7 +61,7 @@ def finalise(prob: np.ndarray, data: NativeData, transform: dict | None, known_p
     p = np.clip(np.nan_to_num(p, nan=0.0), 0, 1).astype(np.float32)
     if known_policy == "model_max_known":
         p = np.maximum(p, data.labels.astype(np.float32))
-    p[~data.valid] = np.nan
+    p[~data.valid | ~np.asarray(data.template_valid, bool)] = np.nan   # never finite where the template is NaN
     return p
 
 
@@ -90,9 +90,10 @@ def check_submission(path: Path, data: NativeData) -> dict:
             "res": src.res,
         }
     fin = np.isfinite(a)
+    inside = data.valid & np.asarray(data.template_valid, bool)          # data footprint inside the template bounds
     res.update(min=float(np.nanmin(a)), max=float(np.nanmax(a)), finite_frac=float(fin.mean()),
-               finite_inside_valid=float(fin[data.valid].mean()), finite_outside_valid=int(fin[~data.valid].sum()),
-               mean_inside=float(np.nanmean(a[data.valid])), frac_ge_0_5=float((a[data.valid] >= 0.5).mean()))
+               finite_inside_valid=float(fin[inside].mean()), finite_outside_valid=int(fin[~inside].sum()),
+               mean_inside=float(np.nanmean(a[inside])), frac_ge_0_5=float((a[inside] >= 0.5).mean()))
     assert res["count"] == 1 and res["dtype"] == "float32", res
     assert res["same_crs"] and res["same_transform"] and res["same_shape"], res
     assert 0.0 <= res["min"] and res["max"] <= 1.0, res
