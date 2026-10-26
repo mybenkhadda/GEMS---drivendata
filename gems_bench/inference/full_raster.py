@@ -86,6 +86,32 @@ def full_region_map(models: list, gstack, valid: np.ndarray, device, gctx=None, 
     return out
 
 
+def cv_checkpoints(exp_dir) -> list:
+    """Final CV fold checkpoints of a cnn5 experiment (``checkpoints/cv_fold<k>_model.pt``), sorted."""
+    from pathlib import Path
+
+    return sorted((Path(exp_dir) / "checkpoints").glob("cv_fold*_model.pt"))
+
+
+def cnn5_full_region(ctx, exp_dir, device=None) -> np.ndarray:
+    """Fold-average map of a cnn5 experiment's CV checkpoints over the whole valid footprint (no retraining)."""
+    from ..cnn import device_of
+    from ..phase4_training import pooled_context, to_tensor_stack
+    from ..training.checkpoint import CheckpointManager
+    from ..training.cv import prepare_stack5
+    from ..training.trainer import load_unit_model
+
+    ck = cv_checkpoints(exp_dir)
+    if not ck:
+        raise FileNotFoundError(f"no cv_fold*_model.pt under {exp_dir}/checkpoints")
+    dev = device or device_of()
+    models = [load_unit_model(CheckpointManager(f.parent, f.name.replace("_model.pt", "")), dev) for f in ck]
+    spec = models[0][0]
+    g = to_tensor_stack(prepare_stack5(ctx, spec), dev)
+    gctx = pooled_context(g, spec.context_factor) if spec.context else None
+    return full_region_map(models, g, ctx.data.valid, dev, gctx)
+
+
 def shifted_tile_consistency(model, gstack, box, spec, device, shift_px: int = 64, gctx=None) -> dict:
     r0, r1, c0, c1 = box
     a = predict_heads(model, gstack, box, spec, device, gctx)["seg"]

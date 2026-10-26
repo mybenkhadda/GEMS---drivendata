@@ -1,0 +1,117 @@
+# GEMS 3.0: discovery-first research on EXISTING predictions (no CNN retraining).
+# Loaded by gems_bench.gems3.config.load_gems3_config; the notebook's GEMS3_CONFIG overrides these keys
+# (unknown keys are rejected). Outputs: <drive_root>/reports/gems3/. Guide: docs/GEMS_OFFICIAL_METRIC_AUDIT.md
+# and docs/NEXT_SESSION_HANDOFF.md.
+version: 1
+enabled: true
+mode: FAST_DISCOVERY_RESEARCH      # the only mode
+retrain_existing_cnns: false       # must stay false (refused otherwise)
+
+# experiment stems (configs/experiments/<stem>.yaml) whose FULL OOF + discovery maps are reused, loaded through M6
+models: [b0_reference, b1_bg_weight]
+
+# stage switches: each stage is fingerprinted and reused; a failed optional stage does not stop the others
+verify_official_metric: true       # audit/: synthetic masking audit + official-vs-internal comparison on B0 / B1
+run_metric_optimization: true      # metric_optimization/ + ensembles/: thresholds, area, width, dilation, fusion
+prepare_submission_candidate: true # predictions/ + submissions/: full-region inference + validated GeoTIFF
+run_candidate_generation: true     # proposals/: label-free geophysical lineaments + model centrelines + tip extensions
+run_candidate_oracle: true         # proposals/oracle_*: headroom of the candidate set (uses labels: upper bound)
+run_candidate_ranker: false        # ranker/: weighted evidence score + LightGBM (only if the oracle shows headroom)
+run_dem_gate: false                # dem/: do cached 1 m DEM features add evidence beyond B0 / B1? (no download)
+run_map_completion: false          # map_completion/: corruption protocol + deterministic endpoint-extension baseline
+
+overwrite_existing: false
+save_figures: true                 # PNG + SVG, with the plotting data as CSV
+save_csv: true
+save_parquet: true
+save_rasters: true
+output_dir: reports/gems3
+cache_dir: cache/gems3
+
+# evaluation tasks (gems3.official.TASKS). disc_official is the hidden-test analogue: truth = withheld systems,
+# retained faults masked PIXEL-EXACTLY and their predictions ignored (organizer statements, t/11516)
+tasks: [geo, disc_official, disc_excl]
+primary_task: disc_official
+
+metric_opt:
+  fusion_weights: [0.0, 0.25, 0.5, 0.75, 1.0]   # weight of models[0] in per-zone rank fusion (1 = models[0] alone)
+  area_fracs: [0.0025, 0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.10, 0.15, 0.20]
+  thresholds: [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]      # absolute cuts of the raw maps (A2 / A3)
+  n_weights_stage2: 2              # best stage-1 fusion weights (dev-selected) carried into the representation stage
+  refine_factors: [0.6, 0.8, 1.0, 1.25, 1.6]    # stage-2 area grid: each zone's dev-optimal fraction x these
+  ridge_sigma_px: 1.0              # smoothing of the score before crest (non-maximum) suppression
+  representations:                 # stage 2; "select" then "post" operations (gems3.representation)
+    binary:            {select: top}
+    crest_1px:         {select: crest}
+    crest_3px:         {select: crest, post: [[dilate, {radius_px: 1}]]}
+    skeleton_1px:      {select: top, post: [[skeleton, {width_px: 0}]]}
+    skeleton_3px:      {select: top, post: [[skeleton, {width_px: 1}]]}
+    dilate_1px:        {select: top, post: [[dilate, {radius_px: 1}]]}
+    across_strike_1px: {select: crest, post: [[oriented, {across_px: 1, along_px: 0}]]}
+    along_strike_3px:  {select: crest, post: [[oriented, {across_px: 0, along_px: 3}]]}
+    confidence_width:  {select: crest, post: [[confidence_width, {hi_quantile: 0.5, extra_px: 1}]]}
+    halo_soft:         {select: crest, post: [[two_level, {halo_px: 1, halo_value: 0.7}]]}
+    soft_top:          {select: top, post: [[soft_top, {v_min: 0.5}]]}
+  known_ring_px: [1, 2, 3]         # stage 3 (disc tasks): best stage-2 representation + suppression ring around known
+  raw_models: true                 # A0 / A1: raw sigmoid maps scored as they are (soft)
+
+submission:
+  source: fold_average             # fold_average (CV fold checkpoints over the full footprint) | oof_stitched (no GPU)
+  representation: selected         # selected (primary-task choice on all zones) | binary
+  area_frac_source: geo            # geo | primary | <float>: fraction of the full footprint to predict
+  known_ring_px: selected          # selected | <int>
+  known_fill: false                # true writes 1 on known-fault pixels (neutral under the official reading)
+  outside_valid: template          # template: 0 where the template is finite, NaN where it is NaN | nan
+  device: auto
+
+candidates:
+  sources:                         # label-free feature-store layers (|robust z|); missing names are skipped
+    - {name: mag_thdr1, feature: "magnetic:thdr@1km", scale_m: 300.0, top_frac: 0.06}
+    - {name: mag_thdr2, feature: "magnetic:thdr@2km", scale_m: 500.0, top_frac: 0.06}
+    - {name: mag_tilt2, feature: "magnetic:tilt@2km", scale_m: 300.0, top_frac: 0.06, absolute: true}
+    - {name: grav_thdr2, feature: "gravity:thdr@2km", scale_m: 500.0, top_frac: 0.06}
+    - {name: cond_thdr5, feature: "conductivity:thdr@5km", scale_m: 800.0, top_frac: 0.05}
+    - {name: terr_ridge1, feature: "terrain:ridge@1km", scale_m: 200.0, top_frac: 0.06}
+    - {name: terr_curv05, feature: "terrain:curvature@0.5km", scale_m: 200.0, top_frac: 0.06, absolute: true}
+  model_sources:                   # per-unit honest maps (geo: OOF, disc: the split's discovery map)
+    - {name: b0_crest, model: b0_reference, scale_m: 200.0, top_frac: 0.05}
+    - {name: b1_crest, model: b1_bg_weight, scale_m: 200.0, top_frac: 0.05}
+  tip_extension_km: [1.0, 2.0, 4.0]   # straight extensions of known-fault endpoints (disc + full only)
+  tip_tail_px: 5
+  min_len_km: 0.6
+  dedup_radius_px: 2               # a candidate is a duplicate if >= dedup_overlap of it lies this close to a kept one
+  dedup_overlap: 0.7
+  agreement_radius_px: 2           # cross-modal agreement: share of a candidate within this distance of another source
+
+oracle:
+  kd_thresholds: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]   # oracle keeps candidates with mean k(d) >= t
+  system_recovered_support: 0.5    # a system is recovered when >= system_recovered_frac of its pixels reach this
+  system_recovered_frac: 0.5
+  short_system_km: 2.0
+  continue_if: {system_recall: 0.5, oracle_dti_gain: 0.05}   # go / no-go for the ranker vs the best stage-2 DTI
+
+ranker:
+  force: false                     # true runs the ranker even when the oracle decision is STOP
+  positive_kd: 0.5                # label 1: mean k(dist to truth) >= this
+  negative_dist_km: 1.5            # label 0: median distance to truth >= this; otherwise unlabeled (ignored)
+  negative_weight: 0.5             # mapped faults are incomplete: negatives are down-weighted, not trusted
+  exclude_eval_buffer_km: 2.0      # training rows inside the scored unit's eval zone (+ buffer) are dropped
+  area_fracs: [0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.10]
+  lgbm: {num_leaves: 15, learning_rate: 0.05, n_estimators: 300, min_child_samples: 40, subsample: 0.8,
+         colsample_bytree: 0.8, reg_lambda: 1.0, seed: 2026}
+
+dem_gate:
+  features: []                     # [] = every cached feature whose name starts with "dem" (Phase-5 store)
+  min_coverage: 0.9
+  sample_px: 200000
+  min_ap_gain: 0.01                # continue scaling the DEM pipeline only above this held-out AP gain
+
+map_completion:
+  seed: 2026
+  n_realisations: 3
+  sample_frac: 0.15                # share of eligible endpoints / short faults / components corrupted per class
+  delete_segment_km: [1.0, 3.0]
+  trim_endpoint_km: [0.5, 1.5]
+  short_fault_km: 2.0
+  shift_px: 1
+  extension_km: [0.5, 1.0, 2.0]

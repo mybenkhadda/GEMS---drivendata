@@ -19,9 +19,18 @@ Implementation choices that are *not* fixed by the organizers (all explicit argu
 * ``eval_mask`` — pixels outside it contribute neither ground truth nor false positives
   (their predictions are zeroed before the local max, so they cannot create TP either).
 * ``exclude_mask`` — optional known-fault exclusion: excluded pixels are removed from G
-  and from the FP sum, but their predictions *can* still support TP of nearby G pixels.
-  The organizers do not state that known USGS faults are excluded from the hidden-test
-  scoring; this option exists for pseudo-discovery experiments and sensitivity analysis.
+  and from the FP sum. With ``exclude_supports_tp=True`` (default, historical behaviour) their
+  predictions can still support TP of nearby G pixels; with ``False`` they are zeroed first,
+  so an excluded pixel has no effect at all.
+
+Organizer statements (community.drivendata.org t/11516, 2026-09-16 / 09-21; see
+docs/GEMS_OFFICIAL_METRIC_AUDIT.md): the hidden-test truth is *new* faults only; known
+USGS/INGENIOUS pixels are masked pixel-exactly (mask identical to the training labels, no
+buffer) and "do not count towards penalty terms"; predictions near a known trace but far
+from new truth are fully penalised; "it should not matter whether these known faults are
+included with predictions or not". That last sentence implies ``exclude_supports_tp=False``,
+which is :data:`OFFICIAL_EXCLUDE_SUPPORTS_TP`. Pooling: one Tversky index over all pixels of
+the public subset (t/11550).
 """
 from __future__ import annotations
 
@@ -35,6 +44,7 @@ DTI_ALPHA = 0.2
 DTI_BETA = 0.8
 DTI_RADIUS_M = 300.0
 DTI_EPS = 1e-6
+OFFICIAL_EXCLUDE_SUPPORTS_TP = False     # reading of the organizer statement; UNVERIFIED in code (no public scorer)
 
 
 @dataclass(frozen=True)
@@ -122,7 +132,7 @@ def dti_components(pred: np.ndarray, truth: np.ndarray, *,
                    radius_m: float = DTI_RADIUS_M,
                    pixel_m: tuple[float, float] = (100.0, 100.0),
                    alpha: float = DTI_ALPHA, beta: float = DTI_BETA, eps: float = DTI_EPS,
-                   crop: bool = True) -> DTIComponents:
+                   crop: bool = True, exclude_supports_tp: bool = True) -> DTIComponents:
     """Exact DTI components on a raster (see module docstring for conventions)."""
     truth = np.asarray(truth, dtype=bool)
     if pred.shape != truth.shape:
@@ -135,6 +145,8 @@ def dti_components(pred: np.ndarray, truth: np.ndarray, *,
         pred, truth, ev, ex = pred[sl], truth[sl], ev[sl], ex[sl]
     p = clean_prediction(pred)
     p[~ev] = 0.0
+    if not exclude_supports_tp:
+        p[ex] = 0.0
     G = truth & ev & ~ex
     n = int(G.sum())
     fp_region = ev & ~ex
@@ -161,12 +173,14 @@ class MaskedScorer:
     """
 
     def __init__(self, truth, eval_mask=None, exclude_mask=None, radius_m=DTI_RADIUS_M,
-                 pixel_m=(100.0, 100.0), alpha=DTI_ALPHA, beta=DTI_BETA, eps=DTI_EPS):
+                 pixel_m=(100.0, 100.0), alpha=DTI_ALPHA, beta=DTI_BETA, eps=DTI_EPS,
+                 exclude_supports_tp: bool = True):
         truth = np.asarray(truth, bool)
         ev = np.ones(truth.shape, bool) if eval_mask is None else np.asarray(eval_mask, bool)
         ex = np.zeros(truth.shape, bool) if exclude_mask is None else np.asarray(exclude_mask, bool)
         self.sl = _bbox(ev, int(np.ceil(radius_m / min(pixel_m))) + 1)
         self.ev, ex = ev[self.sl], ex[self.sl]
+        self.zero = ~self.ev if exclude_supports_tp else ~self.ev | ex
         self.G = truth[self.sl] & self.ev & ~ex
         self.fp_region = self.ev & ~ex
         self.n = int(self.G.sum())
@@ -180,7 +194,7 @@ class MaskedScorer:
 
     def components(self, pred: np.ndarray) -> DTIComponents:
         p = clean_prediction(pred[self.sl])
-        p[~self.ev] = 0.0
+        p[self.zero] = 0.0
         fp = float((p[self.fp_region] * self.fp_w).sum())
         mass = float(p[self.ev].sum())
         if not self.n:

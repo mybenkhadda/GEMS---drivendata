@@ -275,6 +275,13 @@ class Pipeline:
 
         return M6Analysis(self.pc, config)
 
+    # -- GEMS 3.0: discovery-first research on existing predictions (no CNN retraining) ---------------------------
+    def gems3(self, config: dict | None = None):
+        """GEMS3 research object (``.run()`` / single stages); writes reports/gems3 (docs/NEXT_SESSION_HANDOFF.md)."""
+        from ..gems3.run import GEMS3Research
+
+        return GEMS3Research(self.pc, config)
+
 
 __all__ = ["Pipeline", "PipelineConfig", "PipelineContext", "PipelineStop", "StageFailed", "GPURequired",
            "ConfigError", "MODES"]
