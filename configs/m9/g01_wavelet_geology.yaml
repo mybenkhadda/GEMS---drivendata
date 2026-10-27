@@ -1,0 +1,93 @@
+# GEMS G01: physics-informed wavelet fault discovery (research experiment, NOT an M9 production stage).
+# Loaded by gems_bench.m9.research.geology_io.load_g01_config; the notebook's G01_CONFIG overrides these keys
+# (unknown keys are rejected). Notebook: notebooks/colab/GEMS_G01_GEOLOGICAL_WAVELET_EXPERIMENT.ipynb.
+# Guide: docs/m9/G01_GEOLOGICAL_WAVELET.md. Outputs: outputs/m9_geofault_production/research/G01_wavelet_geology/<run>/
+#
+# Question (falsifiable): does label-free fusion of magnetic and gravity wavelet evidence (tolerant co-location,
+# axial strike agreement, multiscale persistence) place more of an equal-area prediction budget near held-out faults
+# than either field alone, than a simple gradient edge, and than M9's engineered cross-modal layers?
+# Every G01 score is label-free and has NO learned weight: labels are used only to evaluate.
+version: 1
+experiment: G01_wavelet_geology
+seed: 2026
+output_subdir: research/G01_wavelet_geology   # under the M9 workspace (outputs/m9_geofault_production)
+overwrite: false                              # true rewrites files inside the SAME fingerprinted run folder
+
+fields: {mag: magnetic, grav: gravity}        # G01 role -> M9 section-03 spectral family (cached log-Gabor layers)
+raw_bands: {mag: rtp, grav: iso_grav_anom, terrain: det_elev}   # simple-edge baseline / surface expression only
+wavelengths_km: auto                          # auto = every wavelength cached for BOTH fields; or an explicit list
+wavelength_rel_tol: 0.02                      # magnetic / gravity wavelengths closer than 2 % are the same scale
+expected_pixel_m: 100.0                       # M9 wavelets were computed with PX_KM = 0.1: recorded, checked
+
+normalization:
+  reference: training_geography               # training_geography (per unit, held-out zone never used) | all_valid
+  sample_px: 200000                           # reference pixels sampled per unit (seeded)
+  n_quantiles: 1001
+
+tolerance:                                    # lateral magnetic-gravity offset allowed (METRES; pixels from the grid)
+  min_m: 200.0
+  per_wavelength: 0.25                        # tol(lambda) = clip(0.25 * lambda, min_m, max_m): quarter wavelength
+  max_m: 1200.0
+  reach: 2.0                                  # soft tolerant max searched out to reach * tol
+  n_rings: 4                                  # nested neighbourhoods, weight exp(-r^2 / (2 tol^2)) at radius r
+  footprint: square                           # square (separable, fast) | disk (exact Euclidean, slower)
+  ablation_m: [0.0, 300.0, 800.0, 1600.0]     # fixed tolerances for the tolerance ablation (G01-C only)
+
+orientation:
+  smooth_frac_of_tol: 0.5                     # sigma of the doubled-angle smoothing = 0.5 * tol(lambda)
+
+persistence:
+  q: 0.8                                      # a scale "carries" a structure when its energy percentile >= q
+  floor: 0.5                                  # G01-E = G01-D * (floor + (1 - floor) * P)
+
+existing:                                     # G01-F: M9 section-02 engineered cross-modal layers (cached)
+  patterns: ["^m9:xmod:mag_grav_tol@", "^m9:xmod:mag_grav_orient@"]
+
+baselines:
+  edge_band: mag                              # role of the raw band for the simple-edge baseline (THDR percentile)
+  edge_sigma_m: 200.0
+  random: true
+
+boundary_margin_m: 400.0                      # wavelet edge artefacts: pixels closer than this to the data edge are
+                                              # never selected nor scored (same domain for every candidate)
+
+candidates: [G01-A, G01-B, G01-C, G01-D, G01-E, G01-F]
+ablations: {per_wavelength: true, tolerance: true}
+
+evaluation:
+  tasks: [geo, disc_official]
+  zones: all                                  # all | profile (only the zones the M9 profile trains)
+  area_fracs: [0.005, 0.01, 0.02, 0.03, 0.05, 0.10]
+  ablation_area_fracs: [0.03]                 # per-wavelength / tolerance ablations: these budgets only
+  primary_area_frac: 0.03
+  distance_tol_m: [0.0, 100.0, 200.0, 300.0, 500.0, 1000.0]
+  primary_distance_m: 300.0
+  block_km: 20.0                              # spatial bootstrap blocks
+  n_boot: 500
+  references: [G01-A, G01-F, edge]            # paired block-bootstrap deltas of every candidate vs these
+  official_style: true                        # also the official-style DTI of the binary mask (separate table)
+
+decision:                                     # verdict of each hypothesis contrast (primary budget / distance)
+  metric: f1                                  # f1 | precision | recall | enrichment
+  min_p_positive: 0.9                         # paired block bootstrap P(delta > 0) for SUPPORTED (<= 1 - this: REFUTED)
+  min_zone_win_share: 0.67                    # and the candidate wins on at least this share of held-out zones
+
+exploratory:
+  full_region: true                           # label-free full-region maps (reference = all valid pixels)
+  tile_px: 1024
+
+save:
+  raster_dtype: float16                       # evidence lies in [0, 1]: float16 keeps ~1e-3 precision
+  geotiff: false                              # also GeoTIFFs of the exploratory candidate maps (rasterio)
+  figures: true
+  pdf: true
+  push_to_drive: true
+
+build_missing:                                # reuse first: only when the M9 cache lacks the layers
+  wavelets: false                             # true: compute ONLY the missing log-Gabor layers (M9 code, same names)
+  crossmodal: false                           # true: compute the M9 section-02 cross-modal layers (M9 code)
+
+figures:
+  window_half_px: 250                         # 50 km x 50 km windows at 100 m
+  n_cases: 3
+  dpi: 170
