@@ -1,0 +1,101 @@
+# GEMS P6 fast track to the leaderboard (docs/p6/P6_FAST_TRACK.md). Code-authoring-first: every number is produced
+# in Colab; nothing here is a measured result. The B0/B1 fallback (m9_fallback_fusion_thin.tif) stays the champion
+# until a candidate passes its gate.
+version: p6.1
+output_dir: outputs/p6_fast_track
+m9_output_dir: outputs/m9_geofault_production       # read-only source of the fallback, selection and caches
+seed: 2026
+overwrite_existing: false
+push_to_drive: true
+
+dates: {freeze: "2026-11-25", final_submission: "2026-11-30", deadline: "2026-12-03"}
+
+# Hard compute caps of the fast track (hours). Each workstream refuses to start when its own cap is spent.
+budget:
+  gpu_hours: 12.0
+  cpu_hours: 20.0
+  workstreams: {w0: {gpu: 0.0, cpu: 0.5}, w1: {gpu: 4.0, cpu: 1.5}, w2: {gpu: 0.0, cpu: 6.0},
+                w3: {gpu: 2.0, cpu: 0.5}, w4: {gpu: 0.0, cpu: 6.0}, w5: {gpu: 0.0, cpu: 1.0},
+                w6: {gpu: 0.0, cpu: 0.5}}
+
+# Reference values recorded in earlier sessions (NOT recomputed here; gates use the recomputed fallback when present).
+recorded:
+  fallback: {disc_official_dti: 0.162, disc_worst: 0.126, geo_dti: 0.183, geo_worst: 0.170}
+
+# ------------------------------------------------------------------------------------------------------- W0
+probes:
+  champion: fusion_thin
+  fallback_file: m9_fallback_fusion_thin.tif         # existing file in <m9_output_dir>/submissions (never rewritten)
+  ring_px: 3                                         # suppression ring of probe B (300 m)
+  include: [A, B, C, D]                              # D is a diagnostic (all eligible pixels = 1)
+  tie_delta: 0.005                                   # |public delta| below this = inconclusive (assumption)
+  max_scored_per_week: 3                             # organizer rule: 3 scored submissions per rolling 7 days
+  log: reports/p6/leaderboard_log.csv                # repository copy; a Drive copy lives under output_dir
+
+# ------------------------------------------------------------------------------------------------------- W1
+seeds:
+  families:                                          # existing runs first; extra seeds trained only within budget
+    b0: {stem: b0_reference, existing: [b0_reference], extra_seeds: [2027, 2028]}
+    b1: {stem: b1_bg_weight, existing: [b1_bg_weight], extra_seeds: [2027, 2028]}
+  max_members_per_family: 3
+  priority: [b0, b1]                                 # rewritten by seeds.plan from measured run cost / diversity
+  run_hours_default: 1.0                             # used only when no measured run time exists
+  tta_rot180: true
+  fusion_weights: [0.25, 0.5, 0.75]
+  promote: {min_disc_gain: 0.005, max_geo_drop: 0.0, max_worst_drop: 0.0}
+
+# ------------------------------------------------------------------------------------------------------- W2
+stack:
+  tasks: [geo, disc_official]
+  g02_run_id: null                                   # newest G02 run when null
+  g02_keys: {g02c: G02-C, g02a: G02-A, g02f: null, g01_persistence: null}   # null = discovered / skipped
+  bands: {mag: rtp, grav: iso_grav_anom}             # raw potential fields (G02 raw_bands)
+  max_features: 25                                   # current set: 3 CNN + <= 4 G02/G01 + 4 PF + 4 known = 15
+  known_cap_km: 20.0
+  known_density_radius_km: 2.0
+  endpoint_max_km: 5.0
+  sampling: {neg_per_unit: 200000, pos_cap_per_unit: 60000, neg_buffer_px: 3, ambiguous_quantile: 0.95,
+             ambiguous_weight: 0.3, negative_weight: 1.0}
+  exclude_buffer_km: 2.0                             # training rows near the held-out zone are dropped
+  lgbm: {n_estimators: 400, learning_rate: 0.05, num_leaves: 31, max_depth: -1, min_child_samples: 200,
+         subsample: 0.8, colsample: 0.8, reg_lambda: 1.0}
+  blend: [0.5, 1.0]                                  # s = (1 - l) champion fusion + l stack (nested)
+  reps: [crest_1px, skeleton_1px]                    # names of baseline thin representations (nested)
+  area_fracs: [0.005, 0.01, 0.015, 0.02, 0.03, 0.05, 0.075]
+  full_region: {area_frac_source: geo}               # geo | primary | <float>
+  gate: {disc_min: 0.167, worst_min: 0.126, max_geo_drop: 0.005, min_gain_over_ref: 0.005}
+
+# ------------------------------------------------------------------------------------------------------- W3
+throughput:
+  variant: core
+  unit: geo_f0
+  steps: 20                                          # timed repetitions per component
+  cube_in_ram: [false, true]                         # memory-mapped cube vs RAM copy
+  pinned: [false, true]                              # pageable vs pinned host batches
+  inner_every: [1, 4]                                # inner validation every epoch vs every 4th (estimate only)
+  max_epoch_s: 90.0
+
+# ------------------------------------------------------------------------------------------------------- W4
+dem:
+  max_tiles: 30
+  min_tiles: 20
+  reuse_m7_mosaic: true                              # cached outputs/m7_discovery_first/dem/features/*.tif first
+  evidence: [scarp_density, scarp_length_m, persistence_mean, microrelief_rms]   # rank-averaged, label-free
+  min_coverage: 0.5                                  # a 100 m cell is "covered" above this DEM coverage share
+  density_km_per_100km2: 40.0
+  tolerance_m: 300.0                                 # a known trace pixel is recovered within this distance
+  max_shift_px: 3                                    # alignment search radius (cells)
+  gate: {min_trace_recall: 0.30, min_new_systems: 3, max_abs_shift_px: 1}
+
+# ------------------------------------------------------------------------------------------------------- W5
+completion:
+  enabled_if: near_known_completion                  # W0 verdict that unlocks W5
+  max_extension_km: 1.0
+  max_gap_km: 0.6
+  max_orientation_deg: 15.0
+  snap: {max_shift_m: 300.0, max_orientation_deg: 15.0, min_overlap: 0.6}
+
+# ------------------------------------------------------------------------------------------------------- W6
+select:
+  tolerance: 0.003                                   # ties within this go to the next criterion
+  order: [disc_dti, disc_worst, geo_dti, unique_systems, public_score]
