@@ -103,6 +103,17 @@ heuristic rank, not a probability.
 
 Every section reloads from persisted files. After a disconnect, run section 0 and then any section.
 
+**Local CUDA run.** Set `RUNTIME = 'local'` and fill `LOCAL` in the first cell:
+* `code_root`: this checkout, on branch `p6-fast-track`.
+* `drive_root`: a Google Drive for Desktop folder holding `GEMS_2`, so cached M9 / G02 / experiment outputs are
+  staged from it and P6 outputs are pushed back. Use `''` for no mirror.
+* `local_root`: a fast local SSD folder.
+
+One-time setup in a Python 3.11 / 3.12 venv: install the CUDA build of torch first, then
+`pip install -e ".[colab]" jupyter`. The setup cell prints whether CUDA is visible. GPU steps pick CUDA automatically.
+On GPUs with less than about 12 GB, disable W1's TTA (`P6_CONFIG = {'seeds': {'tta_rot180': False}}`) if it runs out
+of memory. W2 needs roughly 16–24 GB of RAM (unmeasured).
+
 ## 5. Outputs (`outputs/p6_fast_track/`)
 
 `manifests/{compute_ledger.csv, sections/*.json}` (configuration fingerprint, code provenance, seconds) ·
