@@ -62,7 +62,9 @@ stack:
   blend: [0.5, 1.0]                                  # s = (1 - l) champion fusion + l stack (nested)
   reps: [crest_1px, skeleton_1px]                    # names of baseline thin representations (nested)
   area_fracs: [0.005, 0.01, 0.015, 0.02, 0.03, 0.05, 0.075]
-  full_region: {area_frac_source: geo}               # geo | primary | <float>
+  full_region: {area_frac_source: primary, allow_mixed_policy: false}   # primary | <float> | geo (P6.1: 'geo' mixed
+                                                     #   rep from disc + frac from geo; refused unless allowed. The
+                                                     #   historical W2 file was written with 'geo' and is kept as is)
   gate: {disc_min: 0.167, worst_min: 0.126, max_geo_drop: 0.005, min_gain_over_ref: 0.005}
 
 # ------------------------------------------------------------------------------------------------------- W3

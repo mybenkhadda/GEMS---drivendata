@@ -1,0 +1,106 @@
+# GEMS P6.1 recovery (docs/p6/P6_RECOVERY_HANDOFF.md, gems_bench/p6/boost_diagnostics.py). Code-authoring-first:
+# every number is produced in Colab. Boost / W2 / G02 outputs are read-only inputs; everything lands under
+# <p6 output_dir>/recovery. Every choice below is predeclared: no per-zone rule, no threshold tuned on a held-out zone.
+version: p6r.1
+subdir: recovery
+tasks: [geo, disc_official]
+workstream: wb                                       # shares the boost CPU cap (global 20 CPU-h fully allocated)
+px_km: 0.1
+
+# Quoted references (recorded offline nested numbers; NOT leaderboard scores, never used as inputs of a stage).
+references:
+  w2_recorded: {disc_dti: 0.224640, disc_worst: 0.153414, geo_dti: 0.180843}
+  boost_benchmark:                                   # boost stage A; disc and geo may be DIFFERENT nested selections
+    fallback_fusion_crest: {disc_dti: 0.162482, disc_worst: 0.126160, geo_dti: 0.182832}
+    w2_crest: {disc_dti: 0.238882, disc_worst: 0.192575, geo_dti: 0.185609}
+    w2_skeleton: {disc_dti: 0.242156, disc_worst: 0.198579, geo_dti: 0.168841}
+    hybrid_crest: {disc_dti: 0.231509, disc_worst: 0.156216, geo_dti: 0.182415}
+  w2_uploaded_cell: {rep: skeleton_1px, frac: 0.05, blend: 1.0, disc_dti: 0.178905, geo_dti: 0.168841}
+
+# Promotion rules (section 10 of the brief). The W2 reference is read from stack/candidate.json when present.
+gates:
+  worst_floor: 0.153414
+  geo_floor: 0.1758
+  slot_min_gain: 0.010
+  budget_tolerance: 0.02
+
+preflight:
+  min_ram_gb: 24                                     # high-RAM CPU runtime (full-region features in X1 parity)
+
+# ------------------------------------------------------------------------------------------------ X1
+export_parity:
+  # Deployment objective (predeclared): on the selection zones, the cell with the highest pooled discovery DTI among
+  # cells whose pooled geographic DTI is >= gates.geo_floor (highest discovery when none qualifies, flagged). If the
+  # unit masks overlap so that no geography-disjoint selection exists, the code falls back to 'disc' and records it.
+  objective: disc_geo_floor
+  sensitivity_objectives: [disc, joint]              # reported, never used for the deployment choice
+  policies:                                          # deploy candidates (benchmark grid rows of boost stage A)
+    A_w2_original: {candidates: [w2, hybrid], benchmark_space: "w2_space|blend+rep+frac"}   # W2's own space
+    B_w2_crest: {candidates: [w2], reps: [crest_1px], benchmark_space: "w2|crest_1px"}
+    C_w2_skeleton: {candidates: [w2], reps: [skeleton_1px], benchmark_space: "w2|skeleton_1px"}
+    D_w2_rep_frac: {candidates: [w2], benchmark_space: "w2|rep+frac"}       # global crest / skeleton choice
+    E_w2_uploaded_cell: {candidates: [w2], fixed: {rep: skeleton_1px, frac: 0.05, blend: 1.0}}   # historical file
+  references:                                        # same machinery, never deployed
+    R_fallback_fusion: {candidates: [fallback_fusion], benchmark_space: "fallback_fusion|rep+frac"}
+  parity_numeric: true                               # Colab: full-region features once (RAM: see handoff)
+  parity: {warn_rank_corr: 0.6, block_rank_corr: 0.2, top_fracs: [0.01, 0.05], sample_px: 200000}
+
+# ------------------------------------------------------------------------------------------------ X2
+candidate_recall:
+  budgets: [0.005, 0.01, 0.015, 0.03, 0.05]
+  reps: [crest_1px, skeleton_1px]
+  sources: [cnn_b0, cnn_b1, fallback_fusion, w2, w2_fallback_union, g02c]   # g02c only on units whose raster exists
+  reference_fallback_cell: {blend: 1.0, rep: skeleton_1px, frac: 0.01}     # only if X1 and boost A tables are absent
+  oracle: {enabled: true, pool_frac: 0.05, tol_px: 3}                     # DIAGNOSTIC (labels): never a selection input
+  taxonomy:
+    support_low: 0.05                                # best support below this + no pool nearby = no candidate support
+    displaced_tol_factor: 2.0                        # pool within 2 x tolerance but not within tolerance = displaced
+    sensitivity_factors: [1.5, 2.0, 3.0]             # must contain displaced_tol_factor
+    fragment_min_components: 3
+    partial_hit_min: 0.1
+    orientation_max_deg: 30
+    coverage_min: 0.5                                # share of the system inside the eligible budget domain
+    known_near_km: 0.3
+    density_radius_km: 1.0
+  min_systems_for_conclusion: 10
+  decision_margin: 0.10
+  contrast_attributes: [length_km, curvature, fragments, known_dist_km_median, mean_mag_hgrad_rank,
+                        mean_grav_hgrad_rank, mean_cnn_agreement, mean_mg_orient_agree, mean_g02c, pred_density,
+                        orientation_deg]
+  examples: {pad_px: 25}
+
+# ------------------------------------------------------------------------------------------------ X3
+segments:
+  strategies: [H0, H1, H2]                           # at most three, predeclared
+  reps: null                                         # null = candidate_recall.reps / budgets
+  fracs: null
+  core_share: 0.75                                   # share of the H0 budget kept as the W2 core
+  pool_multiplier: 2.0
+  pool_frac_cap: 0.10
+  pool_sources: [w2, fallback_fusion]                # priority order for deduplication
+  use_g02c_if_complete: true                         # adds g02c as a pool source only when EVERY unit has it
+  tol_px: 3                                          # "already covered" tolerance (300 m)
+  endpoint_radius_px: 5
+  dedup: {tol_px: 2, min_share: 0.6, max_angle_deg: 20}
+  h1: {min_cnn_rank: 0.9}                            # both CNNs confident (label-free)
+  h2:
+    connect_radius_px: 5
+    min_orientation_cos2: 0.5                        # |dtheta| <= 30 deg
+    min_sources: 2
+    weights: {w2: 2.0, fallback: 1.0, sources: 1.0, continuity: 0.5, length: 1.0, linearity: 0.5, geology: 1.0}
+    short_px: 5
+    short_penalty: 0.5                               # short segments down-weighted, never removed
+  inventory_cell: {rep: skeleton_1px, frac: 0.03}    # segments.parquet / segment_features.parquet snapshot
+  accept: {min_gain: 0.0, max_worst_drop: 0.0, max_fp_increase: 0.10}
+
+# ------------------------------------------------------------------------------------------------ X4 / X5
+geology:
+  g02_run_id: g02_23686a63cb
+  backfill_max_units: 2                              # geo_2 + disc_official_2
+  s2_s3_diagnostic_reason: ""                        # non-empty = predeclared reason to run S2 / S3 without S1 ACCEPT
+robustness:
+  run_boost_c: false                                 # true = boost C1 / C2 (predeclared) through bst.c_robustness()
+
+# ------------------------------------------------------------------------------------------------ selection / export
+selection:
+  require_numeric_parity: true
