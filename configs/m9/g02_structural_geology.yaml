@@ -1,0 +1,170 @@
+# GEMS G02: geological fault evidence -- displacement, truncation, structural continuity (research experiment, NOT an
+# M9 production stage). Loaded by gems_bench.m9.research.g02_io.load_g02_config; resolution order:
+#   this file  <-  modes[<mode>]  <-  notebook G02_CONFIG (unknown keys are rejected at every step).
+# Notebook: notebooks/colab/GEMS_G02_STRUCTURAL_GEOLOGY_EXPERIMENT.ipynb. Guide: docs/m9/G02_STRUCTURAL_GEOLOGY.md.
+# Outputs: outputs/m9_geofault_production/research/G02_structural_geology/g02_<fingerprint>/
+#
+# Question (falsifiable): does label-free structural evidence (apparent offset of fabric across a line, termination of
+# persistent ridges at a line, multiscale ridge continuity, lineament-network geometry, competing geological
+# explanations) add equal-area fault proximity beyond G01 wavelet evidence and a simple magnetic gradient, consistently
+# across held-out geographic folds and discovery splits?
+# Every G02 map is label-free. Labels are used only to evaluate and, nested (other zones only), to choose B1 / B2 /
+# G02-F variants. Fixed numeric constants below were set BEFORE any G02 run and must not be tuned on held-out zones.
+version: 1
+experiment: G02_structural_geology
+seed: 2026
+mode: FAST_RESEARCH                           # FAST_RESEARCH (exploratory, never KEEP) | FULL_EVALUATION
+output_subdir: research/G02_structural_geology
+overwrite: false
+
+g01:                                          # G01 code is reused for B0 / B1 / B2 and for its components (M, G, J, P)
+  overrides:                                  # merged into configs/m9/g01_wavelet_geology.yaml (G01 validation applies)
+    ablations: {per_wavelength: true, tolerance: false}
+  review_run: auto                            # G01 persisted run for the G01 review: auto (LATEST) | none | g01_<id>
+
+wavelengths_km: auto                          # subset of the G01 aligned wavelengths (both fields cached); auto = all
+max_pixel_aspect: 1.02                        # rotated-frame sampling needs near-square pixels (checked, error if not)
+
+tiling:
+  tile_px: 768                                # core tile; each tile is read with a halo (computed from the scales)
+  max_halo_m: 16000.0                         # cap on the halo (largest-scale filters are truncated beyond it)
+
+orientation:
+  n_azimuths: 6                               # candidate fault azimuths tested in [0, 180) (axial)
+
+bandpass:
+  sigma_ratio: 2.0                            # DoG sigma2 / sigma1; sigma1 chosen so the DoG response peaks at lambda
+
+displacement:                                 # G02-A
+  fields: [mag, grav]
+  samples_per_wavelength: 4                   # rotated-frame step = max(pixel, lambda / 4): no aliasing of the DoG band
+  h1_frac: 0.5                                # inner profile pair at +-0.5 lambda from the line
+  h2_frac: 1.0                                # outer profiles at +-1.0 lambda (side pairs: slope of oblique fabric)
+  half_length_frac: 1.5                       # correlation window along the line: +-1.5 lambda ...
+  min_half_length_m: 600.0                    # ... but at least +-600 m
+  max_offset_m: 1500.0                        # bounded search of the along-line shift
+  max_offset_frac_of_length: 0.75             # and never beyond 0.75 x the window half-length
+  min_tap_share: 0.6                          # NaN-aware means need >= 60 % finite samples
+  offset_resolution_frac: 0.15                # a0 = max(step, 0.15 lambda): smaller offsets are not resolvable
+  gain_ref: 0.3                               # NCC gain (step model vs oblique continuity) that counts as full support
+  energy_gate: [0.5, 0.85]                    # side energy percentile ramp (weak signal => no displacement evidence)
+  peak_exclusion_frac: 0.5                    # second NCC peak searched >= 0.5 lambda away (periodicity ambiguity)
+  side_consistency_frac: 0.25                 # the two same-side shifts must agree within 0.25 lambda
+
+truncation:                                   # G02-B
+  fields: [mag, grav]
+  ridge_q: 0.8                                # ridge = energy percentile >= 0.8 and across-strike maximum
+  min_ridge_len_m: 500.0
+  tip_radius_px: 4                            # endpoint tip direction from the skeleton centroid within 4 px
+  beyond_frac: 0.75                           # energy sampled 0.75 lambda beyond the tip (abruptness)
+  abrupt_drop: 0.3                            # percentile drop that counts as an abrupt termination
+  min_facing_deg: 30.0                        # ridges within 30 deg of the line do not "end at" it
+  strip_half_length_frac: 2.0                 # endpoint strip along the line: +-2 lambda (>= 1 km)
+  min_strip_half_length_m: 1000.0
+  strip_width_frac: 1.0                       # one-sided strip width 1 lambda
+  background_sigma_frac: 2.0                  # isotropic endpoint background density: Gaussian 2 lambda ...
+  max_background_sigma_m: 5000.0              # ... capped at 5 km
+  z_ref: 3.0                                  # Poisson z of aligned endpoints that counts as full support
+  min_count: 2.0                              # fewer aligned (weighted) endpoints => no evidence
+  invalid_margin_m: 400.0                     # endpoints this close to invalid data never count (data edge, not geology)
+  side_offset_frac: 0.75                      # energy / resolution steps compared at +-0.75 lambda
+
+continuity:                                   # G02-C
+  split_km: 1.0                               # narrow band: lambda <= 1 km; broad band: lambda > 1 km (max of both)
+  along_half_length_frac: 2.0                 # along-strike ridge occupancy over +-2 lambda (>= 800 m)
+  min_along_half_length_m: 800.0
+  ridge_dilate_frac: 0.125                    # ridge occupancy tolerance 0.125 lambda
+  curvature_offset_frac: 1.5                  # strike compared at +-1.5 lambda along strike (straightness)
+
+network:                                      # G02-D (label-free lineament graph)
+  sources: [G01-E, G02-C, edge]               # evidence maps skeletonised; the FIRST source defines the G02-D map
+  hi_area_frac: 0.03                          # hysteresis thresholds = top 3 % / 8 % of the unit's valid pixels
+  lo_area_frac: 0.08
+  min_length_m: 1000.0
+  gap_m: 1500.0                               # continuation search radius from a segment end
+  stepover_m: 800.0                           # lateral offset allowed for an en-echelon / stepover continuation
+  max_angle_deg: 20.0                         # continuation: axial orientation difference
+  max_bearing_deg: 30.0                       # continuation: end-to-end bearing vs segment axis (colinear branch)
+  length_scale_m: 2000.0                      # length factor 1 - exp(-L / 2 km)
+  regional_radius_m: 15000.0                  # regional trend = length-weighted doubled-angle mean within 15 km
+  spread_m: 300.0                             # segment score spread to neighbouring pixels (Gaussian)
+  continuation_weight: 0.25                   # an isolated segment loses at most 25 % (connectivity is NOT forced)
+  vectors: true                               # GeoJSON (+ GeoPackage when geopandas is installed)
+
+hypotheses:                                   # G02-E (hypothesis scores, NOT calibrated probabilities)
+  blob_sigma_m: [1500.0, 3000.0]              # scale-normalised LoG of the raw fields (compact intrusive bodies)
+  blob_radius_m: 1500.0                       # a boundary is "intrusive-adjacent" within 1.5 km of a blob
+  blob_ref: 1.0                               # |sigma^2 LoG| / IQR(reference field) that counts as full support
+  fabric_sigma_m: 5000.0                      # regional fabric = doubled-angle field smoothed at 5 km
+  side_offset_m: 1000.0                       # juxtaposition step: raw-field percentile at +-1 km across the strike
+  side_half_length_m: 2000.0
+  terrain_sigma_m: 300.0                      # structure tensor of detrended elevation (surface expression strike)
+  invalid_m: 1500.0                           # artefact flag: near invalid data
+  seam_weight: 1.0                            # artefact flags feeding the ambiguous map
+  invalid_weight: 1.0
+  axis_weight: 0.0                            # grid-axis-parallel straight lineaments (survey lines): measured, unused
+  axis_tol_deg: 2.0
+  ambiguous_weight: 0.5                       # G02-E = fault + 0.5 ambiguous
+
+fusion:                                       # G02-F = nested choice among base + w * G02-X (fixed grid, nothing fitted)
+  bases: [G01-C, G01-E, G01-F]                # + "M9pred" when baselines.m9_prediction_npy is given
+  weights: [0.25, 0.5]
+  families: [G02-A, G02-B, G02-C, G02-D, G02-E]
+  budgets: primary                            # primary (ablation budgets only) | all
+
+baselines:
+  b1_family: [G01-A, "G01-A@*"]               # B1 = nested best magnetic-only G01 map (other zones choose)
+  b2_family: [G01-C, G01-D, G01-E, G01-F]     # B2 = nested best G01 fusion map
+  random: true
+  tie_break: 1.0e-6                           # seeded noise added to EVERY map (same draw): ties never select by index
+  m9_prediction_npy: null                     # optional full-grid float .npy of an EXISTING M9 prediction (read-only,
+                                              # memory-mapped; must match the grid shape) -> candidate "M9pred"
+
+evaluation:
+  tasks: [geo, disc_official]
+  zones: all                                  # all | profile
+  units: null                                 # explicit ["geo:0", "disc_official:1", ...] or null (all of the tasks)
+  max_units_per_task: null                    # FAST mode: the first n units per task (zone order)
+  area_fracs: [0.005, 0.01, 0.02, 0.03, 0.05, 0.10]
+  ablation_area_fracs: [0.03]
+  primary_area_frac: 0.03
+  distance_tol_m: [0.0, 100.0, 200.0, 300.0, 500.0, 1000.0]
+  primary_distance_m: 300.0
+  block_km: 20.0
+  n_boot: 500
+  official_style: true
+  length_strata_km: [0.0, 2.0, 5.0, 10.0, 1.0e9]   # truth-trace length bins (derived from the label raster)
+  correlation_sample_px: 50000                # label-free rank correlation between maps (redundancy)
+  overlap_stride: 8                           # downsampled footprints for the unit-overlap matrix (leakage guard)
+  lineament_budgets_km_per_100km2: [5.0, 10.0, 20.0]
+
+decision:
+  metric: f1                                  # f1 | precision | recall | enrichment
+  min_p_positive: 0.9
+  min_zone_win_share: 0.67
+  primary_task: disc_official                 # the competition rewards discovery: KEEP requires support here
+  min_zones: 3                                # fewer held-out zones in a task => UNVERIFIED
+
+save:
+  raster_dtype: float16
+  geotiff: false
+  figures: true
+  pdf: true
+  push_to_drive: true
+  keep_tmp: false                             # keep the per-unit memmaps (processed/tmp_*) after the NPZ is written
+
+figures:
+  window_half_px: 250                         # 50 km x 50 km windows at 100 m
+  n_cases: 3
+  n_profiles: 4
+  dpi: 170
+
+modes:
+  FAST_RESEARCH:                              # exploratory feedback; cannot substitute held-out evaluation
+    wavelengths_km: [0.8, 1.6]
+    orientation: {n_azimuths: 4}
+    network: {sources: [G01-E, edge]}
+    fusion: {bases: [G01-E], weights: [0.5]}
+    evaluation: {max_units_per_task: 2, n_boot: 100, area_fracs: [0.01, 0.03, 0.10],
+                 distance_tol_m: [0.0, 300.0, 1000.0]}
+  FULL_EVALUATION: {}
