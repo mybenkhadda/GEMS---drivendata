@@ -1,0 +1,124 @@
+# GEMS P6 full GPU benchmark, selection and submission (docs/p6/P6_FULL_GPU.md, gems_bench/p6/full_gpu.py).
+# Code-authoring-first: every number is produced in Colab. Boost / recovery / W2 / seeds outputs are read-only inputs;
+# everything new lands under <work root>/outputs/p6_boost (pushed to MyDrive/GEMS_2/outputs/p6_boost).
+# Every rule below is predeclared: no per-zone rule, no threshold tuned on a held-out zone, no leaderboard feedback.
+version: p6g.1
+output_dir: outputs/p6_boost
+mode: full                                           # full | recovery (modes.<mode> is merged over this file)
+seed: 2026
+deterministic: true                                  # torch / cuDNN deterministic kernels, fixed hash seed
+tasks: [geo, disc_official]
+cpu_workstream: wb                                   # CPU stages share the boost cap (fast_track.yaml budget)
+
+modes:
+  full:                                              # GPU runtime: extra CNN seeds + TTA, then CPU stages
+    gpu: {required: true, train_seeds: true, tta: true, fold_average_maps: false}
+  recovery:                                          # no training: every saved output is reused, CPU is enough
+    gpu: {required: false, train_seeds: false, tta: false, fold_average_maps: false}
+
+gpu:
+  required: true                                     # true: GPU stages raise GPURequired without CUDA (never CPU)
+  min_free_gb: 8.0
+  workstream: w1                                     # W1 GPU cap (4 GPU-h) bounds seed training + TTA
+  train_seeds: true                                  # p6.w1_seeds(train=True): extra seeds of B0 / B1 (resumable)
+  tta: true                                          # rot180 TTA of every member's honest maps (held-out models)
+  fold_average_maps: false                           # B0 / B1 fold-average full maps: DIAGNOSTIC only (each fold model
+                                                     #   saw the other zones; not validatable, never a selection input)
+  amp: model_spec                                    # inference precision as declared by each checkpoint spec
+                                                     #   (cnn3._amp_dtype: bf16 when supported, else fp16; sigmoid fp32)
+
+# ------------------------------------------------------------------------------------------------ benchmark
+# Grids (relative to the P6 workspace outputs/p6_fast_track). Every grid row = official components of one fixed
+# (candidate, blend, rep, frac) cell on one unit, written by the shared protocol (m7.protocol.score_row,
+# eligibility m9.elig(u, 0)). Rows of different grids are pooled only when their protocol keys agree per unit.
+grids:
+  boost_a: {path: boost/benchmark/grid.csv, stage: boost/benchmark, kind: boost}
+  boost_b: {path: boost/geology/grid.csv, stage: boost/geology, kind: boost}
+  boost_c: {path: boost/robustness/grid.csv, stage: boost/robustness, kind: boost}
+  boost_d: {path: boost/hybrid/grid.csv, stage: boost/hybrid, kind: boost}
+  rec_x3: {path: recovery/segments/grid.csv, stage: recovery/segments, kind: boost}
+  w1_seeds: {path: seeds/grid.csv, stage: seeds, kind: seeds}
+
+# Candidates. cells = grid candidate names (seeds: "<method>|w<w>"); reps / fracs / blends optionally restrict the
+# space; deploy = full-region builder (fusion | cnn | stack | seeds | none). members = for ensembles, the candidates
+# whose out-of-fold benefit must be beaten. role: reference | recovery_baseline | candidate | diagnostic.
+candidates:
+  ref_m9_fallback: {grid: boost_a, cells: [fallback_fusion], deploy: fusion, role: reference, family: baseline,
+                    label: M9 B0+B1 rank fusion (pre-P6 baseline), members: [a_cnn_b0, a_cnn_b1]}
+  ref_p6_w2: {grid: boost_a, cells: [w2, hybrid], deploy: stack, role: reference, family: p6_reference,
+              label: "P6 W2 stacker, its own space (blend x rep x frac)"}
+  rec_p6r_choice: {grid: boost_a, from_recovery: true, deploy: stack, role: recovery_baseline, family: p6_recovery,
+                   label: P6.1 recovery deployable choice (recovery/export_parity/decision.json)}
+  a_cnn_b0: {grid: boost_a, cells: [cnn_b0], deploy: cnn, role: candidate, family: boost_a, label: B0 alone}
+  a_cnn_b1: {grid: boost_a, cells: [cnn_b1], deploy: cnn, role: candidate, family: boost_a, label: B1 alone}
+  a_w2_crest: {grid: boost_a, cells: [w2], reps: [crest_1px], deploy: stack, role: candidate, family: boost_a}
+  a_w2_skeleton: {grid: boost_a, cells: [w2], reps: [skeleton_1px], deploy: stack, role: candidate, family: boost_a}
+  a_w2_rep_frac: {grid: boost_a, cells: [w2], deploy: stack, role: candidate, family: boost_a}
+  a_hybrid: {grid: boost_a, cells: [hybrid], deploy: stack, role: candidate, family: boost_a,
+             members: [a_w2_rep_frac, ref_m9_fallback], label: W2 / fusion blend 0.5}
+  b_geology_s1: {grid: boost_b, cells: [S1], deploy: stack, role: candidate, family: geological_prior,
+                 label: W2 + G02-C (structural-geology prior)}
+  b_geology_s2: {grid: boost_b, cells: [S2], deploy: stack, role: candidate, family: geological_prior}
+  b_geology_s3: {grid: boost_b, cells: [S3], deploy: stack, role: candidate, family: wavelet_multiscale,
+                 label: W2 + G02-C + G02-A + G01 wavelet persistence}
+  c_robust_c1: {grid: boost_c, cells: [C1], deploy: stack, role: candidate, family: boost_c}
+  c_robust_c2: {grid: boost_c, cells: [C2], deploy: stack, role: candidate, family: boost_c}
+  d_hybrid_d1: {grid: boost_d, cells: [D1], deploy: none, role: candidate, family: boost_d}
+  d_hybrid_d2: {grid: boost_d, cells: [D2], deploy: none, role: candidate, family: boost_d}
+  x3_h1: {grid: rec_x3, cells: [H1], deploy: none, role: candidate, family: p6_recovery}
+  x3_h2: {grid: rec_x3, cells: [H2], deploy: none, role: candidate, family: p6_recovery}
+  gpu_seeds: {grid: w1_seeds, cells: [seeds|*], deploy: seeds, role: candidate, family: gpu_seed_ensemble,
+              members: [ref_m9_fallback], label: "B0 / B1 seed families, rank-averaged (GPU-trained extra seeds)"}
+  gpu_seeds_tta: {grid: w1_seeds, cells: [seeds_tta|*], deploy: seeds, role: candidate, family: gpu_seed_ensemble,
+                  members: [gpu_seeds], label: seed families + rot180 TTA}
+
+# Stage manifests / statuses quoted when a grid is absent (why a candidate was not run).
+not_run_sources:
+  boost_b: [boost/geology/status.json, recovery/geology/decision.json]
+  boost_c: [boost/robustness/status.json]
+  boost_d: [boost/hybrid/status.json]
+  w1_seeds: [seeds/plan.json, manifests/sections/w1_evaluate.json]
+
+# ------------------------------------------------------------------------------------------------ selection
+# Honest selection: per outer zone ONE cell chosen on the other zones (export_parity.evaluate_policy), applied to the
+# same zone of both tasks. 'disc' is the only objective that never sees geo labels of the held-out geography when the
+# unit masks overlap (P6.1 run: overlap exclusion infeasible); disc_geo_floor / joint are reported as sensitivity.
+selection:
+  objective: disc
+  sensitivity_objectives: [disc_geo_floor, joint]
+  primary: disc_dti                                  # official-metric proxy (disc_official, pooled held-out)
+  worst_floor: 0.153414                              # worst held-out discovery zone >= W2 recorded worst
+  geo_rule: {mode: relative, max_drop: 0.010, floor: 0.1758}   # relative: geo >= reference geo (same objective) -
+                                                     #   max_drop; gate: geo >= floor (the P6.1 gate); report: none
+  tie_tolerance: 0.003                               # within this: higher worst zone, then fewer members
+  min_gain_over_reference: 0.005                     # below it the reference stays the winner (no churn)
+  min_zones_not_worse: 2                             # of 3 zones: a single favourable zone never replaces the reference
+  slot_min_gain: 0.010                               # extra gain before a leaderboard slot is recommended
+  ensemble_min_gain: 0.005                           # an ensemble must beat its best member by this, worst not lower
+  references: [ref_p6_w2, ref_m9_fallback]           # the strongest one is the comparison baseline
+  never_winner_roles: [diagnostic]
+
+# ------------------------------------------------------------------------------------------------ submission
+submission:
+  name: submission_p6_boost                          # outputs/p6_boost/submissions/<name>.tif (never overwritten)
+  baseline_name: submission_p6_baseline              # strongest existing baseline, same construction
+  construction: zone_stitched                        # per geo fold zone: that zone's held-out maps, ranked inside the
+                                                     #   zone (exactly the validated construction); the policy cell is
+                                                     #   applied per zone on the full-region eligible domain
+  max_uncovered_frac: 0.001                          # valid pixels outside every geo zone (written 0, recorded)
+  parity_min_spearman: 0.999                         # stitched score vs evaluation construction, per geo unit
+  budget_tolerance: 0.02
+  outside_valid: template                            # gems3.submission.finalise: NaN where the template is NaN
+  expected: {epsg: 32611, res_m: 100.0, dtype: float32, count: 1}
+  preview_max_px: 1600
+
+leaderboard:
+  history: leaderboard/leaderboard_history.csv
+  tie_delta: 0.005                                   # |public - expected| below this: no conclusion
+  max_scored_per_week: 3                             # organizer rule
+
+figures:
+  dpi: 220
+  svg: true
+  bands: {magnetic: rtp, gravity: iso_grav_anom, terrain: det_elev}
+  max_px: 1400

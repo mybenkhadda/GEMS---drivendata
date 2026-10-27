@@ -4,6 +4,7 @@
     p6 = P6FastTrack(m9)
     p6.w0_probes(); p6.w1_seeds(); p6.w2_stack(); p6.w3_throughput(); p6.w4_dem(); p6.w5_completion(); p6.w6_select()
     bst = p6.boost(BOOST_CONFIG); bst.a_benchmark(); bst.b_geology(); ...    # P6 boost (docs/p6/P6_BOOST.md)
+    fg = p6.full_gpu(FULL_GPU_CONFIG); fg.benchmark(); fg.submission()       # docs/p6/P6_FULL_GPU.md
 
 Composition, not duplication: the M9 research object provides the context, units, eligible budget, protocol keys,
 member maps and the B0/B1 selection (read-only). M7 / M8 writers receive ``view`` (the M7 engine seen through the P6
@@ -275,6 +276,14 @@ class P6FastTrack:
         from .boost_diagnostics import Recovery
 
         return Recovery(self.boost(boost_config), config)
+
+    def full_gpu(self, config: dict | None = None, recovery_config: dict | None = None,
+                 boost_config: dict | None = None):
+        """P6 full GPU run (``p6/full_gpu.py``): W1 seeds / TTA on the GPU, one-interface benchmark of recovery +
+        boost A-E candidates, predeclared selection, zone-stitched validated submission under outputs/p6_boost."""
+        from .full_gpu import FullGPU
+
+        return FullGPU(self.recovery(recovery_config, boost_config), config)
 
     def w6_select(self) -> dict:
         from . import select
