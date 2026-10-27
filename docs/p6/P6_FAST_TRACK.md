@@ -7,6 +7,9 @@ outputs `MyDrive/GEMS_2/outputs/p6_fast_track/` · log `reports/p6/leaderboard_l
 ran locally, in an isolated virtual environment. There is no P6 number and no leaderboard score. Every value below
 is a recorded offline value from earlier sessions or a plan.
 
+**Follow-up: P6 boost** (matched benchmark, G02 attach fix, robustness, hybrids, selection against the W2
+champion) is documented in `docs/p6/P6_BOOST.md` (notebook section 3B).
+
 ## 1. Objective and reference
 
 Goal: the strongest valid submission before 2026-12-03 (freeze 11-25, final upload 11-30), within 12 T4 GPU-hours and

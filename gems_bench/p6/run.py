@@ -3,6 +3,7 @@
     m9 = pipe.m9(M9_CONFIG); m9.load()
     p6 = P6FastTrack(m9)
     p6.w0_probes(); p6.w1_seeds(); p6.w2_stack(); p6.w3_throughput(); p6.w4_dem(); p6.w5_completion(); p6.w6_select()
+    bst = p6.boost(BOOST_CONFIG); bst.a_benchmark(); bst.b_geology(); ...    # P6 boost (docs/p6/P6_BOOST.md)
 
 Composition, not duplication: the M9 research object provides the context, units, eligible budget, protocol keys,
 member maps and the B0/B1 selection (read-only). M7 / M8 writers receive ``view`` (the M7 engine seen through the P6
@@ -27,7 +28,7 @@ from ..pipeline.m6 import fingerprint
 
 P6_VERSION = "p6.1"
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "p6" / "fast_track.yaml"
-WORKSTREAMS = ("w0", "w1", "w2", "w3", "w4", "w5", "w6")
+WORKSTREAMS = ("w0", "w1", "w2", "w3", "w4", "w5", "w6", "wb")
 
 
 class BudgetExceeded(RuntimeError):
@@ -105,7 +106,7 @@ class P6Workspace(M7Workspace):
     SUBDIRS = ("manifests", "manifests/units", "manifests/sections", "probes", "seeds", "seeds/maps",
                "stack", "stack/features", "stack/models", "stack/maps", "stack/figures", "throughput", "dem",
                "completion", "selection", "validation/metrics", "validation/maps", "reports", "submissions",
-               "vectors")
+               "vectors", "boost")
 
 
 class _P6Like:
@@ -261,6 +262,12 @@ class P6FastTrack:
             self.say(msg)
             return {"status": "BLOCKED", "reason": msg}
         return self.section("w5", "cpu", lambda: completion.run(self), what="completion")
+
+    def boost(self, config: dict | None = None):
+        """P6 boost (``p6/boost.py``): matched benchmark, G02 ablation, weak-zone robustness, hybrids, selection."""
+        from .boost import Boost
+
+        return Boost(self, config)
 
     def w6_select(self) -> dict:
         from . import select

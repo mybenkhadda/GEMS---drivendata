@@ -224,12 +224,14 @@ def g02_keys(p6, present: list[str]) -> dict:
     return {k: v for k, v in want.items() if v}
 
 
-def g02_unit(p6, u) -> tuple[dict, dict]:
+def g02_unit(p6, u, keys: dict | None = None) -> tuple[dict, dict]:
+    """G02 / G01 maps of one unit (``keys``: feature name -> raster key; default ``stack.g02_keys``)."""
     g = _g02(p6)
     rel = f"rasters/units/{u.task}_{u.zone}.npz"
     if g is None or not g.store.path(rel).exists():
         return {}, {k: "absent" for k in G02}
-    keys = g02_keys(p6, g.store.raster_keys(rel))
+    present = g.store.raster_keys(rel)
+    keys = {k: v for k, v in keys.items() if v in present} if keys is not None else g02_keys(p6, present)
     arrs, meta = g.store.load_raster_keys(rel, list(keys.values()))
     r0, r1, c0, c1 = (int(x) for x in meta["window"])
     if (meta.get("task"), int(meta.get("zone", -1))) != (u.task, int(u.zone)) or meta.get("labels_stored"):
@@ -391,6 +393,12 @@ def run(p6) -> dict:
         have = {k for k, v in raw.items() if v is not None and np.isfinite(np.asarray(v)[u.ev]).any()}
         avail = have if avail is None else avail & have
     names = select_features(sc, avail or set())
+    cp = p6.ws.root / "stack" / "candidate.json"
+    if cp.exists() and not p6.cfg.get("overwrite_existing"):    # maps are reused by file: never mix feature sets
+        old = json.loads(cp.read_text(encoding="utf-8")).get("features")
+        if old is not None and list(old) != names:
+            raise RuntimeError(f"W2 outputs exist with features {old}; this run would use {names}. W2 is frozen: "
+                               "evaluate new evidence in the boost section (p6/boost.py), or set overwrite_existing")
     p6.ws.save_table(pd.DataFrame(provs), "provenance", "stack")
     p6.ws.save_json({"features": names, "n": len(names), "dropped_absent": sorted(set(CNN + G02 + PF + KNOWN) - set(names))},
                     "stack/features/feature_set.json")
@@ -475,8 +483,9 @@ def run(p6) -> dict:
 
 
 # =============================================================================== full region (after PROMOTE only)
-def g02_full(p6) -> dict:
-    """Full-grid G02 maps of the configured keys (resumable tiles under stack/features/g02_full)."""
+def g02_full(p6, keys: dict | None = None) -> dict:
+    """Full-grid G02 maps of the configured keys (resumable tiles under stack/features/g02_full); ``keys`` as in
+    ``g02_unit``."""
     from ..m9.research.g02_experiment import MapStore
 
     g = _g02(p6)
@@ -500,7 +509,7 @@ def g02_full(p6) -> dict:
                 g.src.release()
             done.add((r, c))
             ms.mark_tile(done)
-    keys = g02_keys(p6, ms.keys())
+    keys = {k: v for k, v in keys.items() if v in ms} if keys is not None else g02_keys(p6, ms.keys())
     return {k: np.asarray(ms[v], np.float32) for k, v in keys.items() if v in ms}
 
 

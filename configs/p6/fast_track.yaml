@@ -16,7 +16,7 @@ budget:
   cpu_hours: 20.0
   workstreams: {w0: {gpu: 0.0, cpu: 0.5}, w1: {gpu: 4.0, cpu: 1.5}, w2: {gpu: 0.0, cpu: 6.0},
                 w3: {gpu: 2.0, cpu: 0.5}, w4: {gpu: 0.0, cpu: 6.0}, w5: {gpu: 0.0, cpu: 1.0},
-                w6: {gpu: 0.0, cpu: 0.5}}
+                w6: {gpu: 0.0, cpu: 0.5}, wb: {gpu: 0.0, cpu: 4.0}}   # wb = P6 boost (configs/p6/boost.yaml)
 
 # Reference values recorded in earlier sessions (NOT recomputed here; gates use the recomputed fallback when present).
 recorded:

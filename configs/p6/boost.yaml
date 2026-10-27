@@ -1,0 +1,82 @@
+# GEMS P6 boost (docs/p6/P6_BOOST.md, gems_bench/p6/boost.py). Code-authoring-first: every number is produced in
+# Colab. W0-W2 outputs are read-only inputs; everything lands under <p6 output_dir>/boost. Every experiment here is
+# predeclared and bounded: no hyper-parameter search, no per-zone rule, no threshold tuned on a held-out zone.
+version: p6b.1
+subdir: boost
+tasks: [geo, disc_official]
+
+# Champion to beat (recorded W2 values; the live numbers are read from stack/candidate.json when it exists).
+champion:
+  name: p6_stack
+  recorded: {disc_dti: 0.224640, disc_worst: 0.153414, geo_dti: 0.180843}
+  zone_disc: {0: 0.269027, 1: 0.259944, 2: 0.153414}
+
+# Shared evaluation grid: identical eligibility (m9.elig(u, 0)), units, folds, permitted known map and official
+# components for every candidate. Fixed cells are reported unselected; nested choices are leave-one-zone-out.
+grid:
+  reps: [crest_1px, skeleton_1px]
+  area_fracs: [0.005, 0.01, 0.015, 0.03, 0.05]
+  blends: [0.5, 1.0]                                 # s = (1 - l) fusion + l stack (W2's own blend set)
+  short_segment_px: 5                                # fragmentation statistic only (not a filter)
+  pixel_km: 0.1
+
+# ------------------------------------------------------------------------------------------------ A benchmark
+benchmark:
+  candidates: [fallback_fusion, cnn_b0, cnn_b1, w2, hybrid]
+  hybrid_blend: 0.5                                  # fixed a priori (the W2 blend grid's interior value)
+  named_cells:                                       # cells quoted explicitly in ranking_gain.csv
+    w2_disc_choice: {rep: skeleton_1px, frac: 0.01}
+    w2_geo_choice: {rep: crest_1px, frac: 0.05}
+    w2_submitted_file: {rep: skeleton_1px, frac: 0.05}   # W2 full_region: rep from disc, frac from geo
+  genuine:                                           # "W2 gain is ranking" verdict (disc_official)
+    min_ranking_gain: 0.005                          # w2|rep+frac minus fusion|rep+frac, nested
+    min_zones_improved: 2
+    min_cell_win_share: 0.6                          # share of matched (rep, frac) cells where w2 > fusion
+
+# ------------------------------------------------------------------------------------------------ B geology
+geology:
+  g02_run_id: g02_23686a63cb                         # explicit: the only G02 run on Drive (FAST_RESEARCH)
+  keys: {g02c: G02-C, g02a: G02-A, g01_persistence: "comp:P"}   # feature -> G02 raster key
+  g02f: excluded                                     # label-selected fusion, never persisted as a raster
+  variants:                                          # cumulative; at most these four (brief)
+    S0: []
+    S1: [g02c]
+    S2: [g02c, g02a]
+    S3: [g02c, g02a, g01_persistence]
+  backfill_missing: false                            # true = compute the missing unit rasters (zone 2) with the
+                                                     #   run's own config (~0.15-0.5 CPU-h per unit, measured zones)
+  backfill_max_units: 2
+  accept: {min_gain: 0.005, max_worst_drop: 0.005}   # vs S0 under the identical protocol
+
+# ------------------------------------------------------------------------------------------------ C robustness
+robustness:
+  variants:
+    C1: {view: rank_known}                           # known-fault geometry ranked inside each unit (label-free)
+    C2: {dropout: {group: known, p: 0.5}}            # known-geometry columns set missing on half the training rows
+  known_group: [known_dist_km, known_density, tip_dist_km, tip_along_cos]
+  rank_known: [known_dist_km, known_density, tip_dist_km]
+  diag_sample_px: 20000                              # per zone, distribution statistics
+  orientation_bins: 12
+  orientation_window_px: 7
+  truth_tolerance_km: 0.3
+  accept: {min_gain: 0.0, max_worst_drop: 0.0}       # strict: pooled up, worst zone not down
+
+# ------------------------------------------------------------------------------------------------ D hybrid
+hybrid:
+  variants: [D1, D2]
+  union_fallback_share: 0.25                         # D1: share of the area budget reserved for fallback-only lines
+  union_tolerance_px: 3                              # a fallback line within 300 m of a base line is not "new"
+  pool_multiplier: 2.0                               # D2: candidate pool = 2 x budget of the base map
+  weights: {score: 2.0, length: 1.0, linearity: 0.5, endpoint: 0.5, geology: 1.0}
+  short_px: 5
+  short_penalty: 0.5                                 # short segments are down-weighted, never removed
+  endpoint_radius_px: 5
+  d3: {rep: skeleton_1px, frac: 0.01, blend: 1.0}    # geological-context diagnostic cell
+  accept: {min_gain: 0.0, max_worst_drop: 0.0, max_fp_increase: 0.10}
+
+# ------------------------------------------------------------------------------------------------ E selection
+selection:
+  geo_floor: 0.1758
+  slot_min_gain: 0.010                               # extra gain before spending a leaderboard slot
+  export: true                                       # write the validated GeoTIFF only after the gate passes
+  area_frac_source: matched                          # matched = rep AND frac of the primary task's nested choice

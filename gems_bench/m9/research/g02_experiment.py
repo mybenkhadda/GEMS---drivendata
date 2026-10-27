@@ -35,8 +35,8 @@ from . import g02_metrics as XM
 from . import geology_metrics as GM
 from .experiment import TASK_CODE, G01Experiment, _md
 from .g01_review import review_g01
-from .g02_io import (G02_FAMILIES, G02_VERSION, G02Store, fingerprint_config, g01_config, latest_run, list_runs,
-                     load_g02_config, run_root, set_latest)
+from .g02_io import (G02_FAMILIES, G02_VERSION, G02Store, fingerprint_config, g01_config, load_g02_config,
+                     resolve_run, run_root, set_latest)
 from .geology_continuity import combine_fields, continuity_field
 from .geology_displacement import DISP_KEYS, check_square, disp_halo_m, disp_scale, displacement_evidence, noisy_or
 from .geology_hypotheses import hypotheses
@@ -173,6 +173,7 @@ class G02Experiment:
         self._raw: dict = {}
         self._m9pred = None
         self._refs_all = None
+        self.attach_info: dict = {}
 
     def say(self, msg: str) -> None:
         print(f"[g02] {msg}")
@@ -195,7 +196,10 @@ class G02Experiment:
         if self.store is None or not self.cfg["save"].get("push_to_drive", True):
             return
         try:
-            self.m9.push([self._rel(self.store.root)])
+            rels = [self._rel(self.store.root)]
+            if (self.parent / "LATEST.json").exists():                 # attach() resolves the newest run from it
+                rels.append(self._rel(self.parent / "LATEST.json"))
+            self.m9.push(rels)
         except ValueError as e:
             self.say(f"push skipped: {e}")
 
@@ -349,13 +353,11 @@ class G02Experiment:
 
     @classmethod
     def attach(cls, m9, run_id: str | None = None, config: dict | None = None) -> "G02Experiment":
-        """Open an existing run (newest by default) without recomputing anything."""
+        """Open an existing run (newest by default) without recomputing anything (``resolve_run``: explicit id,
+        then LATEST.json, then the newest complete run folder; ``attach_info`` records which)."""
         tmp = cls(m9, config)
         tmp.stage_inputs()
-        rid = run_id or latest_run(tmp.parent)
-        if not rid or not (tmp.parent / rid).exists():
-            runs = list_runs(tmp.parent) if tmp.parent.exists() else pd.DataFrame()
-            raise FileNotFoundError(f"no G02 run under {tmp.parent} (known: {list(runs.run_id) if len(runs) else []})")
+        rid, how = resolve_run(tmp.parent, run_id)
         root = tmp.parent / rid
         cfg = json.loads((root / "config" / "g02_config.json").read_text(encoding="utf-8"))
         inp = json.loads((root / "config" / "inputs.json").read_text(encoding="utf-8"))
@@ -367,7 +369,59 @@ class G02Experiment:
         g.lams = [Wavelength(float(x["lam_km"]), tuple(sorted(x["tags"].items()))) for x in inp["g02_wavelengths"]]
         g.g01.xmod = list(inp.get("xmod") or [])
         g.warnings = list(inp.get("warnings") or [])
+        g.attach_info = {"run_id": rid, "resolved_by": how, "parent": str(tmp.parent), "mode": cfg.get("mode"),
+                         "fingerprint": inp["fingerprint"], "units_with_rasters": g.raster_units()}
+        g.say(f"attached {rid} ({how}); unit rasters: {g.attach_info['units_with_rasters']}")
         return g
+
+    def raster_units(self) -> list[str]:
+        """``<task>_<zone>`` of every persisted per-unit raster of the attached run."""
+        d = self._need().path("rasters/units")
+        return sorted(p.stem for p in d.glob("*.npz")) if d.exists() else []
+
+    def unit_raster(self, u) -> Path:
+        """Backfill: the per-unit raster of a unit the run did not evaluate (FAST_RESEARCH stops after
+        ``max_units_per_task``), with the run's own config, references fitted on the unit's training geography and
+        the NPZ layout of ``evaluate_unit``. No metric, network or report is computed; the run's verdicts are
+        unchanged. Metadata carries ``backfill: True``. Resumable per tile; an existing raster is never rewritten."""
+        st = self._need()
+        key = f"{u.task}_{u.zone}"
+        rel = f"rasters/units/{key}.npz"
+        if st.path(rel).exists():
+            return st.path(rel)
+        t0 = time.perf_counter()
+        H, W = self.src.shape
+        seed = int(self.cfg["seed"]) + 7919 * int(u.zone) + 104729 * TASK_CODE.get(u.task, 9)
+        ref = GM.reference_mask(self.m9.ctx, u.task, u.zone)
+        GM.assert_disjoint(ref, GM.full_mask((H, W), u.sl, u.ev), f"{u.key} G02 backfill normalization reference")
+        refs, rrefs = self.g01.fit_refs(ref, seed), self.fit_raw_refs(ref, seed)
+        ref_px = int(ref.sum())
+        del ref
+        st.save_json({n: r.to_dict() for n, r in refs.items()}, f"processed/refs_{key}.json",
+                     params={"reference": "training_geography", "ref_px": ref_px, "backfill": True})
+        ms = self.unit_maps(u, refs, rrefs, key)
+        r0, r1, c0, c1 = u.sl[0].start, u.sl[0].stop, u.sl[1].start, u.sl[1].stop
+        valid_u = self.src.valid[u.sl]
+        interior = GM.interior_mask(valid_u, float(self.g01cfg["boundary_margin_m"]), self.src.pixel_m,
+                                    (r0 == 0, r1 == H, c0 == 0, c1 == W))
+        extra = {"domain": np.asarray(self.m9.elig(u, 0), bool) & interior, "interior": interior}
+        p = st.save_raster_stream(sorted(ms.keys()) + list(extra), lambda k: extra[k] if k in extra else ms[k], rel,
+                                  {"task": u.task, "zone": int(u.zone), "window": [r0, r1, c0, c1],
+                                   "grid": self.g01.grid_meta(), "protocol_key": self.m9.pkey(u),
+                                   "mode": self.cfg["mode"], "backfill": True, "labels_stored": False,
+                                   "selection_domain": "m9.elig(u, 0) & interior(G01 boundary_margin_m)",
+                                   "note": "raster-only backfill (no unit metrics); truth is re-derived from the M7 unit"},
+                                  dtype=self.cfg["save"]["raster_dtype"], sources=self.g01.channels())
+        st.mark_done(f"raster_{key}", {"seconds": round(time.perf_counter() - t0, 1), "reference_px": ref_px,
+                                       "backfill": True})
+        st.flush_manifest()
+        ms.close()
+        if not self.cfg["save"].get("keep_tmp", False):
+            shutil.rmtree(st.path(f"processed/tmp_{key}"), ignore_errors=True)
+        u.release()
+        self.push()
+        self.say(f"{key}: backfilled raster in {time.perf_counter() - t0:.0f} s")
+        return p
 
     # ------------------------------------------------------------------------------- windows
     def halo_window(self, sl) -> tuple:

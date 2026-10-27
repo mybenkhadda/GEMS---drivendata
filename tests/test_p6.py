@@ -149,7 +149,7 @@ def test_config_and_budget(tmp_path):
         b.check("w3", "gpu")
     assert Budget(tmp_path / "ledger.csv", cfg["budget"]).spent_h("w3", "gpu") == pytest.approx(2.5)
     t = b.table()
-    assert set(t.workstream) == {"w0", "w1", "w2", "w3", "w4", "w5", "w6"}
+    assert set(t.workstream) == {"w0", "w1", "w2", "w3", "w4", "w5", "w6", "wb"}
 
 
 def test_w5_blocked_without_probe_evidence(tmp_path, monkeypatch):

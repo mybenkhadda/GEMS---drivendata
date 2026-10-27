@@ -274,6 +274,35 @@ def set_latest(parent: Path, run_id: str, fp: str, mode: str) -> None:
                                                       "mode": mode, "updated": time.strftime("%Y-%m-%dT%H:%M:%S")})
 
 
+def resolve_run(parent: Path, run_id: str | None = None) -> tuple[str, str]:
+    """(run id, how it was resolved) of an attachable run: ``run_id`` when given, else ``LATEST.json``, else the newest
+    complete run folder (``config/g02_config.json`` + ``config/inputs.json``) by manifest time.
+
+    ``LATEST.json`` lives one level above the run folders and was never pushed to Drive by runs before g02.1-p6b, so
+    a fresh runtime staged the run folder without it and ``attach`` refused an existing run."""
+    parent = Path(parent)
+
+    def complete(rid: str) -> bool:
+        d = parent / rid
+        return (d / "config" / "g02_config.json").exists() and (d / "config" / "inputs.json").exists()
+
+    if run_id:
+        if not complete(run_id):
+            raise FileNotFoundError(f"G02 run {run_id} under {parent} is absent or incomplete (config/g02_config.json "
+                                    "+ config/inputs.json required)")
+        return run_id, "explicit run_id"
+    rid = latest_run(parent)
+    if rid and complete(rid):
+        return rid, "LATEST.json"
+    runs = list_runs(parent) if parent.exists() else pd.DataFrame()
+    ok = runs[[complete(r) for r in runs.run_id]] if len(runs) else runs
+    if not len(ok):
+        raise FileNotFoundError(f"no complete G02 run under {parent} (known: {list(runs.run_id) if len(runs) else []}; "
+                                f"LATEST.json {'names ' + repr(rid) if rid else 'absent'})")
+    ok = ok.assign(_t=ok.updated.fillna("")).sort_values(["_t", "run_id"])
+    return str(ok.run_id.iloc[-1]), f"newest complete run folder (LATEST.json {'stale' if rid else 'absent'})"
+
+
 def list_runs(parent: Path) -> pd.DataFrame:
     rows = []
     for d in sorted(Path(parent).glob("g02_*")):
