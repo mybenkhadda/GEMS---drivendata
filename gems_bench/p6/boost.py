@@ -31,7 +31,8 @@ from scipy import ndimage
 from . import stack as ST
 
 BOOST_VERSION = "p6b.1"                    # enters every stage fingerprint: bump only to invalidate all stage caches
-BOOST_CODE_REV = "p6b.1-r2"               # code revision checked by the notebook start-up cell (not fingerprinted)
+BOOST_CODE_REV = "p6b.1-r3"               # code revision checked by the notebook start-up cell (not fingerprinted)
+#   r3 (P6.1): export through export_parity's single recipe contract, robust system_set, unit_sources / binary
 DEFAULT_BOOST_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "p6" / "boost.yaml"
 COMP = ["tp_w", "fp_w", "fn_w", "n_truth"]
 STAGES = ("benchmark", "geology", "robustness", "hybrid", "selection")
@@ -125,7 +126,22 @@ def _merge_on_str(per: pd.DataFrame, look: pd.DataFrame, keys: list[str]) -> pd.
 
 
 def system_set(s) -> set[int]:
-    return {int(x) for x in str(s).split(";") if x not in ("", "nan", "None")}
+    """System ids of a ``systems`` cell: ";"-joined integer ids of ``system_hits`` ("3;7"). Empty / missing cells
+    give an empty set; a CSV reload that turned a single id into a float ("3.0") is accepted. Any other token
+    (e.g. "0c", "3.5") is not a system id and raises ``ValueError`` (never coerced, never dropped)."""
+    out = set()
+    for x in str(s).split(";"):
+        t = x.strip()
+        if t in ("", "nan", "None", "<NA>"):
+            continue
+        try:
+            v = float(t)
+        except ValueError:
+            raise ValueError(f"systems cell {s!r}: token {t!r} is not an integer system id") from None
+        if not np.isfinite(v) or v != int(v):
+            raise ValueError(f"systems cell {s!r}: token {t!r} is not an integer system id")
+        out.add(int(v))
+    return out
 
 
 def systems_vs(per: pd.DataFrame, ref: dict) -> dict:
@@ -691,11 +707,26 @@ class Boost:
         row = score_row(u, q, el, self.p6.m9.pkey(u), **tags)
         row["dti"] = float(dti(row["tp_w"], row["fp_w"], row["fn_w"]))
         row.update(line_stats(q, float(gc["pixel_km"]), int(gc["short_segment_px"])))
+        self._last_hits = pd.DataFrame()
         if u.is_disc:
             hs = system_hits(self.p6.ctx, u, q, self.p6.m9.sh)
+            self._last_hits = hs                                 # per-system support of this map (X2 inventory)
             rec = sorted(int(x) for x in hs.system_id[hs.recovered]) if len(hs) else []
             row.update(n_systems=int(len(hs)), n_recovered=len(rec), systems=";".join(map(str, rec)))
         return row
+
+    def binary(self, u, s: np.ndarray, rep: str, frac: float, crest=None) -> np.ndarray:
+        """Boolean map of one (rep, frac) cell of a ranking score under the shared protocol (``_apply``)."""
+        return np.asarray(self._apply(u, np.asarray(s, np.float32), rep, frac, crest)) > 0
+
+    def unit_sources(self, u) -> dict:
+        """Label-free rank maps of one unit, exactly as stage A builds them: fallback fusion (champion per-zone w),
+        CNN B0 / B1 ranks and the frozen W2 held-out map rank."""
+        from ..gems3 import representation as R
+
+        b0, b1 = self.cnn(u)
+        return {"fallback_fusion": self.fusion(u), "cnn_b0": R.rank01(b0, u.ev), "cnn_b1": R.rank01(b1, u.ev),
+                "w2": self.stack_rank(u, self.w2_map(u))}
 
     def _apply(self, u, s: np.ndarray, rep: str, frac: float, crest=None) -> np.ndarray:
         from ..gems3 import representation as R
@@ -1659,7 +1690,6 @@ class Boost:
 
         from ..gems3 import representation as R
         from ..gems3 import submission as SUB
-        from ..m7 import export as E
         from . import probes
 
         p6, sc = self.p6, p6_stack_cfg(self.p6)
@@ -1712,15 +1742,35 @@ class Boost:
             q = full
         q = q.astype(np.float32)
         led = [SUB.area_ledger(q, data, 0, f"boost {cand['name']} {rep} blend {lam} frac {frac:g}")]
-        man = {"model_id": f"p6_boost_{cand['name']}", "method": "p6_boost", "candidate": _flat(cand),
-               "parameters": {"blend": lam, "rep": rep, "frac": frac, "ring": 0}, "features": names,
-               "frac_source": "matched (primary-task nested choice)", "model_file": mp.name,
-               "boost_version": BOOST_VERSION}
-        info = E._write(p6.view, f"p6_boost_{cand['name']}", q, led, man, 0)
+        # r3: the single export contract (plan -> file -> audit)
+        from . import export_parity as EP
+        from .boost_audit import file_hash
+
+        rec = EP.build_recipe(
+            candidate=f"boost_{cand['name']}", kind="boost_candidate",
+            policy={"selection_id": f"{cand.get('stage')}:{cand['name']}|nested {self.prim}|all_zones",
+                    "space": "blend+rep+frac", "objective": f"nested {self.prim} (boost protocol)", "rep": rep,
+                    "frac": frac, "blend": lam},
+            model={"kind": spec.get("kind", "lgbm"), "features": names, "view": view, "dropout": drop,
+                   "model_file": mp.name, "refit": True, **({"op": spec.get("op")} if spec.get("kind") == "hybrid"
+                                                            else {})},
+            sources={"w2_rows": self.w2_inputs()["rows_sha256"], "model": file_hash(mp, 1e9),
+                     "full_score": file_hash(self.root / "selection" / "maps" / f"{cand['name']}_full_score.tif", 1e9)},
+            feature_schema=names,
+            preprocessing={"ranking": "rank01 inside data.valid", "fusion_w": w, "sigma_px": sigma,
+                           "representation": reps[rep], "eligibility": "gems3.submission.eligible_mask(data, 0, "
+                           "'eligible')", "known": "data.labels passed to R.apply", "ring_px": 0, "view": view})
+        EP.save_plan(p6, rec, f"{self.sub('selection')}/export_plans")
+        info = EP.write_validated(p6, rec, q, led, float(self.cfg["preflight"]["budget_tolerance"]))
+        if (info.get("audit") or {}).get("status") != "PASS":
+            info.setdefault("validation", {}).setdefault("checks_failed", []).extend(
+                (info.get("audit") or {}).get("failed") or ["export audit not PASS"])
+            return info
         path = p6.ws.root / "submissions" / info["submission"]
-        row = probes._row(p6, "BOOST", path, info, self.sel, f"boost {cand['name']} (stage {cand.get('stage')})")
-        row.update(offline_disc_dti=cand.get("disc_dti"), offline_geo_dti=cand.get("geo_dti"))
-        probes.update_logs(p6, pd.DataFrame([row]))
+        if not info.get("reused"):
+            row = probes._row(p6, "BOOST", path, info, self.sel, f"boost {cand['name']} (stage {cand.get('stage')})")
+            row.update(offline_disc_dti=cand.get("disc_dti"), offline_geo_dti=cand.get("geo_dti"))
+            probes.update_logs(p6, pd.DataFrame([row]))
         return info
 
     def leaderboard_compare(self, dec: dict) -> pd.DataFrame:

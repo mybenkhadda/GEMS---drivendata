@@ -269,6 +269,13 @@ class P6FastTrack:
 
         return Boost(self, config)
 
+    def recovery(self, config: dict | None = None, boost_config: dict | None = None):
+        """P6.1 recovery (``p6/boost_diagnostics.py``): deployable W2 policies + export parity, candidate recall,
+        segment recovery, G01 / G02 repair, weak-zone robustness, selection, validated export (on the boost cap)."""
+        from .boost_diagnostics import Recovery
+
+        return Recovery(self.boost(boost_config), config)
+
     def w6_select(self) -> dict:
         from . import select
 

@@ -446,11 +446,14 @@ def g02_backfill_plan(bst, att: dict) -> dict:
         drift = g.input_drift()
     except Exception as e:
         drift = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-    try:
-        names = set(g.src.names())
-        miss_ch = [c for c in g.g01.channels() if c not in names]
+    try:                                                     # P6.1 fix: the run's RECORDED channels vs src.has();
+        rec = (g.store.load_json("config/inputs.json") or {}).get("input_fingerprints") or {}
+        cached = set(g.src.names())                          # names() lists cached .npy stems only, so the virtual
+        chans = [c for c in rec if not c.startswith("band:") and c != "m9pred"]   # g01:edge / g01:surface (derived
+        miss_ch = [c for c in chans if not g.src.has(c)]     # from raw bands on demand) were falsely "missing"
+        registry_only = [c for c in chans if c not in cached and g.src.has(c)]
     except Exception as e:
-        miss_ch = [f"channel listing failed: {type(e).__name__}: {e}"]
+        miss_ch, registry_only = [f"channel listing failed: {type(e).__name__}: {e}"], []
     est_h = len(todo) * float(np.nanmax(sec)) / 3600 if sec and np.isfinite(np.nanmax(sec)) else np.nan
     left = bst.p6.budget.left_h("wb", "cpu")
     units = [{"unit": u.key, "output": f"{att.get('source_path')}/rasters/units/{u.task}_{u.zone}.npz",
@@ -460,6 +463,9 @@ def g02_backfill_plan(bst, att: dict) -> dict:
     blocked = (not drift.get("ok")) or bool(miss_ch)
     status = BLOCKED if blocked else ("NOTHING_TO_DO" if not todo else ("READY" if plan["enabled"] else "PENDING"))
     return {**plan, "status": status, "units": units, "input_drift": drift, "missing_channels": miss_ch,
+            "registry_only_channels": registry_only,
+            "registry_note": "virtual channels (computed from raw bands) are absent from the cached-layer listing by "
+                             "construction; available through M9Source.has(): not a blocker",
             "measured_unit_seconds": [round(s, 0) for s in sec],
             "estimate_cpu_h_upper": est_h, "estimate_basis": "max measured FULL unit evaluation (metrics included); a "
             "raster-only backfill is cheaper but unmeasured", "wb_cpu_h_left": left,
@@ -716,10 +722,17 @@ def parity_metadata(bst) -> list[dict]:
                  "inference": "R.apply(known=data.labels)", "status": PASS,
                  "note": "every mapped fault visible at full region; the scorer masks known pixels"})
     src = p6.cfg["stack"]["full_region"]["area_frac_source"]
+    sf = (bst.w2_inputs().get("candidate") or {}).get("submission_file")
+    side = root / "submissions" / Path(sf).with_suffix(".json").name if sf else None
+    recorded = (json.loads(side.read_text(encoding="utf-8")).get("frac_source") if side is not None and side.exists()
+                else None)
+    mixed = src == "geo" or str(recorded) == "geo"
     rows.append({"check": "w2_export_cell", "feature": "w2", "train": "nested choice (rep, frac) per task",
-                 "inference": f"W2 full_region: rep from disc, frac from {src}", "status": WARNING if src == "geo" else
-                 PASS, "note": "W2 file uses a (rep, frac) no nested evaluation selected (submission_provenance.json)"
-                 if src == "geo" else ""})
+                 "inference": f"W2 full_region: rep from disc, frac from {recorded or src} (config now {src})",
+                 "status": WARNING if mixed else PASS,
+                 "note": "the historical W2 file uses a (rep, frac) no nested evaluation selected "
+                         "(submission_provenance.json); P6.1 exports go through export_parity.build_recipe"
+                 if mixed else ""})
     rows.append({"check": "boost_export_cell", "feature": "*", "train": "nested (blend, rep, frac) of the primary task",
                  "inference": f"area_frac_source = {bst.cfg['selection']['area_frac_source']}",
                  "status": PASS if bst.cfg["selection"]["area_frac_source"] == "matched" else BLOCKED})

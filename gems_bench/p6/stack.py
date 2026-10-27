@@ -546,6 +546,11 @@ def full_region(p6) -> dict:
     p6.ws.save_raster({"stack_score": score}, "stack/maps/full_score.tif", data.grid)
     pa = cand["params_all"][p6.prim]
     src = sc["full_region"]["area_frac_source"]
+    if src == "geo" and not sc["full_region"].get("allow_mixed_policy", False):
+        raise ValueError("stack.full_region.area_frac_source = 'geo' takes rep / blend from the discovery choice and "
+                         "frac from the geographic one: a cell no nested evaluation selected (P6.1 export-parity "
+                         "defect). Use 'primary' (one selection) or export through p6.recovery (export_parity); set "
+                         "allow_mixed_policy: true only to reproduce the historical file")
     task = "geo" if src == "geo" else p6.prim
     frac = float(src) if isinstance(src, (int, float)) else float(cand["params_all"][task]["frac"])
     w = float(p6.selection()[p6.prim][p6.cfg["probes"]["champion"]]["params_all"]["w"])

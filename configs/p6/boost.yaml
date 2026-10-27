@@ -81,6 +81,8 @@ selection:
   export: false                                      # explicit opt-in (BOOST_RUN['export']); even then the file is
                                                      #   written only after the gate passes; reruns reuse it
   area_frac_source: matched                          # matched = rep AND frac of the primary task's nested choice
+                                                     #   (r3: written through export_parity.build_recipe /
+                                                     #   write_validated; a mixed-source recipe raises)
 
 # ------------------------------------------------------------------------------------------------ preflight / reports
 # Top-level on purpose: nothing below enters a stage A-D fingerprint (boost/preflight, boost/reports only).
