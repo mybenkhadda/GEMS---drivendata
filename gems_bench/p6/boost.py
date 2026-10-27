@@ -30,10 +30,31 @@ from scipy import ndimage
 
 from . import stack as ST
 
-BOOST_VERSION = "p6b.1"
+BOOST_VERSION = "p6b.1"                    # enters every stage fingerprint: bump only to invalidate all stage caches
+BOOST_CODE_REV = "p6b.1-r2"               # code revision checked by the notebook start-up cell (not fingerprinted)
 DEFAULT_BOOST_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "p6" / "boost.yaml"
 COMP = ["tp_w", "fp_w", "fn_w", "n_truth"]
 STAGES = ("benchmark", "geology", "robustness", "hybrid", "selection")
+STATUSES = ("PENDING", "BLOCKED", "RUNNING", "COMPLETE", "FAILED")
+EXEC_SWITCHES = {"geology": ("backfill_missing", "backfill_max_units")}   # never part of a stage fingerprint
+# Files a finished stage must have before a fingerprint match may reload it (``<stage>/<name>``).
+STAGE_OUTPUTS = {
+    "benchmark": ("grid.csv", "matched_comparison.csv", "per_zone.csv", "nested_selection.csv", "nested_per_zone.csv",
+                  "ranking_gain.csv", "system_coverage.csv", "verdict.json"),
+    "geology": ("g02_attach.json", "g02_audit.csv", "availability.csv", "row_consistency.csv", "ablation.csv",
+                "decision.json"),
+    "robustness": ("zone_ranking.csv", "feature_shift.csv", "known_distance.csv", "composition.csv",
+                   "prediction_geometry.csv", "ablation.csv", "decision.json"),
+    "hybrid": ("grid.csv", "matched_comparison.csv", "d3_geological_context.csv", "segment_selection.csv",
+               "ablation.csv", "decision.json"),
+    "selection": ("candidates.csv", "leaderboard_compare.csv", "decision.json"),
+}
+
+
+def missing_outputs(stage_dir: Path, stage: str) -> list[str]:
+    """Required outputs of ``stage`` absent (or empty) under ``stage_dir``: a stage with any is never reloaded."""
+    d = Path(stage_dir)
+    return [n for n in STAGE_OUTPUTS.get(stage, ()) if not (d / n).exists() or (d / n).stat().st_size == 0]
 
 
 def load_boost_config(config: dict | None = None, path: Path | None = None) -> dict:
@@ -477,31 +498,89 @@ class Boost:
         return self.p6.ws.load_table(name, self.sub(stage))
 
     def read_json(self, stage: str, name: str) -> dict | None:
+        """``<stage>/<name>.json`` or None; a corrupt (partially written) file is reported and treated as absent."""
         p = self.root / stage / f"{name}.json"
-        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+        if not p.exists():
+            return None
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            self.say(f"WARNING {p} unreadable ({type(e).__name__}): treated as absent")
+            return None
 
     def fp(self, *parts) -> str:
         return self.p6.fp(BOOST_VERSION, *parts)
 
-    def _done(self, stage: str, fp: str) -> bool:
-        m = self.read_json(stage, "manifest") or {}
-        if m.get("fingerprint") == fp and m.get("status") == "done":
-            self.say(f"{stage}: fingerprint {fp[:10]} unchanged -> reloaded (nothing recomputed)")
-            return True
-        return False
+    def protocol_keys(self) -> dict:
+        """{unit: M7 protocol key}: evaluation mask, truth, exclusions, budget domain and template of every unit."""
+        return {u.key: self.p6.m9.pkey(u) for u in self.units()}
 
-    def _finish(self, stage: str, fp: str, t0: float, inputs: dict, decisions: dict) -> None:
+    def _done(self, stage: str, fp: str) -> bool:
+        """Reload only when the manifest is readable and finished under ``fp``, every required output exists, and
+        (manifests that recorded them) the units' protocol keys are unchanged."""
+        m = self.read_json(stage, "manifest") or {}
+        if m.get("fingerprint") != fp or m.get("status") != "done":
+            return False
+        miss = missing_outputs(self.root / stage, stage)
+        if miss:
+            self.say(f"{stage}: fingerprint matches but outputs {miss} are missing -> recomputed")
+            return False
+        old = (m.get("inputs") or {}).get("protocol_keys")
+        if old and old != self.protocol_keys():
+            self.say(f"{stage}: evaluation protocol keys changed (masks / truth / budget domain) -> recomputed")
+            return False
+        self.say(f"{stage}: fingerprint {fp[:10]} unchanged -> reloaded (nothing recomputed)")
+        return True
+
+    def set_status(self, stage: str, status: str, **info) -> None:
+        """``<stage>/status.json``: PENDING / BLOCKED / RUNNING / COMPLETE / FAILED (+ reason, fingerprint)."""
+        if status not in STATUSES:
+            raise ValueError(f"status {status!r} not in {STATUSES}")
+        self.save_json({"stage": stage, "status": status, "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "code_rev": BOOST_CODE_REV, **info}, stage, "status")
+
+    def _begin(self, stage: str, fp: str) -> float:
+        self.set_status(stage, "RUNNING", fingerprint=fp)
+        return time.perf_counter()
+
+    def _finish(self, stage: str, fp: str, t0: float, inputs: dict, decisions: dict, *, status: str = "COMPLETE",
+                reason: str = "") -> None:
         from .._version import provenance
 
-        self.save_json({"stage": stage, "status": "done", "fingerprint": fp, "boost_version": BOOST_VERSION,
-                        "config": self.cfg, "p6_config_fp": self.p6.fp(self.p6.cfg), "inputs": inputs,
+        inputs = {**inputs, "protocol_keys": self.protocol_keys()}
+        self.save_json({"stage": stage, "status": "done", "stage_status": status, "fingerprint": fp,
+                        "boost_version": BOOST_VERSION, "code_rev": BOOST_CODE_REV, "config": self.cfg,
+                        "p6_config_fp": self.p6.fp(self.p6.cfg), "inputs": inputs,
                         "decisions": decisions, "code": provenance(), "seconds": round(time.perf_counter() - t0, 1),
                         "written": time.strftime("%Y-%m-%dT%H:%M:%S"),
                         "reload": f"p6.boost(BOOST_CONFIG).{_METHOD[stage]}() reloads while the fingerprint holds"},
                        stage, "manifest")
+        self.set_status(stage, status, fingerprint=fp, reason=reason, source_commit=provenance()["git_commit"])
 
     def section(self, stage: str, fn):
-        return self.p6.section("wb", "cpu", fn, what=f"boost_{stage}")
+        """Budgeted step; any exception leaves ``status.json`` = FAILED (BLOCKED when the CPU cap is spent)."""
+        from .run import BudgetExceeded
+
+        try:
+            return self.p6.section("wb", "cpu", fn, what=f"boost_{stage}")
+        except BudgetExceeded as e:
+            self.set_status(stage, "BLOCKED", reason=f"BudgetExceeded: {e}")
+            raise
+        except Exception as e:
+            self.set_status(stage, "FAILED", reason=f"{type(e).__name__}: {e}")
+            raise
+
+    def preflight(self) -> dict:
+        """Dependency / contract / provenance audit without heavy computation (``boost_audit.run_preflight``)."""
+        from . import boost_audit
+
+        return boost_audit.run_preflight(self)
+
+    def report(self) -> dict:
+        """Final decision-support report from saved outputs only (``boost_audit.build_report``)."""
+        from . import boost_audit
+
+        return boost_audit.build_report(self)
 
     def stage(self) -> dict:
         """Bring W2 / boost / probe / ledger outputs back from Drive (a fresh runtime has none of them locally),
@@ -691,7 +770,7 @@ class Boost:
         fp = self.fp("benchmark", bc, gc, self.cfg["tasks"], self.w2_inputs(),
                      {t: (self.sel.get(t) or {}).get(champ) for t in self.cfg["tasks"]})
         if not self._done("benchmark", fp):
-            t0 = time.perf_counter()
+            t0 = self._begin("benchmark", fp)
             from ..gems3 import representation as R
             from ..m7.baseline import heldout_map
 
@@ -724,6 +803,10 @@ class Boost:
             self.save_table(pd.DataFrame(prov), "inputs_provenance", "benchmark")
             self._a_tables(G)
             v = self.read_json("benchmark", "verdict") or {}
+            self.save_json({"stage": "benchmark", "w2_gain_is_ranking": v.get("w2_gain_is_ranking"),
+                            "largest_component": v.get("largest_component"), "ranking_gain": v.get("ranking_gain"),
+                            "rule": v.get("rule"), "note": "diagnostic stage: selects nothing, promotes nothing"},
+                           "benchmark", "decision")
             self._finish("benchmark", fp, t0, {"w2": self.w2_inputs(), "units": [p["unit"] for p in prov]},
                          {"w2_gain_is_ranking": v.get("w2_gain_is_ranking")})
             self.p6.push()
@@ -797,7 +880,7 @@ class Boost:
                          "gained_ids": ";".join(map(str, sorted(s - f))), "lost_ids": ";".join(map(str, sorted(f - s)))})
         return pd.DataFrame(rows)
 
-    def _fig_area(self, M: pd.DataFrame) -> None:
+    def _fig_area(self, M: pd.DataFrame, stage: str = "benchmark") -> None:
         import matplotlib.pyplot as plt
 
         reps, tasks = self.cfg["grid"]["reps"], [self.prim, "geo"]
@@ -820,20 +903,33 @@ class Boost:
         fig.suptitle("Matched budgets: pooled DTI per fixed (rep, area) cell, no selection")
         cols = ["task", "candidate", "blend", "rep", "frac", "dti", "worst_zone_dti", "precision_w", "recall_w",
                 "area_px", "length_km"]
-        self.p6.ws.save_fig(fig, "dti_by_area", M[[c for c in cols if c in M]], sub=self.sub("benchmark"))
+        self.p6.ws.save_fig(fig, "dti_by_area", M[[c for c in cols if c in M]], sub=self.sub(stage))
+        plt.close(fig)
 
     # =========================================================================== B
     def g02(self):
+        """Attached G02 run (explicit ``geology.g02_run_id``; attach computes nothing and never backfills)."""
         if self.p6.__dict__.get("g02") is None:
             from ..m9.research.g02_experiment import G02Experiment
 
             try:
                 self.p6.__dict__["g02"] = G02Experiment.attach(self.p6.m9, self.cfg["geology"]["g02_run_id"])
                 self.g02_error = None
-            except FileNotFoundError as e:
+            except FileNotFoundError as e:                       # includes AmbiguousRunError
                 self.p6.__dict__["g02"] = None
-                self.g02_error = str(e)
+                self.g02_error = f"{type(e).__name__}: {e}"
         return self.p6.__dict__["g02"]
+
+    def g02_ident(self, names: list[str] | None = None) -> dict | None:
+        """Identity of the attached G02 run (id, fingerprint, manifest hash) when ``names`` use a G02 / G01 feature
+        (None otherwise, so fingerprints of variants without G02 features are unaffected)."""
+        if names is not None and not set(names) & set(self.cfg["geology"]["keys"]):
+            return None
+        g = self.g02()
+        if g is None:
+            return None
+        a = getattr(g, "attach_info", {}) or {}
+        return {k: a.get(k) for k in ("run_id", "fingerprint", "manifest_sha256")}
 
     def g02_audit(self) -> tuple[dict, pd.DataFrame]:
         """Attach result + per (feature, unit) availability and construction provenance (no map is computed)."""
@@ -881,10 +977,16 @@ class Boost:
         return info, pd.DataFrame(rows)
 
     def backfill(self, max_units: int | None = None) -> list[str]:
-        """Compute the missing per-unit G02 rasters with the attached run's own configuration (opt-in)."""
+        """Compute the missing per-unit G02 rasters with the attached run's own configuration. Explicit opt-in only
+        (``geology.backfill_missing``); refused when the current inputs differ from the run's recorded input
+        fingerprints. Existing rasters are never rewritten; an interrupted unit resumes from its finished tiles."""
         g = self.g02()
         if g is None:
             raise FileNotFoundError(f"no attachable G02 run: {getattr(self, 'g02_error', '')}")
+        drift = g.input_drift()
+        if not drift["ok"]:
+            raise RuntimeError(f"G02 backfill refused: current inputs differ from run {g.attach_info.get('run_id')} "
+                               f"({drift}); the backfilled rasters would not share the run's feature definitions")
         have = set(g.raster_units())
         todo = [u for u in self.units() if f"{u.task}_{u.zone}" not in have][: int(max_units or
                                                                                     self.cfg["geology"]["backfill_max_units"])]
@@ -898,6 +1000,7 @@ class Boost:
             g.unit_raster(u)
             out.append(u.key)
         g.attach_info["units_with_rasters"] = g.raster_units()
+        self._raw.clear()                                        # unit features cached before the backfill are stale
         return out
 
     def raw(self, u) -> dict:
@@ -982,7 +1085,9 @@ class Boost:
         """Leave-one-zone-out LightGBM exactly as W2 (rows, weights, buffer, fixed hyper-parameters); only
         ``names`` / ``view`` / ``dropout`` differ. Maps cached under ``<stage>/maps/<name>_<fp8>/``."""
         sc = self.p6.cfg["stack"]
-        fpv = self.fp(stage, name, names, view, dropout, sc["lgbm"], sc["exclude_buffer_km"], self.w2_inputs())
+        parts = [stage, name, names, view, dropout, sc["lgbm"], sc["exclude_buffer_km"], self.w2_inputs()]
+        gid = self.g02_ident(names)
+        fpv = self.fp(*parts, gid) if gid else self.fp(*parts)  # a different G02 run never reuses cached maps
         d = self.root / stage / "maps" / f"{name}_{fpv[:8]}"
         seed = int(self.p6.cfg["seed"])
         shape = self.p6.ctx.data.shape
@@ -1021,9 +1126,11 @@ class Boost:
                                       "gain": m.booster_.feature_importance("gain").astype(float)}))
             audit.append({**a, "status": "trained", "seconds": round(time.perf_counter() - t0, 1)})
         I = pd.concat(imps, ignore_index=True).drop_duplicates(["unit", "feature"]) if imps else pd.DataFrame()
-        if len(I) and not ip.exists():
+        if len(I) and (not ip.exists() or any(a.get("status") == "trained" for a in audit)):
+            from ..artifacts.atomic import atomic_save   # resumed runs merge the earlier units' importances
+
             d.mkdir(parents=True, exist_ok=True)
-            I.to_csv(ip, index=False)
+            atomic_save(ip, lambda t: I.to_csv(t, index=False))
         man = {"variant": name, "features": names, "view": view, "dropout": dropout, "fingerprint": fpv,
                "maps_dir": d.relative_to(self.p6.ws.root).as_posix(), "lgbm": sc["lgbm"], "seed": seed,
                "rows": "stack/features/rows.parquet (W2 sample, identical rows and weights)",
@@ -1048,6 +1155,11 @@ class Boost:
                 audits.append(A)
                 imps.append(I)
                 mans[sp["name"]] = man
+            lost = [u.key for u in self.units() if u.key not in scores]
+            if lost:                                             # a pooled number on fewer zones is not matched
+                summ.append({"candidate": sp["name"], "status": "BLOCKED", "features": sp["names"],
+                             "reason": f"units without a cross-fitted map: {lost} (see crossfit_audit)"})
+                continue
             g = []
             for u in self.units():
                 if u.key in scores:
@@ -1119,9 +1231,11 @@ class Boost:
         self.save_table(AU, "g02_audit", "geology")
         present = {u.key: set(AU[(AU.unit == u.key) & AU.key_present.astype(bool)].feature) if len(AU) else set()
                    for u in self.units()}                     # from the audit: a reload loads no feature
-        fp = self.fp("geology", gcf, self.cfg["grid"], self.w2_inputs(), sorted((k, sorted(v)) for k, v in present.items()))
+        gfp = {k: v for k, v in gcf.items() if k not in EXEC_SWITCHES["geology"]}   # switches never invalidate
+        fp = self.fp("geology", gfp, self.cfg["grid"], self.w2_inputs(), sorted((k, sorted(v)) for k, v in present.items()),
+                     self.g02_ident())
         if not self._done("geology", fp):
-            t0 = time.perf_counter()
+            t0 = self._begin("geology", fp)
             _, RA = self.rows(self.w2_features(), check=True)
             self.save_table(RA, "row_consistency", "geology")
             base = self.w2_features()
@@ -1137,8 +1251,12 @@ class Boost:
             out = self.run_variants("geology", specs, "S0", w2)
             self._save_variant_tables("geology", out)
             dec = self._decide("geology", out, "S0", gcf["accept"])
+            blocked = [s["name"] for s in specs if s["name"] != "S0" and s["status"] == "BLOCKED"]
+            n_var = sum(s["name"] != "S0" for s in specs)
             self._finish("geology", fp, t0, {"g02": info, "w2": self.w2_inputs(), "present": present},
-                         {"chosen": dec["chosen"], "accepted": dec["accepted"]})
+                         {"chosen": dec["chosen"], "accepted": dec["accepted"], "blocked": blocked},
+                         status="BLOCKED" if n_var and len(blocked) == n_var else "COMPLETE",
+                         reason=f"variants BLOCKED: {blocked}" if blocked else "")
             self.p6.push()
         return {"attach": info, "audit": AU, "ablation": self.load_table("ablation", "geology"),
                 "decision": self.read_json("geology", "decision")}
@@ -1170,7 +1288,7 @@ class Boost:
         spec = self.base_spec("robustness")
         fp = self.fp("robustness", rc, self.cfg["grid"], spec, self.w2_inputs())
         if not self._done("robustness", fp):
-            t0 = time.perf_counter()
+            t0 = self._begin("robustness", fp)
             bm = self.base_maps(spec)
             self.diagnostics(spec, bm)
             specs = [{"name": spec["name"], "names": spec["names"], "view": spec.get("view"),
@@ -1324,7 +1442,7 @@ class Boost:
         spec = self.base_spec("hybrid")
         fp = self.fp("hybrid", hc, gc, spec, self.w2_inputs())
         if not self._done("hybrid", fp):
-            t0 = time.perf_counter()
+            t0 = self._begin("hybrid", fp)
             bm = self.base_maps(spec)
             rows, d3, seg = [], [], []
             for u in self.units():
@@ -1426,7 +1544,13 @@ class Boost:
         return self.section("selection", lambda: self._e(export))
 
     def _e(self, export: bool | None) -> dict:
+        from . import boost_audit as BA
+
         sc = self.cfg["selection"]
+        fp = self.fp("selection", sc, self.w2_inputs(), [(self.read_json(s, "manifest") or {}).get("fingerprint")
+                                                         for s in ("benchmark", "geology", "robustness", "hybrid")])
+        t0 = self._begin("selection", fp)
+        parity = BA.parity_by_feature(self.read_json("preflight", "train_inference_parity"))
         champ = self.champion()
         bn = self.load_table("nested_selection", "benchmark")
         w2m = bn[bn.space == "w2_space|blend+rep+frac"] if len(bn) else bn
@@ -1441,14 +1565,17 @@ class Boost:
             d = self.read_json(st, "decision") or {}
             if d.get("chosen") and d["chosen"] != d.get("base"):
                 s = d["chosen_summary"]
+                spec = d.get("spec") or {}
+                names = list((spec.get("base", spec) if spec.get("kind") == "hybrid" else spec).get("features") or [])
+                par_ok, par_why = BA.parity_ok(parity, names)
                 c = {"name": d["chosen"], "role": "candidate", "stage": st, **{k: s.get(k) for k in
                                                                               ("disc_dti", "disc_worst", "geo_dti",
                                                                                "geo_worst")},
-                     "params_all": s.get("params_all"), "spec": d.get("spec"),
-                     "provenance_ok": self._provenance_ok(st) and all(
-                         self._provenance_ok(b) for b in [((d.get("spec") or {}).get("base") or {}).get("stage")]
-                         if b in ("geology", "robustness")), "systems_gained": s.get("systems_gained"),
-                     "systems_lost": s.get("systems_lost")}
+                     "params_all": s.get("params_all"), "spec": spec,
+                     "provenance_ok": self._provenance_ok(st) and par_ok and all(
+                         self._provenance_ok(b) for b in [(spec.get("base") or {}).get("stage")]
+                         if b in ("geology", "robustness")), "parity": par_why,
+                     "systems_gained": s.get("systems_gained"), "systems_lost": s.get("systems_lost")}
                 ok, why, slot = boost_gate(c, champ, sc)
                 c.update(gate="PASS" if ok else "FAIL", gate_reasons="; ".join(why), slot_worthy=slot)
                 rows.append(c)
@@ -1459,24 +1586,43 @@ class Boost:
                "rules": {"disc_gt": "max(recorded, matched W2)", "worst_ge": champ.get("disc_worst"),
                          "geo_floor": sc["geo_floor"], "slot_min_gain": sc["slot_min_gain"]},
                "note": "no upload is automatic; record hashes and public scores in reports/p6/leaderboard_log.csv"}
-        if best is not None and (sc["export"] if export is None else export):
-            info = self.export(best)
-            dec["submission"] = info.get("submission")
-            dec["validation"] = info.get("validation")
+        want = bool(sc["export"] if export is None else export)
+        if best is not None and want:
+            efp = self.fp("export", best.get("spec"), best.get("params_all"), self.w2_inputs(),
+                          self.g02_ident(list((best.get("spec") or {}).get("features") or [])))
+            log = self.read_json("selection", "exports") or {}
+            prev = log.get(efp) or {}
+            if prev.get("submission") and (self.p6.ws.root / "submissions" / prev["submission"]).exists():
+                self.say(f"export: candidate {best['name']} already exported as {prev['submission']} -> reused "
+                         "(no refit, no new file)")
+                info = prev
+            else:
+                info = self.export(best)
+                log[efp] = {k: info.get(k) for k in ("submission", "validation", "parameters", "written")}
+                self.save_json(log, "selection", "exports")
+            dec.update(export_fp=efp, submission=info.get("submission"), validation=info.get("validation"))
             if (info.get("validation") or {}).get("checks_failed"):
                 dec.update(replace_champion=False, slot_worthy=False, chosen="p6_stack (W2)",
                            reason="submission validation failed")
+        elif best is not None:
+            dec["export"] = "not requested: rerun with BOOST_RUN['export'] = True (e_select(export=True))"
         self.save_table(pd.DataFrame([_flat(r) for r in rows]), "candidates", "selection")
         self.save_table(self.leaderboard_compare(dec), "leaderboard_compare", "selection")
         self.save_json(dec, "selection", "decision")
+        self._finish("selection", fp, t0, {"w2": self.w2_inputs(), "parity_checked": bool(parity)},
+                     {"chosen": dec["chosen"], "replace_champion": dec["replace_champion"],
+                      "submission": dec.get("submission")})
         self.p6.push()
         return dec
 
     def _provenance_ok(self, stage: str) -> bool:
         """Stage finished under its fingerprint, every unit cross-fitted or reused, no BLOCKED feature in the choice."""
         m = self.read_json(stage, "manifest") or {}
-        if m.get("status") != "done":
+        if m.get("status") != "done" or missing_outputs(self.root / stage, stage):
             return False
+        w = (m.get("inputs") or {}).get("w2") or {}
+        if w and w.get("maps_sha256") != self.w2_inputs()["maps_sha256"]:
+            return False                                         # decided on W2 maps that are no longer on disk
         a = self.load_table("crossfit_audit", stage)
         if len(a) and a.status.astype(str).str.startswith("too few").any():
             return False

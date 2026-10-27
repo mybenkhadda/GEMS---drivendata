@@ -78,5 +78,25 @@ hybrid:
 selection:
   geo_floor: 0.1758
   slot_min_gain: 0.010                               # extra gain before spending a leaderboard slot
-  export: true                                       # write the validated GeoTIFF only after the gate passes
+  export: false                                      # explicit opt-in (BOOST_RUN['export']); even then the file is
+                                                     #   written only after the gate passes; reruns reuse it
   area_frac_source: matched                          # matched = rep AND frac of the primary task's nested choice
+
+# ------------------------------------------------------------------------------------------------ preflight / reports
+# Top-level on purpose: nothing below enters a stage A-D fingerprint (boost/preflight, boost/reports only).
+preflight:
+  hash_max_mb: 1024                                  # sha256 up to this size, size + mtime above (recorded as such)
+  parity_numeric: false                              # Colab: compare unit (training) vs full-region (inference)
+                                                     #   feature values on the discovery units (loads full maps)
+  parity:
+    warn_rank_corr: 0.6                              # per-unit Spearman of training vs inference values
+    block_rank_corr: 0.2                             # below this a champion feature BLOCKs export
+    top_frac: 0.01                                   # Jaccard of the top 1 % pixels (reported, WARNING < 0.2)
+  budget_tolerance: 0.02                             # relative slack of area_frac_eligible over the nominal frac
+  dem:
+    stage_mosaic: false                              # true = copy the M7 100 m DEM mosaic from Drive once (size
+                                                     #   unmeasured); false = audit only what is already local
+    min_coverage: 0.5                                # same rule as fast_track.yaml dem.min_coverage
+    candidate_bands: [slope_mean, microrelief_rms, curv_profile_absmean, curv_plan_absmean, slope_break_mean,
+                      scarp_density, persistence_mean, orient_c2, orient_s2]   # label-free; orientation is cyclic
+  expected_units: 6                                  # geo 0-2 + disc_official 0-2

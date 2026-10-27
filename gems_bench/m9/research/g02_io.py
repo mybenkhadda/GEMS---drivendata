@@ -274,22 +274,27 @@ def set_latest(parent: Path, run_id: str, fp: str, mode: str) -> None:
                                                       "mode": mode, "updated": time.strftime("%Y-%m-%dT%H:%M:%S")})
 
 
+class AmbiguousRunError(FileNotFoundError):
+    """Several attachable runs and neither an explicit id nor a valid ``LATEST.json``: the caller must name one."""
+
+
 def resolve_run(parent: Path, run_id: str | None = None) -> tuple[str, str]:
-    """(run id, how it was resolved) of an attachable run: ``run_id`` when given, else ``LATEST.json``, else the newest
-    complete run folder (``config/g02_config.json`` + ``config/inputs.json``) by manifest time.
+    """(run id, how it was resolved) of an attachable run: ``run_id`` when given, else ``LATEST.json``, else the
+    ONLY complete run folder (``config/g02_config.json`` + ``config/inputs.json``). Several complete runs without an
+    explicit / LATEST choice raise ``AmbiguousRunError`` (never an arbitrary pick).
 
     ``LATEST.json`` lives one level above the run folders and was never pushed to Drive by runs before g02.1-p6b, so
     a fresh runtime staged the run folder without it and ``attach`` refused an existing run."""
     parent = Path(parent)
 
     def complete(rid: str) -> bool:
-        d = parent / rid
-        return (d / "config" / "g02_config.json").exists() and (d / "config" / "inputs.json").exists()
+        d = parent / rid / "config"
+        return all((d / n).exists() and _read_json(d / n)[1] for n in ("g02_config.json", "inputs.json"))
 
     if run_id:
         if not complete(run_id):
-            raise FileNotFoundError(f"G02 run {run_id} under {parent} is absent or incomplete (config/g02_config.json "
-                                    "+ config/inputs.json required)")
+            raise FileNotFoundError(f"G02 run {run_id} under {parent} is absent, incomplete or corrupt "
+                                    "(readable config/g02_config.json + config/inputs.json required)")
         return run_id, "explicit run_id"
     rid = latest_run(parent)
     if rid and complete(rid):
@@ -299,18 +304,31 @@ def resolve_run(parent: Path, run_id: str | None = None) -> tuple[str, str]:
     if not len(ok):
         raise FileNotFoundError(f"no complete G02 run under {parent} (known: {list(runs.run_id) if len(runs) else []}; "
                                 f"LATEST.json {'names ' + repr(rid) if rid else 'absent'})")
-    ok = ok.assign(_t=ok.updated.fillna("")).sort_values(["_t", "run_id"])
-    return str(ok.run_id.iloc[-1]), f"newest complete run folder (LATEST.json {'stale' if rid else 'absent'})"
+    latest = f"LATEST.json {'stale (names ' + repr(rid) + ')' if rid else 'absent'}"
+    if len(ok) > 1:
+        raise AmbiguousRunError(f"{len(ok)} complete G02 runs under {parent} ({sorted(ok.run_id)}) and {latest}: "
+                                "name one explicitly (boost geology.g02_run_id / stack.g02_run_id)")
+    return str(ok.run_id.iloc[0]), f"only complete run folder ({latest})"
+
+
+def _read_json(p: Path) -> tuple[dict, bool]:
+    """(content, readable): a missing file is ({}, True); a corrupt one ({}, False)."""
+    if not p.exists():
+        return {}, True
+    try:
+        return json.loads(p.read_text(encoding="utf-8")), True
+    except (OSError, json.JSONDecodeError):
+        return {}, False
 
 
 def list_runs(parent: Path) -> pd.DataFrame:
     rows = []
     for d in sorted(Path(parent).glob("g02_*")):
-        man = d / "manifests" / "manifest.json"
-        info = json.loads(man.read_text(encoding="utf-8")) if man.exists() else {}
-        cfgp = d / "config" / "g02_config.json"
-        mode = json.loads(cfgp.read_text(encoding="utf-8")).get("mode") if cfgp.exists() else None
-        rows.append({"run_id": d.name, "mode": mode, "fingerprint": info.get("fingerprint"),
+        info, man_ok = _read_json(d / "manifests" / "manifest.json")
+        cfg, cfg_ok = _read_json(d / "config" / "g02_config.json")
+        rows.append({"run_id": d.name, "mode": cfg.get("mode"), "fingerprint": info.get("fingerprint"),
                      "updated": info.get("updated"), "n_artifacts": len(info.get("artifacts") or {}),
+                     "manifest_readable": man_ok, "config_readable": cfg_ok,
                      "steps_done": sorted(p.stem.replace("done_", "") for p in (d / "processed").glob("done_*.json"))})
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=["run_id", "mode", "fingerprint", "updated", "n_artifacts", "manifest_readable",
+                                       "config_readable", "steps_done"])

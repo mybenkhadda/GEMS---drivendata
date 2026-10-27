@@ -33,7 +33,9 @@ Confirmed from the saved outputs and the code:
 3. The P6 runtime staged the run folder, but `latest_run()` found no `LATEST.json`, so `attach()` raised
    `no G02 run … (known: ['g02_23686a63cb'])`. The run itself was listed and complete.
 
-Fix: `g02_io.resolve_run()` resolves an explicit id first, then `LATEST.json`, then the newest complete run folder.
+Fix: `g02_io.resolve_run()` resolves an explicit id first, then `LATEST.json`, then the *only* complete run folder
+(r2: several complete runs without an explicit / LATEST choice raise `AmbiguousRunError`; corrupt configs count as
+incomplete). Revision r2 (preflight, stage status, cache validity, explicit export): see `P6_BOOST_HANDOFF.md`.
 `attach()` uses it and records `attach_info`, and `push()` now also pushes `LATEST.json`. The boost config names the
 run explicitly (`geology.g02_run_id: g02_23686a63cb`).
 
@@ -141,6 +143,8 @@ Two predeclared variants:
   **No upload is automatic.**
 
 ## 6. Colab execution order
+
+> Superseded by `P6_BOOST_HANDOFF.md §4` (r2: preflight cell, `BOOST_RUN` switches, explicit export). Kept for history.
 
 1. Push branch `p6-boost` (the notebook's `CONFIG['ref']` now points to it). Use a CPU high-RAM runtime.
 2. Section 0 (setup), then skip to **3B**. W0–W2 cells are not re-run: W2 is frozen.

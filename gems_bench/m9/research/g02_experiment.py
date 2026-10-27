@@ -353,8 +353,8 @@ class G02Experiment:
 
     @classmethod
     def attach(cls, m9, run_id: str | None = None, config: dict | None = None) -> "G02Experiment":
-        """Open an existing run (newest by default) without recomputing anything (``resolve_run``: explicit id,
-        then LATEST.json, then the newest complete run folder; ``attach_info`` records which)."""
+        """Open an existing run without recomputing anything (``resolve_run``: explicit id, then LATEST.json, then
+        the only complete run folder; several candidates raise ``AmbiguousRunError``; ``attach_info`` records which)."""
         tmp = cls(m9, config)
         tmp.stage_inputs()
         rid, how = resolve_run(tmp.parent, run_id)
@@ -369,10 +369,33 @@ class G02Experiment:
         g.lams = [Wavelength(float(x["lam_km"]), tuple(sorted(x["tags"].items()))) for x in inp["g02_wavelengths"]]
         g.g01.xmod = list(inp.get("xmod") or [])
         g.warnings = list(inp.get("warnings") or [])
+        from ...artifacts.atomic import sha256_file
+
+        man = root / "manifests" / "manifest.json"
         g.attach_info = {"run_id": rid, "resolved_by": how, "parent": str(tmp.parent), "mode": cfg.get("mode"),
-                         "fingerprint": inp["fingerprint"], "units_with_rasters": g.raster_units()}
+                         "fingerprint": inp["fingerprint"], "units_with_rasters": g.raster_units(),
+                         "manifest_sha256": sha256_file(man) if man.exists() else None}
         g.say(f"attached {rid} ({how}); unit rasters: {g.attach_info['units_with_rasters']}")
         return g
+
+    def input_drift(self) -> dict:
+        """Current input fingerprints (built exactly as in ``prepare``) against the attached run's
+        ``config/inputs.json``. A backfill must reproduce the run's feature definitions: any changed or missing
+        channel makes ``ok`` False and the caller must refuse to backfill."""
+        from ..features import file_fp
+
+        self.m9.load()
+        inp = self._need().load_json("config/inputs.json") or {}
+        old = {k: str(v) for k, v in (inp.get("input_fingerprints") or {}).items()}
+        now = {n: self.src.fingerprint(n) for n in self.g01.channels()}
+        now.update({f"band:{r}": self.g01cfg["raw_bands"].get(r) for r in ("mag", "grav", "terrain")})
+        if self.cfg["baselines"].get("m9_prediction_npy"):
+            now["m9pred"] = file_fp(Path(self.cfg["baselines"]["m9_prediction_npy"]))
+        now = {k: str(v) for k, v in now.items()}
+        changed = sorted(k for k in old.keys() & now.keys() if old[k] != now[k])
+        missing, extra = sorted(old.keys() - now.keys()), sorted(now.keys() - old.keys())
+        return {"ok": bool(old) and not (changed or missing or extra), "n_inputs_run": len(old), "changed": changed,
+                "missing_now": missing, "extra_now": extra}
 
     def raster_units(self) -> list[str]:
         """``<task>_<zone>`` of every persisted per-unit raster of the attached run."""
