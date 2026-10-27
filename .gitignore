@@ -28,6 +28,8 @@ reports/**
 !reports/README.md
 !reports/presentation/
 !reports/presentation/**
+!reports/p6/
+!reports/p6/leaderboard_log.csv
 
 # ---------------------------------------------------------------- models / checkpoints
 *.pt
