@@ -1,14 +1,20 @@
 """Artifact inventory, selective staging and fingerprints (notebook 00; needs no GEMS pipeline object).
 
 ``inventory(drive_root, cfg)`` inspects every configured artifact on Drive. Statuses:
-    OK             the expected number of files exists (sha256 up to ``hash_max_mb``, else size + mtime)
+    OK             the expected files exist (sha256 up to ``hash_max_mb``, else size + mtime)
     MISSING        nothing matches the pattern (or its alternates)
+    MISSING_REQUIRED_FILES  a name listed in ``required_files`` is not among the matched files
     COUNT_MISMATCH a different number of files than ``expect_count``
-    AMBIGUOUS      a single-object pattern (an experiment directory) matches several objects
+    AMBIGUOUS      the pattern matches files of several experiment directories (never combined), or a required
+                   file name occurs more than once
     ID_CHANGED     the matched experiment id differs from the id seen in the last recorded run (``expected_id``);
                    blocking under ``strict_provenance`` (a different model would silently replace B0 / B1)
+``required_files`` (exact basenames) and ``expect_count`` are exclusive: with ``required_files``, additional matching
+files (e.g. the per-fold ``oof_fold<k>.tif`` written by ``training.cv``) are accepted, listed in ``extra_files`` and
+hashed like every other file, but never treated as an error.
 A required artifact with any status other than OK blocks Milestone 1 (``blocking``). The inventory fingerprint
-(id + hashes) keys every downstream stage: a changed input invalidates the cached stages instead of mixing them.
+(id + hashes of every matched file, extras included) keys every downstream stage: a changed input invalidates the
+cached stages instead of mixing them.
 """
 from __future__ import annotations
 
@@ -22,6 +28,7 @@ import pandas as pd
 from .config import BLOCKED, COMPLETE, artifact_path
 
 OK, MISSING, COUNT, AMBIG, IDCH = "OK", "MISSING", "COUNT_MISMATCH", "AMBIGUOUS", "ID_CHANGED"
+MISSING_REQ = "MISSING_REQUIRED_FILES"
 
 
 def file_digest(p: Path, max_mb: float) -> str:
@@ -51,16 +58,35 @@ def experiment_ids(paths: list[Path], root: Path) -> list[str]:
     return sorted(ids)
 
 
+def file_split(entry: dict, files: list[Path]) -> tuple[list[str], list[str]]:
+    """(required names found, extra names) of an entry with ``required_files``; ([], []) otherwise (pure)."""
+    req = list(entry.get("required_files") or [])
+    if not req:
+        return [], []
+    names = sorted(Path(f).name for f in files)
+    return [n for n in req if n in names], [n for n in names if n not in req]
+
+
 def classify(entry: dict, files: list[Path], ids: list[str], strict: bool) -> tuple[str, str]:
-    """(status, note) of one artifact (pure)."""
+    """(status, note) of one artifact (pure). Files of several experiment directories are never combined."""
     if not files:
         return MISSING, "no file matches"
-    if entry.get("expected_id") is not None or (ids and entry.get("expect_count") == 1):
-        if len(ids) > 1:
-            return AMBIG, f"several experiments match: {ids}"
+    if len(ids) > 1:
+        return AMBIG, f"several experiments match: {ids}"
     exp = entry.get("expected_id")
-    if exp and ids and ids != [exp]:
-        return (IDCH if strict else OK), f"experiment {ids} differs from the recorded {exp}"
+    if exp and ids != [exp]:
+        return (IDCH if strict else OK), f"experiment {ids or 'none'} differs from the recorded {exp}"
+    req = list(entry.get("required_files") or [])
+    if req:
+        names = [Path(f).name for f in files]
+        dup = sorted({n for n in req if names.count(n) > 1})
+        if dup:
+            return AMBIG, f"required files matched more than once: {dup}"
+        found, extra = file_split(entry, files)
+        absent = [n for n in req if n not in found]
+        if absent:
+            return MISSING_REQ, f"required files absent: {absent} (found {sorted(names)})"
+        return OK, f"{len(extra)} extra file(s) accepted: {extra}" if extra else ""
     n = entry.get("expect_count")
     if n is not None and len(files) != int(n):
         return COUNT, f"{len(files)} files, expected {n}"
@@ -80,6 +106,7 @@ def inventory(drive_root: Path, cfg: dict, strict: bool = True) -> pd.DataFrame:
         files = [f for f in files if f.is_file()] if not Path(root / used).is_dir() else files
         ids = experiment_ids(files, root)
         st, note = classify(a, files, ids, strict)
+        found, extra = file_split(a, files)
         hashes = {}
         for f in files:
             if f.is_file():
@@ -89,6 +116,7 @@ def inventory(drive_root: Path, cfg: dict, strict: bool = True) -> pd.DataFrame:
         rows.append({"id": a["id"], "pattern": used, "required": bool(a.get("required")), "staged": bool(a.get("staged")),
                      "owner": a.get("owner", ""), "status": st, "note": note, "n_files": len(files),
                      "experiment_ids": ";".join(ids), "bytes": int(sum(f.stat().st_size for f in files if f.is_file())),
+                     "required_files": json.dumps(found), "extra_files": json.dumps(extra),
                      "files": json.dumps(sorted(hashes)), "hashes": json.dumps(hashes, sort_keys=True)})
     return pd.DataFrame(rows)
 

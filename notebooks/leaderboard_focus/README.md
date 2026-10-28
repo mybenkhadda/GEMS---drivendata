@@ -22,6 +22,11 @@ All outputs live in `MyDrive/GEMS_2/outputs/leaderboard_focus/m1_champion_recove
 
 **After a disconnect:** re-run the notebook from the top. Finished stages print `reloaded`.
 
+**Notebook 00 and the B0 / B1 maps:** `b0_maps` / `b1_maps` require `oof.tif`, `disc0.tif`, `disc1.tif` and
+`disc2.tif` by name, in exactly one experiment directory with the recorded id. Additional GeoTIFFs (the per-fold
+`oof_fold<k>.tif`) are accepted and listed in `extra_files`. An earlier BLOCKED inventory (`COUNT_MISMATCH (7 files,
+expected 4)`) is fixed by pulling the current commit and re-running 00 before 01; nothing has to be deleted or renamed.
+
 **Where to look:**
 * `manifests/<stage>.json`: status and reasons;
 * `reports/*.md`: readable summaries;

@@ -4,6 +4,9 @@
 |---|---|---|
 | Colab disconnection | the runtime resets | re-run the notebook from the top; finished stages print `reloaded` (fingerprint match) |
 | missing Drive artifacts | notebook 00 `MISSING` / `COUNT_MISMATCH` | restore `outputs/p6_fast_track/...` or the experiment folders. M1 never recomputes W2 or CNN maps. |
+| B0 / B1 `COUNT_MISMATCH (7 files, expected 4)` | 01 raises `StageBlocked: artifact_inventory.json is absent or not COMPLETE` | fixed in the m1.1 config: `b0_maps` / `b1_maps` now use `required_files` (`oof.tif`, `disc0-2.tif`) instead of an exact count. The extra `oof_fold<k>.tif` written by `training.cv` are accepted and listed in `extra_files`. Pull the fixed commit and re-run 00, then 01. |
+| B0 / B1 required map absent | 00 `MISSING_REQUIRED_FILES` (note lists the files found) | restore the named file in `experiments/<id>/predictions/` from the original run. M1 never re-infers. |
+| several B0 / B1 experiment folders | 00 `AMBIGUOUS: several experiments match` | M1 never combines or picks between them. Identify the recorded run (`b0_reference__d54e938a`, `b1_bg_weight__7755635b`); resolving the duplicate is a manual decision. |
 | invalid checkpoint | – | M1 uses no checkpoint. A model error means the wrong notebook. |
 | changed experiment id | `ID_CHANGED` for b0 / b1 | confirm the model; then set `expected_id` deliberately in `M1_CONFIG['artifacts']` |
 | incorrect commit | `AssertionError` on `EXPECT` or `git … failed` | pin `CONFIG['ref']` to the pushed SHA; the notebooks never fall back to another branch |

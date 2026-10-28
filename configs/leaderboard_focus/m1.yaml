@@ -33,10 +33,15 @@ artifacts:
      expect_count: 1, owner: Phase-5 B0, expected_id: b0_reference__d54e938a}
   - {id: b1_manifest, path: "experiments/b1_bg_weight__*/manifest.json", required: true, staged: false,
      expect_count: 1, owner: Phase-5 B1, expected_id: b1_bg_weight__7755635b}
+# CNN prediction rasters: the four maps M1 consumes are required BY NAME; other GeoTIFFs in the same folder (the
+# per-fold oof_fold<k>.tif written by training.cv) are accepted, hashed and listed as extra_files. Files of several
+# matching experiment directories are never combined (AMBIGUOUS); expected_id pins the recorded B0 / B1 run.
   - {id: b0_maps, path: "experiments/b0_reference__*/predictions/*.tif", required: true, staged: false,
-     expect_count: 4, owner: Phase-5 B0}
+     required_files: [oof.tif, disc0.tif, disc1.tif, disc2.tif], owner: Phase-5 B0,
+     expected_id: b0_reference__d54e938a}
   - {id: b1_maps, path: "experiments/b1_bg_weight__*/predictions/*.tif", required: true, staged: false,
-     expect_count: 4, owner: Phase-5 B1}
+     required_files: [oof.tif, disc0.tif, disc1.tif, disc2.tif], owner: Phase-5 B1,
+     expected_id: b1_bg_weight__7755635b}
   - {id: geo_folds, path: "outputs/benchmark/folds/geo_k3_b20km_buf13km_s2026", required: true, staged: false,
      owner: pipeline}
   - {id: disc_splits, path: "outputs/benchmark/folds/discovery_d3_link1km_s2026", required: true, staged: false,

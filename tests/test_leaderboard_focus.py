@@ -84,6 +84,77 @@ def test_classify_ambiguous_experiment():
     assert st == AR.AMBIG
 
 
+# ----------------------------------------------------------------------------------------------- B0 / B1 maps
+REQ = ["oof.tif", "disc0.tif", "disc1.tif", "disc2.tif"]
+EXTRA = ["oof_fold0.tif", "oof_fold1.tif", "oof_fold2.tif"]
+B0_ID = "b0_reference__d54e938a"
+
+
+def _maps_tree(tmp_path: Path, exps: dict[str, list[str]]) -> Path:
+    root = tmp_path / "drive"
+    for eid, names in exps.items():
+        d = root / "experiments" / eid / "predictions"
+        d.mkdir(parents=True, exist_ok=True)
+        for n in names:
+            (d / n).write_bytes(f"{eid}/{n}".encode())
+    return root
+
+
+def _maps_inv(root: Path, strict: bool = True) -> pd.Series:
+    cfg = _cfg([{"id": "b0_maps", "path": "experiments/b0_reference__*/predictions/*.tif", "required": True,
+                 "required_files": REQ, "expected_id": B0_ID}])
+    return AR.inventory(root, cfg, strict=strict).iloc[0]
+
+
+def test_config_maps_use_required_files_and_pinned_ids():
+    cfg = CF.load_m1_config()
+    a = {x["id"]: x for x in cfg["artifacts"]}
+    for k, eid in (("b0_maps", B0_ID), ("b1_maps", "b1_bg_weight__7755635b")):
+        assert a[k]["required_files"] == REQ and "expect_count" not in a[k] and a[k]["expected_id"] == eid
+    both = [{**a["b0_maps"], "expect_count": 4}] + [x for x in cfg["artifacts"] if x["id"] != "b0_maps"]
+    with pytest.raises(CF.M1ConfigError):
+        CF.load_m1_config({"artifacts": both})
+
+
+def test_maps_four_required_files_ok(tmp_path):
+    r = _maps_inv(_maps_tree(tmp_path, {B0_ID: REQ}))
+    assert r.status == AR.OK and json.loads(r.required_files) == REQ and json.loads(r.extra_files) == []
+
+
+def test_maps_seven_files_three_extras_accepted_and_fingerprinted(tmp_path):
+    root = _maps_tree(tmp_path, {B0_ID: REQ + EXTRA})
+    r = _maps_inv(root)
+    assert r.status == AR.OK and r.n_files == 7
+    assert json.loads(r.extra_files) == sorted(EXTRA) and "3 extra" in r.note
+    hashes = json.loads(r.hashes)
+    assert all(f"experiments/{B0_ID}/predictions/{n}" in hashes for n in REQ + EXTRA)
+    fp = AR.fingerprint(pd.DataFrame([r]))
+    (root / "experiments" / B0_ID / "predictions" / "oof_fold1.tif").write_bytes(b"changed")
+    assert AR.fingerprint(pd.DataFrame([_maps_inv(root)])) != fp       # an extra file still invalidates the cache
+    assert AR.summary(pd.DataFrame([r]))["status"] == CF.COMPLETE
+
+
+def test_maps_missing_required_file_blocks(tmp_path):
+    r = _maps_inv(_maps_tree(tmp_path, {B0_ID: ["oof.tif", "disc0.tif", "disc1.tif"] + EXTRA}))
+    assert r.status == AR.MISSING_REQ and "disc2.tif" in r.note
+    s = AR.summary(pd.DataFrame([r]))
+    assert s["status"] == CF.BLOCKED and s["blocking"][0].startswith("b0_maps: MISSING_REQUIRED_FILES")
+
+
+def test_maps_duplicate_experiment_directories_never_combined(tmp_path):
+    r = _maps_inv(_maps_tree(tmp_path, {B0_ID: ["oof.tif", "disc0.tif"],
+                                        "b0_reference__ffffffff": ["disc1.tif", "disc2.tif"]}))
+    assert r.status == AR.AMBIG and B0_ID in r.experiment_ids     # the union would look complete: still refused
+    r = _maps_inv(_maps_tree(tmp_path / "b", {B0_ID: REQ, "b0_reference__ffffffff": REQ}))
+    assert r.status == AR.AMBIG
+
+
+def test_maps_wrong_experiment_id_blocks_under_strict_provenance(tmp_path):
+    r = _maps_inv(_maps_tree(tmp_path, {"b0_reference__0badc0de": REQ}))
+    assert r.status == AR.IDCH and B0_ID in r.note
+    assert AR.summary(pd.DataFrame([r]))["status"] == CF.BLOCKED
+
+
 # ----------------------------------------------------------------------------------------------- stage records
 def _session(tmp_path):
     from gems_bench.leaderboard_focus.session import M1Session, Workspace

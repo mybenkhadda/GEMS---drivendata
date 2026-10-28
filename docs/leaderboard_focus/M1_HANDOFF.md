@@ -3,6 +3,11 @@
 **State (2026-10-28):** authored, NOTHING executed. No Python, test, notebook, Drive access or upload ran in the
 authoring session. No M1 number exists. The tests are written but were never run.
 
+**Fix (2026-10-28, first Colab run):** notebook 00 was BLOCKED by `b0_maps` / `b1_maps: COUNT_MISMATCH (7 files,
+expected 4)`, because `training.cv` also writes `oof_fold<k>.tif`. The maps are now checked by `required_files`
+(`oof.tif`, `disc0-2.tif`) with pinned `expected_id`; extras are accepted, hashed and listed in `extra_files`; several
+matching experiment directories are AMBIGUOUS. Authored only; the new tests have not been run.
+
 ## Work completed
 
 1. Read-only audit (`M1_AUDIT.md`), including the saved Colab outputs of the p6g run. That run:

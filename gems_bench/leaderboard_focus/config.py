@@ -45,6 +45,12 @@ def validate(cfg: dict) -> None:
     for a in cfg["artifacts"]:
         if not a.get("path"):
             raise M1ConfigError(f"artifact {a['id']}: no path")
+        req = a.get("required_files")
+        if req is not None:
+            if a.get("expect_count") is not None:
+                raise M1ConfigError(f"artifact {a['id']}: required_files and expect_count are exclusive")
+            if not req or len(set(req)) != len(req) or any("/" in str(n) or "*" in str(n) for n in req):
+                raise M1ConfigError(f"artifact {a['id']}: required_files must be distinct plain file names")
     ch = cfg["champion"]
     clash = set(ch["candidates"]) & set(ch.get("extra_candidates") or {})
     if clash:

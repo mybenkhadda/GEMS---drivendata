@@ -23,7 +23,7 @@
 | w2_maps | `stack/maps/{geo,disc_official}_{0,1,2}.npy` | P6 W2 | zone-stitched champion, recomputation |
 | boost_a_grid / manifest | `boost/benchmark/{grid.csv, manifest.json}` | P6 boost | selection, recomputation |
 | m9_selection | `outputs/m9_geofault_production/baseline/baseline_selection.json` | M9 | fusion weight w |
-| b0 / b1 manifests and maps | `experiments/b0_reference__*/`, `experiments/b1_bg_weight__*/` (`predictions/{oof,disc0..2}.tif`) | Phase 5 | fusion, W2 inputs |
+| b0 / b1 manifests and maps | `experiments/b0_reference__*/`, `experiments/b1_bg_weight__*/` (`predictions/{oof,disc0..2}.tif` required by name; other GeoTIFFs such as `oof_fold<k>.tif` accepted and listed as `extra_files`; exactly one experiment directory with the recorded `expected_id`) | Phase 5 | fusion, W2 inputs |
 | geo_folds / disc_splits | `outputs/benchmark/folds/*` | pipeline | units |
 | template | `data/raw/geodawn/example_submission.tif` | DrivenData | export |
 
