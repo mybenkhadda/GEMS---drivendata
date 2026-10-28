@@ -1,0 +1,89 @@
+# GEMS Milestone 1: champion recovery and leaderboard submission (docs/leaderboard_focus/). Code-authoring-first:
+# every number is produced in Colab from FROZEN artifacts; nothing is trained, re-inferred or re-benchmarked.
+version: m1.1
+output_dir: outputs/leaderboard_focus/m1_champion_recovery
+p6_output_dir: outputs/p6_fast_track            # read-only source of W2 / boost / recovery artifacts
+m9_output_dir: outputs/m9_geofault_production    # read-only: baseline selection (champion fusion weight)
+overwrite_existing: false
+
+# ------------------------------------------------------------------------------------------------ artifacts
+# Paths relative to the Drive root (MyDrive/GEMS_2). required = blocks M1 when absent; staged = copied to local disk
+# by notebook 00 (small files only; the CNN checkpoint directories are never staged).
+artifacts:
+  - {id: w2_candidate, path: "{p6}/stack/candidate.json", required: true, staged: true, owner: P6 W2}
+  - {id: w2_rows, path: "{p6}/stack/features/rows.parquet", required: true, staged: true, owner: P6 W2}
+  - {id: w2_stack_grid, path: "{p6}/stack/grid.csv", required: true, staged: true, owner: P6 W2}
+  - {id: w2_maps, path: "{p6}/stack/maps/*_[0-9].npy", required: true, staged: true, expect_count: 6, owner: P6 W2}
+  - {id: w2_full_score_hist, path: "{p6}/stack/maps/full_score.tif", required: false, staged: true,
+     owner: P6 W2 (historical; parity diagnostic only)}
+  - {id: boost_a_grid, path: "{p6}/boost/benchmark/grid.csv", required: true, staged: true, owner: P6 boost}
+  - {id: boost_a_manifest, path: "{p6}/boost/benchmark/manifest.json", required: true, staged: true, owner: P6 boost}
+  - {id: recovery_decision, path: "{p6}/recovery/export_parity/decision.json", required: false, staged: true,
+     owner: P6.1 recovery}
+  - {id: recovery_parity, path: "{p6}/recovery/export_parity/train_inference_parity.csv", required: false,
+     staged: true, owner: P6.1 recovery}
+  - {id: recovery_policies, path: "{p6}/recovery/export_parity/policy_comparison.csv", required: false, staged: true,
+     owner: P6.1 recovery}
+  - {id: recovery_overlap, path: "{p6}/recovery/export_parity/unit_overlap.csv", required: false, staged: true,
+     owner: P6.1 recovery}
+  - {id: hist_submission, path: "{p6}/submissions/p6_stack_fusion*.tif", required: false, staged: false,
+     owner: P6 W2 (historical file; never re-uploaded)}
+  - {id: m9_selection, path: "{m9}/baseline/baseline_selection.json", required: true, staged: true, owner: M9}
+  - {id: b0_manifest, path: "experiments/b0_reference__*/manifest.json", required: true, staged: false,
+     expect_count: 1, owner: Phase-5 B0, expected_id: b0_reference__d54e938a}
+  - {id: b1_manifest, path: "experiments/b1_bg_weight__*/manifest.json", required: true, staged: false,
+     expect_count: 1, owner: Phase-5 B1, expected_id: b1_bg_weight__7755635b}
+  - {id: b0_maps, path: "experiments/b0_reference__*/predictions/*.tif", required: true, staged: false,
+     expect_count: 4, owner: Phase-5 B0}
+  - {id: b1_maps, path: "experiments/b1_bg_weight__*/predictions/*.tif", required: true, staged: false,
+     expect_count: 4, owner: Phase-5 B1}
+  - {id: geo_folds, path: "outputs/benchmark/folds/geo_k3_b20km_buf13km_s2026", required: true, staged: false,
+     owner: pipeline}
+  - {id: disc_splits, path: "outputs/benchmark/folds/discovery_d3_link1km_s2026", required: true, staged: false,
+     owner: pipeline}
+  - {id: template, path: "data/raw/geodawn/example_submission.tif", alternates: ["data/raw/example_submission.tif"],
+     required: true, staged: false, owner: DrivenData}
+hash_max_mb: 256                                  # sha256 up to this size; larger files: size + mtime (recorded)
+
+# ------------------------------------------------------------------------------------------------ champion
+# Candidates = configs/p6/full_gpu.yaml candidate names (same grid, same space) + the historical cell. Only the W2
+# family and the B0+B1 fusion fallback are considered; nothing new is invented.
+champion:
+  candidates: [ref_p6_w2, a_w2_crest, a_w2_skeleton, a_w2_rep_frac, a_hybrid, rec_p6r_choice, ref_m9_fallback]
+  extra_candidates:
+    m1_w2_uploaded_cell: {grid: boost_a, cells: [w2], fixed: {rep: skeleton_1px, frac: 0.05, blend: 1.0},
+                          deploy: stack, role: historical, family: p6_reference,
+                          label: "historical uploaded cell (rep from disc, frac from geo choice): never selected"}
+  grids: [boost_a]                                # only the frozen boost-A grid is read
+  family_of: {stack: w2, fusion: fusion, cnn: cnn}
+# Recorded reference values (configs/p6/recovery.yaml references): checked for REPRODUCTION, never used as inputs.
+recorded:
+  w2_original: {source: stack_grid, params: [blend, rep, frac], disc_dti: 0.224640, disc_worst: 0.153414,
+                geo_dti: 0.180843}
+  a_w2_crest: {source: boost_a, objective: separate, disc_dti: 0.238882, disc_worst: 0.192575, geo_dti: 0.185609}
+  a_w2_skeleton: {source: boost_a, objective: separate, disc_dti: 0.242156, disc_worst: 0.198579, geo_dti: 0.168841}
+  m1_w2_uploaded_cell: {source: boost_a, objective: fixed, disc_dti: 0.178905, geo_dti: 0.168841}
+selection:
+  overrides: {}                                   # merged over configs/p6/full_gpu.yaml selection (p6g rule)
+  geo_floor: 0.1758                               # reported per candidate (flag geo_floor_met)
+  geo_floor_blocking: false                       # true: a candidate below the floor is ineligible (user decision)
+
+# ------------------------------------------------------------------------------------------------ validation
+validation:
+  component_rtol: 1.0e-6                          # recomputed vs saved grid row (same code path -> float rounding)
+  component_atol: 1.0e-6
+  dti_atol: 1.0e-6
+  recorded_atol: 6.0e-6                           # recorded values have 6 decimals
+  parity_min_spearman: 0.999                      # zone score vs evaluation construction (per geo unit)
+  strict_parity: true                             # any non-PASS zone-score parity row blocks (incl. fusion-w WARNING)
+  max_uncovered_frac: 0.001
+
+# ------------------------------------------------------------------------------------------------ submission
+submission:
+  prefix: submission_m1                           # submissions/<prefix>_<family>_<recipe_id>.tif
+  max_size_mb: 50
+  expected: {epsg: 32611, res_m: 100.0, dtype: float32, count: 1}
+
+leaderboard:
+  max_scored_per_week: 3
+  tie_delta: 0.005

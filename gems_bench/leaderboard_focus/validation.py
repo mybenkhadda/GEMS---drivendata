@@ -1,0 +1,269 @@
+"""Notebook 02 (part 1): official validation of the recovered champion with the EXISTING scorer.
+
+Four independent checks, every one with an explicit tolerance; any failure makes the stage BLOCKED:
+1. Recomputation. For each outer zone and task, the champion's held-out cell is rebuilt from the frozen maps with
+   the exact boost-A expressions (F = per-zone champion fusion, W = rank of the W2 held-out map; w2: W, hybrid /
+   blends: (1 - l) F + l W, fallback: F, CNN: rank) and scored by ``Boost._eval_q`` (``m7.protocol.score_row`` ->
+   ``gems3.official.FastScorer``). TP / FP / FN must equal the saved grid row (rtol / atol from the config).
+2. Pooling. The pooled disc / geo DTI of the recomputed components must equal the nested summary of notebook 01.
+3. Reproduction of recorded values. The recorded numbers (configs: same grid, same space, same objective) are
+   recomputed from the frozen grids: ``separate`` = disc and geo selected independently (how boost A reported them),
+   ``fixed`` = one historical cell, ``stack_grid`` = W2's own ``stack/grid.csv`` nested over (blend, rep, frac).
+4. Deployment dry run. ``final_submission.inspect_spec`` (template CRS, resolution, grid) and ``build_map`` (the
+   zone-stitched construction, no file written): parity per geo zone (strict: every zone-score row PASS), coverage,
+   per-zone area budget, no positive pixel on a mapped fault, recipe == notebook-01 recipe. The finalised array's
+   sha256 is recorded; notebook 03 requires the written GeoTIFF to carry exactly this array.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+
+import numpy as np
+import pandas as pd
+
+from .config import BLOCKED, COMPLETE
+
+COMP = ["tp_w", "fp_w", "fn_w", "n_truth"]
+OUT = ("validation/official_scores.csv", "validation/per_zone_metrics.csv", "validation/weighted_components.csv",
+       "validation/recorded_reproduction.csv", "validation/validation_status.json", "validation/zone_budget.csv",
+       "parity/zone_stitched_parity.csv", "reports/validation_report.md")
+
+
+# =============================================================================== pure
+def dti(tp, fp, fn) -> float:
+    return float(tp / (tp + 0.2 * fp + 0.8 * fn + 1e-6))
+
+
+def close(a, b, rtol: float, atol: float) -> bool:
+    a, b = float(a), float(b)
+    if not (np.isfinite(a) and np.isfinite(b)):
+        return False
+    return abs(a - b) <= atol + rtol * abs(b)
+
+
+def score_expression(orig: str, blend: float, F: np.ndarray | None, W: np.ndarray | None,
+                     cnn: dict | None = None) -> np.ndarray:
+    """The boost-A ranking score of one grid candidate (``Boost._a`` expressions, bit-for-bit)."""
+    if orig == "fallback_fusion":
+        return F
+    if orig in ("cnn_b0", "cnn_b1"):
+        return cnn[orig]
+    if orig == "w2":
+        return W if float(blend) == 1.0 else ((1.0 - float(blend)) * F + float(blend) * W).astype(np.float32)
+    if orig == "hybrid":
+        return (1.0 - float(blend)) * F + float(blend) * W
+    raise ValueError(f"no boost-A expression for grid candidate {orig!r}")
+
+
+def compare_rows(saved: dict, got: dict, rtol: float, atol: float) -> dict:
+    out = {}
+    ok = True
+    for c in COMP:
+        s, g = float(saved[c]), float(got[c])
+        out[f"saved_{c}"], out[f"recomputed_{c}"] = s, g
+        ok &= close(g, s, rtol, atol)
+    out["saved_dti"] = dti(out["saved_tp_w"], out["saved_fp_w"], out["saved_fn_w"])
+    out["recomputed_dti"] = dti(out["recomputed_tp_w"], out["recomputed_fp_w"], out["recomputed_fn_w"])
+    out["status"] = "PASS" if ok else "BLOCKED"
+    return out
+
+
+def pooled(rows: pd.DataFrame, prim: str) -> dict:
+    out = {}
+    for task, d in rows.groupby("task"):
+        pre = "disc" if task == prim else "geo"
+        out[f"{pre}_dti_recomputed"] = dti(d.recomputed_tp_w.sum(), d.recomputed_fp_w.sum(), d.recomputed_fn_w.sum())
+        out[f"{pre}_worst_recomputed"] = float(d.recomputed_dti.min())
+        for c in ("tp_w", "fp_w", "fn_w", "n_truth"):
+            out[f"{pre}_{c}"] = float(d[f"recomputed_{c}"].sum())
+    return out
+
+
+def recipe_consistency(recipe: dict, built: dict) -> list[str]:
+    """Differences between the notebook-01 recipe and the cell / sources the builder used (empty = consistent)."""
+    pol, cell = recipe["policy"], built["cell"]
+    bad = []
+    for k in ("rep", "frac", "blend"):
+        a, b = pol[k], cell[k]
+        if (float(a) != float(b)) if k != "rep" else (a != b):
+            bad.append(f"{k}: recipe {a} != builder {b}")
+    if pol["grid_candidate"] != cell["candidate"]:
+        bad.append(f"grid candidate: recipe {pol['grid_candidate']} != builder {cell['candidate']}")
+    if abs(float(pol["fusion_w_all_zones"]) - float(built["w_all"])) > 1e-12:
+        bad.append(f"fusion w: recipe {pol['fusion_w_all_zones']} != builder {built['w_all']}")
+    if recipe["deploy_kind"] != built["kind"]:
+        bad.append(f"deploy kind: recipe {recipe['deploy_kind']} != builder {built['kind']}")
+    if built["kind"] == "stack" and built.get("stack_dir") != "stack/maps":
+        bad.append(f"stacker maps from {built.get('stack_dir')}, expected the frozen W2 stack/maps")
+    return bad
+
+
+def array_sha(a: np.ndarray) -> str:
+    """sha256 of a float32 array's bytes, NaN canonicalised (so the written GeoTIFF band can be compared)."""
+    x = np.asarray(a, np.float32).copy()
+    x[np.isnan(x)] = np.float32(np.nan)
+    return hashlib.sha256(np.ascontiguousarray(x).tobytes() + str(x.shape).encode()).hexdigest()
+
+
+def budget_rows(zones: pd.DataFrame, frac: float, tol: float) -> pd.DataFrame:
+    z = zones.copy()
+    z["target_frac"] = float(frac)
+    z["rel_error"] = (z.frac_of_eligible - frac) / frac
+    z["ok"] = (z.rel_error.abs() <= tol) & (z.positive_on_known_px == 0)
+    return z
+
+
+# =============================================================================== Colab
+def champion_rows(sess) -> tuple[dict, pd.DataFrame, dict]:
+    sel = sess.ws.read_json("selection/champion_selection.json") or {}
+    name = sel.get("champion")
+    if not name:
+        from .session import StageBlocked
+
+        raise StageBlocked("no champion recorded by notebook 01")
+    C = sess.ws.load_table("selection/champion_candidates.csv")
+    row = C[C.candidate_id == name].iloc[0].to_dict()
+    PZ = sess.ws.load_table("selection/candidate_per_zone.csv")
+    return sel, PZ[PZ.name == name].reset_index(drop=True), row
+
+
+def recompute(sess, P: pd.DataFrame, tol: dict) -> pd.DataFrame:
+    from ..gems3 import representation as R
+
+    bst = sess.bst
+    rows = []
+    for r in P.to_dict("records"):
+        u = sess.p6.m9.unit(f"{r['task']}:{int(r['zone'])}")
+        orig = str(r["cell_candidate"]).partition(":")[2]
+        F, W = bst.fusion(u), bst.stack_rank(u, bst.w2_map(u))
+        b0, b1 = bst.cnn(u)
+        s = score_expression(orig, float(r["blend"]) if pd.notna(r["blend"]) else np.nan, F, W,
+                             {"cnn_b0": R.rank01(b0, u.ev), "cnn_b1": R.rank01(b1, u.ev)})
+        q = bst._apply(u, s, r["rep"], float(r["frac"]), bst._crest(u, s))
+        got = bst._eval_q(u, q, candidate=orig, rep=r["rep"], frac=float(r["frac"]))
+        cmp = compare_rows(r, got, float(tol["component_rtol"]), float(tol["component_atol"]))
+        rows.append({"task": r["task"], "zone": int(r["zone"]), "cell_candidate": r["cell_candidate"],
+                     "blend": r["blend"], "rep": r["rep"], "frac": float(r["frac"]), **cmp,
+                     "area_frac_eligible": got.get("area_frac_eligible"), "area_px": got.get("area_px"),
+                     "n_systems": got.get("n_systems"), "n_recovered": got.get("n_recovered")})
+        u.release()
+    return pd.DataFrame(rows)
+
+
+def reproduce_recorded(sess) -> pd.DataFrame:
+    """Recorded values vs the same quantity recomputed from the frozen grids (tolerance ``recorded_atol``)."""
+    from ..gems3.metric_opt import nested_select
+    from ..p6 import export_parity as EP
+    from ..p6 import full_benchmark as FB
+    from .champion import candidate_specs
+
+    cfg, fg = sess.cfg, sess.fg
+    tol = float(cfg["validation"]["recorded_atol"])
+    G, _ = FB.load_grids(fg)
+    G = G[G.source == "boost_a"]
+    specs = candidate_specs(fg.cfg, cfg)
+    rows = []
+    for name, rec in cfg["recorded"].items():
+        got = {}
+        if rec["source"] == "stack_grid":
+            S, params = pd.read_csv(sess.p6.ws.root / "stack" / "grid.csv", dtype={"systems": str}), list(rec["params"])
+        else:                                            # the boost / stack summaries used nested_select per task
+            S, params = EP.policy_rows(G, FB.candidate_space(specs[name], G)), ["candidate", "blend", "rep", "frac"]
+        for task in S.task.unique():
+            d = S[S.task == task]
+            pre = "disc" if task == fg.prim else "geo"
+            if rec.get("objective") == "fixed":
+                got[f"{pre}_dti"] = dti(d.tp_w.sum(), d.fp_w.sum(), d.fn_w.sum())
+            else:
+                _, s = nested_select(d, params)
+                got[f"{pre}_dti"], got[f"{pre}_worst"] = s.get("dti_crossfit"), s.get("fold_min")
+        for k in ("disc_dti", "disc_worst", "geo_dti"):
+            if rec.get(k) is None:
+                continue
+            v = got.get(k)
+            ok = v is not None and np.isfinite(float(v)) and abs(float(v) - float(rec[k])) <= tol
+            rows.append({"recorded_id": name, "source": rec["source"], "objective": rec.get("objective", "nested"),
+                         "metric": k, "recorded": float(rec[k]), "reproduced": None if v is None else float(v),
+                         "abs_diff": None if v is None else abs(float(v) - float(rec[k])), "tolerance": tol,
+                         "status": "PASS" if ok else "BLOCKED"})
+    return pd.DataFrame(rows)
+
+
+def validate(sess) -> dict:
+    """Notebook 02 stage ``validation``."""
+    from ..gems3 import submission as SUB
+    from ..p6 import final_submission as FS
+
+    sess.require("artifacts", "selection")
+    cfg, fg = sess.cfg, sess.fg
+    vc = cfg["validation"]
+    sel = sess.ws.read_json("selection/champion_selection.json") or {}
+    fp = sess.fp("validation", sess.manifest("selection").get("fingerprint"), vc, cfg["recorded"])
+
+    def run():
+        import yaml
+
+        sel_, P, crow = champion_rows(sess)
+        reasons = []
+        V = recompute(sess, P, vc)
+        sess.ws.save_table(V, "validation/per_zone_metrics.csv", parquet=True)
+        if not len(V) or (V.status != "PASS").any():
+            reasons.append(f"recomputed components differ from the saved grid on {list(V[V.status != 'PASS'].zone)}")
+        pl = pooled(V, fg.prim) if len(V) else {}
+        summ = {"candidate": sel_["champion"], **pl, "disc_dti_nested": crow.get("disc_dti"),
+                "disc_worst_nested": crow.get("disc_worst"), "geo_dti_nested": crow.get("geo_dti")}
+        for pre in ("disc", "geo"):
+            a, b = pl.get(f"{pre}_dti_recomputed"), crow.get(f"{pre}_dti")
+            ok = a is not None and b is not None and close(a, b, 0.0, float(vc["dti_atol"]))
+            summ[f"{pre}_pooling_status"] = "PASS" if ok else "BLOCKED"
+            if not ok:
+                reasons.append(f"{pre} pooled DTI recomputed {a} != nested {b}")
+        sess.ws.save_table(pd.DataFrame([summ]), "validation/official_scores.csv")
+        comp = V.groupby("task")[[f"recomputed_{c}" for c in COMP]].sum().reset_index() if len(V) else pd.DataFrame()
+        sess.ws.save_table(comp, "validation/weighted_components.csv")
+        RR = reproduce_recorded(sess)
+        sess.ws.save_table(RR, "validation/recorded_reproduction.csv")
+        if len(RR) and (RR.status != "PASS").any():
+            reasons.append("recorded values not reproduced: " + "; ".join(
+                f"{r.recorded_id}.{r.metric} {r.reproduced} vs {r.recorded}" for r in RR[RR.status != "PASS"].itertuples()))
+        try:
+            spec = FS.inspect_spec(fg)
+        except ValueError as e:
+            spec = {"problems": [str(e)]}
+            reasons.append(f"official template check: {e}")
+        recipe = yaml.safe_load(sess.ws.path("selection/champion_recipe.yaml").read_text(encoding="utf-8"))
+        built = FS.build_map(fg, {"name": crow["candidate_id"], "deploy": crow["deploy"],
+                                  "deploy_cell": json.loads(crow["deploy_cell"])})
+        par = built["parity"]
+        sess.ws.save_table(par, "parity/zone_stitched_parity.csv")
+        zs = par[par.check == "zone score vs evaluation construction"]
+        bad = zs[zs.status != "PASS"] if vc["strict_parity"] else zs[zs.status == "BLOCKED"]
+        if len(bad):
+            reasons.append(f"zone-stitched score parity not PASS on {list(bad.unit)} ({list(bad.status)}): "
+                           "the deployed score is not the evaluated score")
+        cov = built["coverage"]
+        if cov["uncovered_frac"] > float(vc["max_uncovered_frac"]):
+            reasons.append(f"uncovered valid pixels {cov['uncovered_frac']:.5f} > {vc['max_uncovered_frac']}")
+        Z = budget_rows(built["zones"], float(built["cell"]["frac"]), float(fg.cfg["submission"]["budget_tolerance"]))
+        sess.ws.save_table(Z, "validation/zone_budget.csv")
+        if not Z.ok.all():
+            reasons.append(f"per-zone area budget / known-fault mask violated on zones {list(Z[~Z.ok].zone)}")
+        rc = recipe_consistency(recipe, built)
+        reasons += [f"recipe mismatch: {x}" for x in rc]
+        arr = SUB.finalise(built["q"], fg.p6.ctx.data, fg.cfg["submission"]["outside_valid"])
+        st = {"status": COMPLETE if not reasons else BLOCKED, "reasons": reasons, "champion": sel_["champion"],
+              "recipe_id": sel_.get("recipe_id"), "validated_array_sha256": array_sha(arr),
+              "positive_px": int((np.nan_to_num(arr) > 0).sum()), "coverage": cov, "official_spec": spec,
+              "tolerances": vc, "summary": summ,
+              "note": "discovery quality of the exported map is the nested disc DTI of the same policy on the "
+                      "discovery units; the exported zone maps are the geographic held-out maps"}
+        sess.ws.save_json(st, "validation/validation_status.json")
+        from .reporting import validation_figures, validation_report
+
+        validation_figures(sess, V, RR, Z, par, crow)
+        sess.ws.save_text(validation_report(st, V, RR, Z, par), "reports/validation_report.md")
+        return st["status"], reasons, {"validated_array_sha256": st["validated_array_sha256"]}
+
+    return sess.run_stage("validation", fp, OUT, run, inputs={"selection_fp": sess.manifest("selection").get(
+        "fingerprint"), "champion": sel.get("champion")})
