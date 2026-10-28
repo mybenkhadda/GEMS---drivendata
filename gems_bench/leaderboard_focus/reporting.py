@@ -10,7 +10,7 @@ import time
 import numpy as np
 import pandas as pd
 
-from .config import BLOCKED, READY
+from .config import BLOCKED, COMPLETE, FAILED, INCOMPLETE, NOT_REQUIRED, READY, WARNING
 
 LB_COLUMNS = ["submission_id", "submission_file", "file_sha256", "recipe_id", "candidate", "validation_disc_dti",
               "validation_geo_dti", "public_dti", "submitted_at", "recorded_at", "discrepancy_public_minus_offline",
@@ -198,5 +198,142 @@ def record_leaderboard(sess, entry: dict | None) -> dict:
         ax.set(xticks=x, xticklabels=H.submission_id.astype(str), title="Recorded submissions")
         ax.legend()
         sess.ws.save_fig(fig, "leaderboard/leaderboard_history.png", H)
+    status = BLOCKED if msg and msg[0].startswith("REJECTED") else COMPLETE if msg else NOT_REQUIRED
+    sess.record("leaderboard", status, "", reasons=[m for m in msg if m.startswith("REJECTED")],
+                outputs=["leaderboard/leaderboard_review.md"], n_recorded=int(len(H)))
+    return {"history": H, "messages": msg, "status": status}
+
+
+# =============================================================================== final report
+# Known failure modes: (code, detection point, substring of the recorded reason, status, remediation). Every
+# non-passing manifest is matched against it in reports/M1_FAILURE_DIAGNOSTICS.md.
+FAILURE_MODES = [
+    ("ART_COUNT", "stage 1 inventory", "COUNT_MISMATCH", BLOCKED,
+     "A count-based artifact has a different number of files: restore the frozen folder (M1 never recomputes it)."),
+    ("ART_REQUIRED_FILE", "stage 1 inventory", "MISSING_REQUIRED_FILES", BLOCKED,
+     "A required map is absent from its folder (the note lists what was found): restore it from the original run."),
+    ("ART_MISSING", "stage 1 inventory", ": MISSING", BLOCKED,
+     "A required artifact is absent from Drive: restore it (template: run the pipeline raw_data step once)."),
+    ("ART_AMBIGUOUS", "stage 1 inventory", "AMBIGUOUS", BLOCKED,
+     "Several experiment folders match one artifact: M1 never combines or picks; resolve the duplicate by hand."),
+    ("ART_ID", "stage 1 inventory", "ID_CHANGED", BLOCKED,
+     "A B0 / B1 run differs from the recorded id: confirm the model, then set expected_id explicitly."),
+    ("STAGING", "session attach", "staged input(s) absent", INCOMPLETE,
+     "Staged copies are missing locally: re-run stage 1 (it re-stages and verifies every file)."),
+    ("GRID_REQUIRED", "stage 2 / 3 load_grids", "required grid(s) unusable", BLOCKED,
+     "The frozen boost-A grid is absent / empty / malformed (grid_provenance.csv gives the facts): restore "
+     "outputs/p6_fast_track/boost/benchmark/grid.csv. No fallback grid or recorded score is used."),
+    ("UPSTREAM", "every stage (require)", "upstream stages not usable", INCOMPLETE,
+     "An earlier stage is not COMPLETE / WARNING: run mode FULL (or the earlier stage) first."),
+    ("STALE_CODE", "every stage (require)", "produced by different stage code", INCOMPLETE,
+     "An upstream result was produced by other code: re-run that stage (mode FULL does it automatically)."),
+    ("TABLE", "stage inputs (require_table)", "absent or empty", BLOCKED,
+     "A persisted stage table is missing or empty: re-run the stage that writes it."),
+    ("RECIPE", "stages 3 / 5 / promotion", "recipe ids disagree", BLOCKED,
+     "Recipe ids disagree between selection files: re-run selection (never edit the files by hand)."),
+    ("GEO_FLOOR", "promotion", "GEOGRAPHIC_GATE_PASS", BLOCKED,
+     "The champion is below the recorded geographic floor (nested single policy). A user decision: keep it blocked, "
+     "or set promotion.geographic_gate: advisory with an override_note and re-run mode SUBMIT."),
+    ("DISC_ELIG", "promotion", "DISCOVERY_ELIGIBLE", BLOCKED,
+     "The champion fails the predeclared discovery rule (eligibility / worst-zone floor)."),
+    ("COMPONENTS", "stage 3", "recomputed components differ", BLOCKED,
+     "A frozen input changed after boost A: compare champion_provenance.json with artifact_inventory.json."),
+    ("ZONE_PARITY", "stage 3 / 4", "zone score parity not PASS", BLOCKED,
+     "The deployed zone score differs from the evaluated one (blend < 1: per-zone vs all-zone fusion w). Explicit "
+     "decision: validation.strict_parity."),
+    ("BUDGET", "stage 3", "area budget", BLOCKED, "Eligible-domain or known-mask problem: inspect zone_budget.csv."),
+    ("TEMPLATE", "stage 3", "official template check", BLOCKED,
+     "The competition template does not match the grid: restore data/raw/geodawn/example_submission.tif."),
+    ("RECORDED", "stage 3", "NOT_REPRODUCED", WARNING,
+     "A recorded value differs from its recomputation from the frozen grid (see protocol_comparison.csv)."),
+    ("EXPORT_SHA", "stage 5", "written band", BLOCKED,
+     "The written GeoTIFF is not the validated array: re-run the export; never upload this file."),
+    ("NAME", "stage 5", "FileExistsError", FAILED,
+     "Two other recipes already own the file name: archive them by hand (M1 never overwrites)."),
+    ("ORACLE", "stage 2 load_grids", "OracleLeak", FAILED,
+     "Oracle (label-built) rows reached a grid: the grid is not usable for selection; investigate its producer."),
+]
+
+
+def failure_matches(text: str) -> list[tuple]:
+    """Known failure modes whose marker occurs in ``text`` (pure)."""
+    return [f for f in FAILURE_MODES if f[2] in str(text)]
+
+
+def next_action(statuses: dict, promotion: dict, submission: dict) -> str:
+    """One recommended next action from the persisted statuses (pure)."""
+    order = ("artifacts", "selection", "validation", "parity")
+    for s in order:
+        if statuses.get(s) not in (COMPLETE, WARNING):
+            return (f"Stage `{s}` is {statuses.get(s) or 'not run'}: fix the reasons in "
+                    f"reports/M1_FAILURE_DIAGNOSTICS.md, then re-run with mode FULL (finished stages are reused).")
+    gates = {g["gate"]: g["status"] for g in (promotion.get("gates") or [])}
+    if promotion.get("status") == BLOCKED:
+        hard = [g for g, v in gates.items() if v == BLOCKED and g != "READY_FOR_EXPORT"]
+        if hard == ["GEOGRAPHIC_GATE_PASS"]:
+            return ("DECISION REQUIRED: the champion passes discovery, validation and parity but is below the "
+                    "geographic floor. Either keep it unexported (no submission), or set promotion.geographic_gate: "
+                    "advisory with a written override_note and re-run mode SUBMIT. M1 does not make this choice.")
+        return f"Promotion BLOCKED by {hard}: see selection/promotion_gates.csv."
+    if statuses.get("promotion") not in (COMPLETE, WARNING):
+        return "Run the promotion stage (mode FULL or SUBMIT)."
+    if submission.get("status") == READY:
+        return (f"Upload `{submission.get('file')}` MANUALLY on DrivenData (check sha256 first), then fill "
+                "LEADERBOARD_ENTRY and run stage 6.")
+    return f"Submission {submission.get('status') or 'not exported'}: {submission.get('reasons') or 'run stage 5'}."
+
+
+def final_report(sess) -> dict:
+    """reports/M1_EXECUTIVE_SUMMARY.md, M1_FAILURE_DIAGNOSTICS.md, M1_NEXT_ACTION.md (+ stage_status.csv) from the
+    persisted manifests only (works without the P6 engine)."""
+    from .config import STAGES
+
+    names = [s for s in STAGES if s not in ("environment", "report")]
+    if sess.manifest("session"):
+        names.insert(1, "session")                     # an engine attach that failed
+    st = {s: sess.manifest(s) for s in names}
+    statuses = {s: m.get("status") for s, m in st.items()}
+    sel = sess.ws.read_json("selection/champion_selection.json") or {}
+    prom = sess.ws.read_json("selection/promotion_gates.json") or {}
+    sub = sess.ws.read_json("submissions/submission_manifest.json") or {}
+    met = sel.get("champion_metrics") or {}
+    gates = {g["gate"]: g["status"] for g in (prom.get("gates") or [])}
+    S = pd.DataFrame([{"stage": s, "status": m.get("status") or "not run", "written": m.get("written"),
+                       "code_rev": m.get("code_rev"), "reasons": " | ".join(map(str, m.get("reasons") or [])),
+                       "warnings": " | ".join(map(str, m.get("warnings") or []))} for s, m in st.items()])
+    sess.ws.save_table(S, "reports/stage_status.csv")
+    path = f"{sess.cfg['output_dir']}/submissions/{sub['file']}" if sub.get("file") else None
+    rows = [("Selected candidate", sel.get("champion") or "none"), ("Recipe id", sel.get("recipe_id")),
+            ("Discovery DTI (nested, single policy)", met.get("disc_dti")),
+            ("Worst discovery zone DTI", met.get("disc_worst")),
+            ("Geographic DTI (nested, single policy)", met.get("geo_dti")),
+            ("Geographic floor", f"{sel.get('geo_floor')} -> {gates.get('GEOGRAPHIC_GATE_PASS', 'PENDING')} "
+                                 f"({prom.get('geographic_gate', '?')})"),
+            ("Validation", statuses.get("validation")), ("Parity", statuses.get("parity")),
+            ("Promotion (READY_FOR_EXPORT)", gates.get("READY_FOR_EXPORT", "PENDING")),
+            ("Submission status", sub.get("status") or "not exported"), ("GeoTIFF (Drive)", path or "none")]
+    blocking = [f"{s}: {r}" for s, m in st.items() if m.get("status") not in (COMPLETE, WARNING, NOT_REQUIRED, None)
+                for r in (m.get("reasons") or [])]
+    nxt = next_action(statuses, prom, sub)
+    summary = ["# M1 executive summary", "",
+               "Offline numbers are nested held-out estimates from the frozen boost-A grid, NOT leaderboard scores.", "",
+               "| item | value |", "|---|---|", *(f"| {k} | {v} |" for k, v in rows), "",
+               "## Blocking reasons", "", *(f"* {b}" for b in blocking or ["none"]), "",
+               "## Recommended next action", "", nxt, ""]
+    sess.ws.save_text("\n".join(summary), "reports/M1_EXECUTIVE_SUMMARY.md")
+    diag = ["# M1 failure diagnostics", "", _md(S), ""]
+    for s, m in st.items():
+        if m.get("status") in (COMPLETE, NOT_REQUIRED, None):
+            continue
+        diag += [f"## {s}: {m.get('status')}", ""]
+        for r in list(m.get("reasons") or []) + list(m.get("warnings") or []):
+            diag.append(f"* {r}")
+            for code, where, _, fst, fix in failure_matches(r):
+                diag.append(f"  * known failure `{code}` (detected at {where}, status {fst}): {fix}")
+        if m.get("traceback"):
+            diag += ["", "```", str(m["traceback"])[-2000:], "```"]
+        diag.append("")
+    sess.ws.save_text("\n".join(diag), "reports/M1_FAILURE_DIAGNOSTICS.md")
+    sess.ws.save_text("\n".join(["# M1 next action", "", nxt, ""]), "reports/M1_NEXT_ACTION.md")
     sess.ws.push()
-    return {"history": H, "messages": msg, "status": BLOCKED if msg and msg[0].startswith("REJECTED") else "OK"}
+    return {"summary": dict(rows), "blocking": blocking, "next_action": nxt, "stages": S}

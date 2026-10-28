@@ -200,12 +200,18 @@ def run_environment(CONFIG: dict, head: str, m1_config: dict | None = None) -> d
         summ = {**summ, "status": "BLOCKED", "blocking": summ["blocking"] + [f"staged copy differs: {bad}"]}
         atomic_write_json(root / "artifact_inventory.json", {"summary": summ, "artifacts": inv.to_dict("records"),
                                                              "drive_root": str(drive)})
+    import time
+
     from .._version import provenance
 
-    atomic_write_json(root / "manifests" / "artifacts.json",
-                      {"stage": "artifacts", "status": summ["status"], "reasons": summ["blocking"],
-                       "fingerprint": summ["fingerprint"], "code": provenance(), "environment": env})
-    sync.push([rel_root])
+    am = {"stage": "artifacts", "status": summ["status"], "reasons": summ["blocking"],
+          "warnings": [f"optional artifact not OK: {i}" for i in summ["optional_missing"]],
+          "fingerprint": summ["fingerprint"], "code": provenance(), "environment": env,
+          "written": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    atomic_write_json(root / "manifests" / "artifacts.json", am)
+    atomic_write_json(root / "manifests" / "history" / f"artifacts__{am['written'].replace(':', '')}.json", am)
+    if (cfg.get("outputs") or {}).get("sync_to_drive", True):
+        sync.push([rel_root])
     return {"summary": summ, "inventory": inv, "staging": man, "environment": env}
 
 

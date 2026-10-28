@@ -1,7 +1,10 @@
-"""Notebook 01: the strongest VALID, DEPLOYABLE existing W2 configuration (no new model, no grid recomputation).
+"""Stage 2: the strongest VALID, DEPLOYABLE existing W2 configuration (no new model, no grid recomputation).
 
 Procedure (every step is existing P6 code; M1 only restricts the candidate set and adds artifact gates):
-1. Load the FROZEN boost-A grid (``full_benchmark.load_grids``) and check its protocol keys (``protocol_check``).
+1. Load ONLY the configured grids (``full_benchmark.load_grids(fg, sources=champion.grids,
+   required=champion.required_grids)``: the frozen boost-A grid). An absent / empty / malformed required grid makes
+   the stage BLOCKED with the file's facts in ``selection/grid_provenance.json``; nothing falls back to another grid
+   or to recorded scores. Then the protocol keys are checked (``protocol_check``).
 2. Candidate specs = the configured p6g candidate names (W2 family + the B0+B1 fusion fallback) + the historical
    uploaded cell (role ``historical``: evaluated for the record, never selectable).
 3. Artifact gates per candidate (``deploy_artifacts``): the zone-stitched builder needs the three geographic held-out
@@ -14,6 +17,8 @@ Procedure (every step is existing P6 code; M1 only restricts the candidate set a
 5. The champion recipe (``champion_recipe.yaml``): the winner's all-zone deploy cell, its map sources and hashes, the
    zone-stitched construction. ``recipe_id`` = fingerprint of that recipe; it names the submission file.
 
+Stage status COMPLETE means SELECTION_COMPLETE only: the champion still has to pass the promotion gates
+(``gates.py``: discovery eligibility, geographic floor, validation, parity) before anything may be exported.
 Recorded historical values (configs) are kept in ``recorded_*`` columns, never in the recomputed ones.
 """
 from __future__ import annotations
@@ -23,10 +28,11 @@ import json
 import numpy as np
 import pandas as pd
 
-from .config import BLOCKED, COMPLETE
+from .config import BLOCKED, COMPLETE, INCOMPLETE
 
 OUT = ("selection/champion_candidates.csv", "selection/champion_selection.json", "selection/champion_recipe.yaml",
-       "selection/champion_provenance.json", "selection/blocked_candidates.csv", "reports/recovery_report.md")
+       "selection/champion_provenance.json", "selection/blocked_candidates.csv", "selection/grid_provenance.json",
+       "reports/recovery_report.md")
 
 
 # =============================================================================== pure
@@ -88,7 +94,7 @@ def annotate(rows: list[dict], m1_cfg: dict) -> pd.DataFrame:
                     "recorded_disc_dti": rc.get("disc_dti"), "recorded_disc_worst": rc.get("disc_worst"),
                     "recorded_geo_dti": rc.get("geo_dti"), "recorded_objective": rc.get("objective"),
                     "eligible": bool(r.get("eligible")), "eligibility_reasons": r.get("eligibility_reasons", ""),
-                    "parity_status": "PENDING (notebook 02)", "export_feasible": bool(r.get("eligible")),
+                    "parity_status": "PENDING (stage 4)", "export_feasible": bool(r.get("eligible")),
                     "decision": dec, "is_champion": bool(r.get("is_winner")),
                     "disc_per_zone": json.dumps(r.get("disc_per_zone")) if isinstance(r.get("disc_per_zone"), dict)
                     else r.get("disc_per_zone")})
@@ -152,24 +158,44 @@ def map_sources(sess, kind: str) -> dict:
     return out
 
 
+def grid_rows(prov: dict) -> pd.DataFrame:
+    """One row per inspected grid (for the reports): status, detail, size, rows, required (pure)."""
+    return pd.DataFrame([{"source": s, "required": i.get("required"), "usable": i.get("usable"),
+                          "grid_status": i.get("grid_status"), "detail": i.get("detail"), "path": i.get("path"),
+                          "bytes": i.get("bytes"), "rows": i.get("rows"), "sha256": i.get("sha256"),
+                          "stage_status": i.get("stage_status")} for s, i in prov.items()])
+
+
 def recover(sess) -> dict:
-    """Notebook 01 stage ``selection``."""
+    """Stage ``selection``."""
     from ..p6 import export_parity as EP
     from ..p6 import full_benchmark as FB
+    from .session import StageBlocked
 
     fg, cfg = sess.fg, sess.cfg
-    sess.require("artifacts")
+    try:
+        sess.require("artifacts")
+    except StageBlocked as e:
+        return sess.record("selection", INCOMPLETE, "", reasons=[str(e)])
     specs0 = candidate_specs(fg.cfg, cfg)
     sel = selection_rule(fg.cfg, cfg)
+    ch_cfg = cfg["champion"]
     fp = sess.fp("selection", sess.inventory_fp(), specs0, sel, cfg["recorded"],
-                 fg.rc.read_json("export_parity", "decision"))
+                 fg.rc.read_json("export_parity", "decision"), ch_cfg["grids"], ch_cfg["required_grids"],
+                 {g: fg.cfg["grids"][g] for g in ch_cfg["grids"] if g in fg.cfg["grids"]})
 
     def run():
         import yaml
 
-        G, prov = FB.load_grids(fg)
-        G = G[G.source.isin(cfg["champion"]["grids"])].reset_index(drop=True)
-        specs = _resolve(fg, specs0, prov)
+        try:
+            G, prov = FB.load_grids(fg, sources=ch_cfg["grids"], required=ch_cfg["required_grids"])
+        except FB.GridUnavailable as e:
+            sess.ws.save_json({"status": BLOCKED, "reason": str(e), "grids": e.prov}, "selection/grid_provenance.json")
+            sess.ws.save_table(grid_rows(e.prov), "selection/grid_provenance.csv")
+            return BLOCKED, [str(e)], {"champion": None, "recipe_id": None}
+        sess.ws.save_json({"status": "OK", "grids": prov}, "selection/grid_provenance.json")
+        sess.ws.save_table(grid_rows(prov), "selection/grid_provenance.csv")
+        specs = FB.resolve_specs(fg, prov, specs0)
         gates = deploy_artifacts(sess)
         specs = apply_artifact_gates(specs, gates)
         PC, consistent = FB.protocol_check(G)
@@ -212,7 +238,16 @@ def recover(sess) -> dict:
             sess.ws.save_text("# no champion recipe: see champion_selection.json -> reasons\n",
                               "selection/champion_recipe.yaml")
         status = COMPLETE if recipe is not None and ch["decision"] != "NO_ELIGIBLE_CANDIDATE" else BLOCKED
-        out = {"status": status, "champion": win if status == COMPLETE else None, "decision": ch["decision"],
+        floor = float(cfg["selection"]["geo_floor"])
+        ev = C[C.status == "EVALUATED"] if len(C) else C
+        crow = C[C.candidate_id == win].iloc[0].to_dict() if win and len(C) and (C.candidate_id == win).any() else {}
+        out = {"status": status, "stage_meaning": "SELECTION_COMPLETE only; promotion gates decide export",
+               "champion": win if status == COMPLETE else None,
+               "champion_metrics": {k: crow.get(k) for k in ("disc_dti", "disc_worst", "disc_worst_zone", "geo_dti",
+                                                              "eligible", "geo_floor_met")},
+               "geo_floor": floor, "n_evaluated": int(len(ev)),
+               "n_evaluated_meeting_geo_floor": int(ev.geo_floor_met.fillna(False).astype(bool).sum()) if len(ev)
+               else 0, "decision": ch["decision"],
                "baseline": ch["baseline"], "best_eligible": ch["best_eligible"], "gain_vs_baseline":
                ch["gain_vs_baseline"], "objective": T["objective"], "objective_predeclared": T["objective_predeclared"],
                "overlap_exclusion_feasible": feasible, "rule": sel, "reasons": reasons, "recipe_id": rid,
@@ -222,7 +257,7 @@ def recover(sess) -> dict:
         sess.ws.save_json(out, "selection/champion_selection.json")
         from .._version import provenance
 
-        sess.ws.save_json({"grids": {k: v for k, v in prov.items() if k in cfg["champion"]["grids"]},
+        sess.ws.save_json({"grids": prov,
                            "w2_inputs": fg.bst.w2_inputs(), "cnn_members": _members(fg),
                            "data_fingerprint": fg.data_fingerprint(), "inventory_fp": sess.inventory_fp(),
                            "code": provenance(), "protocol_keys": fg.bst.protocol_keys()},
@@ -233,18 +268,6 @@ def recover(sess) -> dict:
         return status, reasons, {"champion": out["champion"], "recipe_id": rid}
 
     return sess.run_stage("selection", fp, OUT, run, inputs={"inventory_fp": sess.inventory_fp()})
-
-
-def _resolve(fg, specs: dict, prov: dict) -> dict:
-    """``full_benchmark.resolve_specs`` semantics for M1's own spec set (recovery choice, absent grids)."""
-    from ..p6 import full_benchmark as FB
-
-    saved = fg.cfg["candidates"]
-    try:
-        fg.cfg["candidates"] = specs
-        return FB.resolve_specs(fg, prov)
-    finally:
-        fg.cfg["candidates"] = saved
 
 
 def _members(fg) -> list:

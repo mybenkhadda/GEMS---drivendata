@@ -394,25 +394,103 @@ def _read_json(p):
         return None
 
 
-def load_grids(fg) -> tuple[pd.DataFrame, dict]:
-    """Every configured grid present on disk, normalised, with provenance (sha256, producing-stage fingerprint, code
-    commit, status). Absent grids are recorded with the producing stage's own status / decision."""
+GRID_OK, GRID_MISSING, GRID_EMPTY, GRID_NO_HEADER = "OK", "MISSING", "EMPTY_FILE", "NO_HEADER"
+GRID_MALFORMED, GRID_ZERO_ROWS, GRID_SCHEMA = "MALFORMED", "ZERO_ROWS", "SCHEMA_INVALID"
+
+
+class GridUnavailable(RuntimeError):
+    """A grid the caller declared required is absent or unusable; ``prov`` holds every inspected grid's facts."""
+
+    def __init__(self, msg: str, prov: dict):
+        super().__init__(msg)
+        self.prov = prov
+
+
+def read_csv_checked(p, required: list[str] | tuple = ()) -> tuple[pd.DataFrame | None, dict]:
+    """(table or None, facts) of one saved CSV. A damaged file is described, never raised: ``status`` is OK, MISSING,
+    EMPTY_FILE (0 bytes / whitespace only, e.g. a 1-byte placeholder), NO_HEADER, MALFORMED (parser / encoding
+    error), ZERO_ROWS (header only) or SCHEMA_INVALID (a ``required`` column absent)."""
+    from pathlib import Path
+
+    p = Path(p)
+    facts = {"path": str(p), "exists": p.exists(), "bytes": None, "status": GRID_OK, "detail": "", "columns": [],
+             "rows": 0}
+    if not p.exists():
+        return None, {**facts, "status": GRID_MISSING, "detail": "file absent"}
+    facts["bytes"] = int(p.stat().st_size)
+    with open(p, "rb") as f:
+        head = f.read(4096)
+    if not head.strip():
+        return None, {**facts, "status": GRID_EMPTY, "detail": f"{facts['bytes']} byte(s), no content"}
+    try:
+        T = pd.read_csv(p, dtype={"systems": str})
+    except pd.errors.EmptyDataError as e:
+        return None, {**facts, "status": GRID_NO_HEADER, "detail": f"no columns to parse: {e}"}
+    except (pd.errors.ParserError, UnicodeDecodeError) as e:
+        return None, {**facts, "status": GRID_MALFORMED, "detail": f"{type(e).__name__}: {str(e)[:300]}"}
+    facts.update(columns=[str(c) for c in T.columns], rows=int(len(T)))
+    if not len(T):
+        return None, {**facts, "status": GRID_ZERO_ROWS, "detail": "header only, no rows"}
+    miss = [c for c in required if c not in T]
+    if miss:
+        return None, {**facts, "status": GRID_SCHEMA, "detail": f"required columns missing: {miss}"}
+    return T, facts
+
+
+def read_grid_csv(p, source: str, kind: str) -> tuple[pd.DataFrame | None, dict]:
+    """``read_csv_checked`` + ``normalize_grid`` + numeric components. ``OracleLeak`` (oracle rows) is never caught:
+    a leaking grid stops the caller."""
+    req = ("task", "zone", "rep", "frac", *COMP) + (("method", "w") if kind == "seeds" else ("candidate",))
+    T, facts = read_csv_checked(p, req)
+    if T is None:
+        return None, facts
+    num = {c: pd.to_numeric(T[c], errors="coerce") for c in COMP}
+    bad = [c for c in COMP if num[c].isna().sum() > T[c].isna().sum() or num[c].isna().all()]
+    if bad:
+        return None, {**facts, "status": GRID_SCHEMA, "detail": f"non-numeric or empty official components in {bad}"}
+    try:
+        g = normalize_grid(T, source, kind)
+    except ValueError as e:                                  # schema / dtype problems (zone, frac, seeds columns)
+        return None, {**facts, "status": GRID_SCHEMA, "detail": f"{type(e).__name__}: {str(e)[:300]}"}
+    if not len(g):
+        return None, {**facts, "status": GRID_ZERO_ROWS, "detail": "no rows after normalisation"}
+    return g, {**facts, "rows": int(len(g))}
+
+
+def load_grids(fg, sources=None, required=None) -> tuple[pd.DataFrame, dict]:
+    """Configured grids, normalised, with provenance (sha256, producing-stage fingerprint, code commit, status).
+
+    ``sources``  None = every configured grid (the P6 behaviour); a list = only those (validated names).
+    ``required`` names that must be usable; otherwise ``GridUnavailable`` (actionable message + provenance).
+    An absent or damaged optional grid is recorded (``usable: false``, ``grid_status``, ``detail``, the producing
+    stage's own status / decision) and never stops the caller; its rows are simply not loaded."""
     from .boost_audit import file_hash
 
+    conf = fg.cfg["grids"]
+    names = list(conf) if sources is None else list(dict.fromkeys(sources))
+    req = list(dict.fromkeys(required or []))
+    unknown = sorted({s for s in names + req if s not in conf})
+    if unknown:
+        raise KeyError(f"unknown grid source(s) {unknown}; configured in configs/p6/full_gpu.yaml: {sorted(conf)}")
+    if [r for r in req if r not in names]:
+        raise ValueError(f"required grids {req} must be among the loaded sources {names}")
     root = fg.p6.ws.root
     parts, prov = [], {}
-    for src, gc in fg.cfg["grids"].items():
+    for src in names:
+        gc = conf[src]
         p = root / gc["path"]
         man = _read_json(root / gc["stage"] / "manifest.json") or {}
         st = _read_json(root / gc["stage"] / "status.json") or {}
-        info = {"path": gc["path"], "exists": p.exists(), "stage_status": st.get("status"),
-                "stage_fingerprint": man.get("fingerprint"), "stage_commit": (man.get("code") or {}).get("git_commit"),
-                "stage_seconds": man.get("seconds")}
-        if p.exists():
-            G = pd.read_csv(p, dtype={"systems": str})
-            g = normalize_grid(G, src, gc["kind"])
+        g, facts = read_grid_csv(p, src, gc["kind"])
+        info = {"path": gc["path"], "exists": facts["exists"], "usable": g is not None, "grid_status": facts["status"],
+                "detail": facts["detail"], "bytes": facts["bytes"], "n_columns": len(facts["columns"]),
+                "required": src in req, "stage_status": st.get("status"), "stage_fingerprint": man.get("fingerprint"),
+                "stage_commit": (man.get("code") or {}).get("git_commit"), "stage_seconds": man.get("seconds")}
+        if facts["exists"]:
+            info["sha256"] = file_hash(p)
+        if g is not None:
             parts.append(g)
-            info.update(sha256=file_hash(p), rows=int(len(g)), candidates=sorted(g.orig_candidate.unique()))
+            info.update(rows=int(len(g)), candidates=sorted(g.orig_candidate.unique()))
         else:
             notes = {}
             for rel in fg.cfg.get("not_run_sources", {}).get(src, []):
@@ -422,15 +500,21 @@ def load_grids(fg) -> tuple[pd.DataFrame, dict]:
                                                         "s1_decision", "verdict") if k in j}
             info["not_run_evidence"] = notes
         prov[src] = info
-    G = pd.concat([g for g in parts if len(g)], ignore_index=True) if parts else pd.DataFrame(columns=KEEP)
+    bad = [s for s in req if not prov[s]["usable"]]
+    if bad:
+        raise GridUnavailable("required grid(s) unusable: " + "; ".join(
+            f"{s} {prov[s]['grid_status']} ({prov[s]['detail']}) at {prov[s]['path']} under {root}" for s in bad)
+            + ". Restore the frozen file; M1 never falls back to another grid or to recorded scores.", prov)
+    G = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=KEEP)
     return G, prov
 
 
-def resolve_specs(fg, prov: dict) -> dict:
-    """Configured candidates with absent grids marked NOT_RUN / BLOCKED, and the recovery choice resolved from
-    ``recovery/export_parity/decision.json`` (its policy space in recovery.yaml)."""
+def resolve_specs(fg, prov: dict, candidates: dict | None = None) -> dict:
+    """Configured candidates (``candidates`` or ``fg.cfg['candidates']``) with absent / unusable grids marked
+    NOT_RUN / BLOCKED, and the recovery choice resolved from ``recovery/export_parity/decision.json`` (its policy
+    space in recovery.yaml)."""
     specs = {}
-    for name, sp in fg.cfg["candidates"].items():
+    for name, sp in (fg.cfg["candidates"] if candidates is None else candidates).items():
         sp = dict(sp)
         if sp.get("from_recovery"):
             dec = fg.rc.read_json("export_parity", "decision") or {}
@@ -443,11 +527,13 @@ def resolve_specs(fg, prov: dict) -> dict:
                 sp["cells"] = sp.pop("candidates", [])
                 sp["label"] = f"{sp.get('label', '')}: {pol} ({dec.get('objective')})"
         g = prov.get(sp.get("grid"), {})
-        if not sp.get("status") and not g.get("exists"):
+        if not sp.get("status") and not g.get("usable", g.get("exists")):
             ev = g.get("not_run_evidence") or {}
             blocked = any("BLOCKED" in json.dumps(v) or "READY_FOR_BACKFILL" in json.dumps(v) for v in ev.values())
+            state = g.get("grid_status") or "absent"
             sp.update(status="BLOCKED" if blocked else "NOT_RUN",
-                      reason=f"grid {g.get('path')} absent; evidence: {json.dumps(ev, default=str)[:400]}")
+                      reason=f"grid {g.get('path')} {state} ({g.get('detail', '')}); evidence: "
+                             f"{json.dumps(ev, default=str)[:400]}")
         specs[name] = sp
     return specs
 

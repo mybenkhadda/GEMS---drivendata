@@ -5,7 +5,10 @@
 Open `MyDrive/GEMS_2/outputs/leaderboard_focus/m1_champion_recovery/submissions/submission_manifest.json`. The file
 is ready only if `"status": "READY_FOR_UPLOAD"`.
 
-`BLOCKED` and `INCOMPLETE` files must not be uploaded; `reasons` says why.
+`BLOCKED` and `INCOMPLETE` files must not be uploaded; `reasons` says why. When promotion is BLOCKED (for example
+on `GEOGRAPHIC_GATE_PASS`) stage 5 writes **no** GeoTIFF at all; `reports/M1_NEXT_ACTION.md` names the decision. If
+you accepted a below-floor champion (`promotion.geographic_gate: advisory`), the manifest's `promotion` block carries
+your `override_note`.
 
 ## 2. Locate the GeoTIFF
 
@@ -31,8 +34,9 @@ Nothing in M1 uploads automatically.
 
 ## 4. Record the score
 
-In notebook 04, fill `LEADERBOARD_ENTRY` (`submission_id`, `submission_file`, `public_dti`, `submitted_at`, `notes`)
-and run the notebook.
+In the Stage 0 configuration cell of `GEMS_M1_CHAMPION_TO_SUBMISSION.ipynb`, fill `LEADERBOARD_ENTRY`
+(`submission_id`, `submission_file`, `public_dti`, `submitted_at`, `notes`), then run Stage 0 and the Stage 6 cell
+(mode `FULL` or `SUBMIT`).
 
 The entry is refused when the file is not the READY M1 file, its sha256 changed, or the id or file was already
 recorded.

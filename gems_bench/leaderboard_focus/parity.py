@@ -22,7 +22,7 @@ import json
 import numpy as np
 import pandas as pd
 
-from .config import BLOCKED, COMPLETE
+from .config import BLOCKED, COMPLETE, INCOMPLETE
 
 OUT = ("parity/parity_report.csv", "parity/parity_report.json", "parity/historical_parity_summary.csv")
 CAUSES = {
@@ -138,8 +138,14 @@ def fresh_checks(sess) -> pd.DataFrame:
                            "saw that zone's rows (held-out maps are cross-fitted)", "source": "code (p6/stack.py)"})
     hist = sorted(p6.ws.root.joinpath("submissions").glob("p6_stack_fusion*.json"))
     rec = sess.ws.read_json("selection/champion_selection.json") or {}
-    if hist:
-        side = json.loads(hist[-1].read_text(encoding="utf-8"))
+    try:
+        side = json.loads(hist[-1].read_text(encoding="utf-8")) if hist else None
+    except (OSError, json.JSONDecodeError) as e:
+        side = None
+        rows.append({"scope": "historical", "check": "historical export recipe", "unit": "*",
+                     "status": "NOT_AVAILABLE", "detail": f"{hist[-1].name} unreadable: {type(e).__name__}",
+                     "source": "recorded"})
+    if side is not None:
         pa = side.get("parameters") or {}
         rows.append({"scope": "historical", "check": "historical export recipe (rep / blend source vs frac source)",
                      "unit": "*", "status": "BLOCKED" if str(side.get("frac_source")) == "geo" else "WARNING",
@@ -147,17 +153,21 @@ def fresh_checks(sess) -> pd.DataFrame:
                      "source": f"recorded ({hist[-1].name})"})
     rows.append({"scope": "champion", "check": "champion recipe = one all-zone selection", "unit": "*",
                  "status": "PASS" if rec.get("recipe_id") else "BLOCKED",
-                 "detail": f"recipe_id {rec.get('recipe_id')}", "source": "notebook 01"})
+                 "detail": f"recipe_id {rec.get('recipe_id')}", "source": "selection stage"})
     return pd.DataFrame(rows)
 
 
 def diagnose(sess) -> dict:
-    """Notebook 02 stage ``parity``."""
+    """Stage ``parity`` (export parity: PASS -> COMPLETE, champion WARNING / BLOCKED rows -> BLOCKED)."""
     from ..p6 import stack as ST
+    from .session import StageBlocked
 
-    sess.require("validation")
     fp = sess.fp("parity", sess.manifest("validation").get("fingerprint"),
                  sess.fg.rc.read_json("export_parity", "decision"))
+    try:
+        sess.require("validation")
+    except StageBlocked as e:
+        return sess.record("parity", INCOMPLETE, fp, reasons=[str(e)])
 
     def run():
         hist = sess.fg.rc.load_table("train_inference_parity", "export_parity")

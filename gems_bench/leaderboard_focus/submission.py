@@ -1,8 +1,11 @@
-"""Notebook 03: ONE validated, reproducible GeoTIFF of the champion (zone-stitched; no retraining, no new inference).
+"""Stage 5: ONE validated, reproducible GeoTIFF of the champion (zone-stitched; no retraining, no new inference).
 
 Gate order (the first failing gate decides; nothing is labelled ready by default):
-    INCOMPLETE        artifacts / selection / validation / parity stage not COMPLETE (nothing is written)
-    BLOCKED           a check below failed (the file, if written, stays on disk with status BLOCKED, never "ready")
+    INCOMPLETE        an upstream stage (artifacts / selection / validation / parity / promotion) has not run or is
+                      not usable (nothing is written)
+    BLOCKED           the promotion stage is BLOCKED (READY_FOR_EXPORT not reached: nothing is written), or a check
+                      below failed (the file, if written, stays on disk with status BLOCKED, never "ready")
+    NOT_REQUIRED      ``outputs.save_geotiff`` is false (nothing is written)
     READY_FOR_UPLOAD  every check passed
 Writer and official checks are the existing ones: ``final_submission.export_one`` (recipe -> plan audit ->
 ``write_file`` (never overwrites another recipe) -> ``validate`` = ``gems3.submission.validate`` + ``audit_export`` +
@@ -20,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import BLOCKED, INCOMPLETE, READY
+from .config import BLOCKED, INCOMPLETE, NOT_REQUIRED, PASSING, READY
 
 OUT = ("submissions/submission_manifest.json", "submissions/submission_validation.json",
        "submissions/submission_sha256.txt", "submissions/export_parity_report.json", "submissions/README.md")
@@ -71,6 +74,20 @@ def m1_checks(facts: dict, size_mb: float, cfg: dict, validated_sha: str, writte
     ]
 
 
+def precheck(statuses: dict, save_geotiff: bool) -> tuple[str | None, list[str]]:
+    """(status, reasons) when the export must not run, (None, []) when it may (pure). ``statuses``: stage -> status of
+    artifacts, selection, validation, parity, promotion."""
+    if not save_geotiff:
+        return NOT_REQUIRED, ["outputs.save_geotiff is false: no GeoTIFF requested"]
+    prom = statuses.get("promotion")
+    if prom == BLOCKED:
+        return BLOCKED, ["promotion BLOCKED (READY_FOR_EXPORT not reached): see selection/promotion_gates.csv"]
+    bad = {s: v for s, v in statuses.items() if v not in PASSING}
+    if bad:
+        return INCOMPLETE, [f"upstream stages not usable: {bad}"]
+    return None, []
+
+
 def readme(man: dict) -> str:
     ready = man["status"] == READY
     return "\n".join([
@@ -88,27 +105,41 @@ def readme(man: dict) -> str:
 
 
 def export(sess) -> dict:
-    """Notebook 03 stage ``submissions``."""
+    """Stage ``submissions``."""
     import yaml
 
     from ..p6 import final_submission as FS
+    from .session import StageBlocked
     from .validation import array_sha, recipe_consistency
 
     cfg, fg = sess.cfg, sess.fg
-    try:
-        sess.require("artifacts", "selection", "validation", "parity")
-    except Exception as e:
-        man = {"status": INCOMPLETE, "reasons": [str(e)], "uploaded": False}
+    ups = ("artifacts", "selection", "validation", "parity", "promotion")
+    st0, why0 = precheck({s: sess.status(s) for s in ups}, bool((cfg.get("outputs") or {}).get("save_geotiff", True)))
+    if st0 is None:
+        try:
+            sess.require(*ups)                           # also refuses results of different stage code
+        except StageBlocked as e:
+            st0, why0 = INCOMPLETE, [str(e)]
+    if st0 is not None:
+        man = {"status": st0, "reasons": why0, "uploaded": False, "file": None,
+               "note": "no GeoTIFF written by this call; an earlier file (if any) keeps its own manifest"}
         sess.ws.save_json(man, "submissions/submission_manifest.json")
-        sess.record("submissions", INCOMPLETE, "", reasons=[str(e)])
+        sess.record("submissions", st0, "", reasons=why0)
         return man
     sel = sess.ws.read_json("selection/champion_selection.json")
     val = sess.ws.read_json("validation/validation_status.json")
     recipe = yaml.safe_load(sess.ws.path("selection/champion_recipe.yaml").read_text(encoding="utf-8"))
-    fp = sess.fp("submissions", sess.manifest("parity").get("fingerprint"), recipe, cfg["submission"])
+    fp = sess.fp("submissions", sess.manifest("parity").get("fingerprint"), recipe, cfg["submission"],
+                 sess.manifest("promotion").get("fingerprint"))
 
     def run():
-        C = sess.ws.load_table("selection/champion_candidates.csv")
+        from .session import StageInvalid
+
+        C = sess.ws.require_table("selection/champion_candidates.csv", ("candidate_id", "deploy", "deploy_cell"))
+        if not (C.candidate_id == sel.get("champion")).any() or recipe.get("recipe_id") != sel.get("recipe_id"):
+            raise StageInvalid(f"recipe ids disagree: champion {sel.get('champion')} / recipe yaml "
+                               f"{recipe.get('recipe_id')} vs champion_selection.json {sel.get('recipe_id')}: re-run "
+                               "selection")
         crow = C[C.candidate_id == sel["champion"]].iloc[0].to_dict()
         fam = crow.get("family") or "w2"
         name = submission_name(cfg["submission"]["prefix"], fam, recipe["recipe_id"])
@@ -138,7 +169,9 @@ def export(sess) -> dict:
                "recipe_fp": rec["fingerprint"], "cell": row["deploy_cell"], "reused_existing_file": man6["reused"],
                "offline": {k: row.get(k) for k in ("disc_dti", "disc_worst", "geo_dti", "objective")},
                "p6_readiness": man6["readiness"], "p6_validation_status": man6["validation_status"],
-               "coverage": man6["coverage"], "uploaded": False, "upload": "manual only (submissions/README.md)"}
+               "coverage": man6["coverage"], "uploaded": False, "upload": "manual only (submissions/README.md)",
+               "promotion": {k: (sess.ws.read_json("selection/promotion_gates.json") or {}).get(k)
+                             for k in ("status", "warnings", "geographic_gate", "override_note")}}
         sess.ws.save_json(man, "submissions/submission_manifest.json")
         sess.ws.save_json({"m1_checks": checks, "p6_validation": p6val, "status": status},
                           "submissions/submission_validation.json")

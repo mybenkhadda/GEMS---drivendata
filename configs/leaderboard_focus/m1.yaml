@@ -13,11 +13,14 @@ artifacts:
   - {id: w2_candidate, path: "{p6}/stack/candidate.json", required: true, staged: true, owner: P6 W2}
   - {id: w2_rows, path: "{p6}/stack/features/rows.parquet", required: true, staged: true, owner: P6 W2}
   - {id: w2_stack_grid, path: "{p6}/stack/grid.csv", required: true, staged: true, owner: P6 W2}
-  - {id: w2_maps, path: "{p6}/stack/maps/*_[0-9].npy", required: true, staged: true, expect_count: 6, owner: P6 W2}
+  - {id: w2_maps, path: "{p6}/stack/maps/*_[0-9].npy", required: true, staged: true, owner: P6 W2,
+     required_files: [geo_0.npy, geo_1.npy, geo_2.npy, disc_official_0.npy, disc_official_1.npy, disc_official_2.npy]}
   - {id: w2_full_score_hist, path: "{p6}/stack/maps/full_score.tif", required: false, staged: true,
      owner: P6 W2 (historical; parity diagnostic only)}
   - {id: boost_a_grid, path: "{p6}/boost/benchmark/grid.csv", required: true, staged: true, owner: P6 boost}
   - {id: boost_a_manifest, path: "{p6}/boost/benchmark/manifest.json", required: true, staged: true, owner: P6 boost}
+  - {id: boost_a_status, path: "{p6}/boost/benchmark/status.json", required: false, staged: true,
+     owner: P6 boost (grid provenance only)}
   - {id: recovery_decision, path: "{p6}/recovery/export_parity/decision.json", required: false, staged: true,
      owner: P6.1 recovery}
   - {id: recovery_parity, path: "{p6}/recovery/export_parity/train_inference_parity.csv", required: false,
@@ -28,6 +31,8 @@ artifacts:
      owner: P6.1 recovery}
   - {id: hist_submission, path: "{p6}/submissions/p6_stack_fusion*.tif", required: false, staged: false,
      owner: P6 W2 (historical file; never re-uploaded)}
+  - {id: hist_submission_sidecar, path: "{p6}/submissions/p6_stack_fusion*.json", required: false, staged: true,
+     owner: P6 W2 (historical recipe; parity diagnostic only)}
   - {id: m9_selection, path: "{m9}/baseline/baseline_selection.json", required: true, staged: true, owner: M9}
   - {id: b0_manifest, path: "experiments/b0_reference__*/manifest.json", required: true, staged: false,
      expect_count: 1, owner: Phase-5 B0, expected_id: b0_reference__d54e938a}
@@ -49,6 +54,9 @@ artifacts:
   - {id: template, path: "data/raw/geodawn/example_submission.tif", alternates: ["data/raw/example_submission.tif"],
      required: true, staged: false, owner: DrivenData}
 hash_max_mb: 256                                  # sha256 up to this size; larger files: size + mtime (recorded)
+# Staging: ONLY the `staged: true` files above are copied to local disk (notebook stage 1); the session re-stages
+# exactly that list (skip unchanged). Never staged: boost B/C/D, recovery/segments, seeds/ (W1), stack/models,
+# checkpoint directories, other research outputs, the historical submission rasters.
 
 # ------------------------------------------------------------------------------------------------ champion
 # Candidates = configs/p6/full_gpu.yaml candidate names (same grid, same space) + the historical cell. Only the W2
@@ -59,19 +67,41 @@ champion:
     m1_w2_uploaded_cell: {grid: boost_a, cells: [w2], fixed: {rep: skeleton_1px, frac: 0.05, blend: 1.0},
                           deploy: stack, role: historical, family: p6_reference,
                           label: "historical uploaded cell (rep from disc, frac from geo choice): never selected"}
-  grids: [boost_a]                                # only the frozen boost-A grid is read
+  grids: [boost_a]                                # the ONLY grids load_grids reads (sources=...)
+  required_grids: [boost_a]                       # absent / empty / malformed -> selection BLOCKED (no fallback)
   family_of: {stack: w2, fusion: fusion, cnn: cnn}
 # Recorded reference values (configs/p6/recovery.yaml references): checked for REPRODUCTION, never used as inputs.
+# protocol: separate = disc and geo cells chosen independently (each task on its own labels; NOT one deployable file);
+# fixed = one historical cell. The champion is single_policy (one cell chosen on discovery, applied to both tasks), so
+# recorded DISCOVERY values are comparable (same selection criterion) and recorded separate GEO values are not.
 recorded:
-  w2_original: {source: stack_grid, params: [blend, rep, frac], disc_dti: 0.224640, disc_worst: 0.153414,
-                geo_dti: 0.180843}
-  a_w2_crest: {source: boost_a, objective: separate, disc_dti: 0.238882, disc_worst: 0.192575, geo_dti: 0.185609}
-  a_w2_skeleton: {source: boost_a, objective: separate, disc_dti: 0.242156, disc_worst: 0.198579, geo_dti: 0.168841}
-  m1_w2_uploaded_cell: {source: boost_a, objective: fixed, disc_dti: 0.178905, geo_dti: 0.168841}
+  w2_original: {source: stack_grid, params: [blend, rep, frac], protocol: separate, disc_dti: 0.224640,
+                disc_worst: 0.153414, geo_dti: 0.180843}
+  a_w2_crest: {source: boost_a, objective: separate, protocol: separate, disc_dti: 0.238882, disc_worst: 0.192575,
+               geo_dti: 0.185609}
+  a_w2_skeleton: {source: boost_a, objective: separate, protocol: separate, disc_dti: 0.242156, disc_worst: 0.198579,
+                  geo_dti: 0.168841}
+  m1_w2_uploaded_cell: {source: boost_a, objective: fixed, protocol: fixed, disc_dti: 0.178905, geo_dti: 0.168841}
+# Single-policy values recorded by the P6.1 recovery run (docs/p6/P6_RECOVERY_TO_BOOST_AUDIT.md, X1 table): shown
+# next to the champion in validation/protocol_comparison.csv for context only (never reproduced, never gating).
+recorded_single_policy:
+  p61_A_w2_original: {disc_dti: 0.224640, disc_worst: 0.153414, geo_dti: 0.102664}
+  p61_B_w2_crest: {disc_dti: 0.238882, disc_worst: 0.192575, geo_dti: 0.114259}
+  p61_C_w2_skeleton: {disc_dti: 0.242156, disc_worst: 0.198579, geo_dti: 0.105687}
+  p61_R_fallback_fusion: {disc_dti: 0.162482, disc_worst: 0.126160, geo_dti: 0.158416}
 selection:
   overrides: {}                                   # merged over configs/p6/full_gpu.yaml selection (p6g rule)
-  geo_floor: 0.1758                               # reported per candidate (flag geo_floor_met)
-  geo_floor_blocking: false                       # true: a candidate below the floor is ineligible (user decision)
+  geo_floor: 0.1758                               # recorded P6 promotion floor (configs/p6/{boost,recovery}.yaml)
+  geo_floor_blocking: false                       # true: the floor is part of the SELECTION rule (p6g gate mode);
+                                                  # false keeps the selection reproducible (the promotion gate below
+                                                  # still applies the floor)
+
+# ------------------------------------------------------------------------------------------------ promotion
+# Separate from selection: a COMPLETE selection is not a promotion. READY_FOR_EXPORT needs every mandatory gate.
+promotion:
+  geographic_gate: mandatory                      # mandatory: geo DTI < geo_floor blocks export. advisory: reported
+                                                  # as WARNING; requires override_note (recorded in every manifest)
+  override_note: ""
 
 # ------------------------------------------------------------------------------------------------ validation
 validation:
@@ -82,6 +112,11 @@ validation:
   parity_min_spearman: 0.999                      # zone score vs evaluation construction (per geo unit)
   strict_parity: true                             # any non-PASS zone-score parity row blocks (incl. fusion-w WARNING)
   max_uncovered_frac: 0.001
+  recorded_mismatch: warning                      # recorded value not reproduced: warning (default; the binding
+                                                  # checks are the component recomputation + sha256) | blocking
+
+# ------------------------------------------------------------------------------------------------ outputs
+outputs: {save_figures: true, save_parquet: true, save_geotiff: true, sync_to_drive: true}   # set by notebook CONFIG
 
 # ------------------------------------------------------------------------------------------------ submission
 submission:

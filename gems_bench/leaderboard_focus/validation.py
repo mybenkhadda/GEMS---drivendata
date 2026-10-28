@@ -1,6 +1,7 @@
-"""Notebook 02 (part 1): official validation of the recovered champion with the EXISTING scorer.
+"""Stage 3: official validation of the recovered champion with the EXISTING scorer.
 
-Four independent checks, every one with an explicit tolerance; any failure makes the stage BLOCKED:
+Four independent checks, every one with an explicit tolerance; a failure of 1, 2 or 4 makes the stage BLOCKED, a
+recorded value that is not reproduced (3) is a WARNING unless ``validation.recorded_mismatch: blocking``:
 1. Recomputation. For each outer zone and task, the champion's held-out cell is rebuilt from the frozen maps with
    the exact boost-A expressions (F = per-zone champion fusion, W = rank of the W2 held-out map; w2: W, hybrid /
    blends: (1 - l) F + l W, fallback: F, CNN: rank) and scored by ``Boost._eval_q`` (``m7.protocol.score_row`` ->
@@ -9,6 +10,9 @@ Four independent checks, every one with an explicit tolerance; any failure makes
 3. Reproduction of recorded values. The recorded numbers (configs: same grid, same space, same objective) are
    recomputed from the frozen grids: ``separate`` = disc and geo selected independently (how boost A reported them),
    ``fixed`` = one historical cell, ``stack_grid`` = W2's own ``stack/grid.csv`` nested over (blend, rep, frac).
+   Every row states its protocol and whether it is comparable with the champion's single-policy number
+   (``protocol_comparison.csv``): a separate-protocol GEO value is not (its geo cell was chosen on geo labels), so a
+   gap between it and the champion's geo DTI is a protocol difference, not evidence of a software defect.
 4. Deployment dry run. ``final_submission.inspect_spec`` (template CRS, resolution, grid) and ``build_map`` (the
    zone-stitched construction, no file written): parity per geo zone (strict: every zone-score row PASS), coverage,
    per-zone area budget, no positive pixel on a mapped fault, recipe == notebook-01 recipe. The finalised array's
@@ -22,12 +26,63 @@ import json
 import numpy as np
 import pandas as pd
 
-from .config import BLOCKED, COMPLETE
+from .config import BLOCKED, COMPLETE, INCOMPLETE, WARNING
 
 COMP = ["tp_w", "fp_w", "fn_w", "n_truth"]
 OUT = ("validation/official_scores.csv", "validation/per_zone_metrics.csv", "validation/weighted_components.csv",
-       "validation/recorded_reproduction.csv", "validation/validation_status.json", "validation/zone_budget.csv",
-       "parity/zone_stitched_parity.csv", "reports/validation_report.md")
+       "validation/recorded_reproduction.csv", "validation/protocol_comparison.csv", "validation/validation_status.json",
+       "validation/zone_budget.csv", "parity/zone_stitched_parity.csv", "reports/validation_report.md")
+CHAMPION_PROTOCOL = "single_policy"
+PROTOCOLS = {
+    "single_policy": "one cell per outer zone chosen on the discovery labels of the other zones, applied unchanged to "
+                     "both tasks (deployable: one file)",
+    "separate": "discovery and geographic cells chosen independently, each on its own task's labels (not one file)",
+    "fixed": "one fixed historical cell (no nested choice)",
+}
+
+
+# =============================================================================== pure: protocols
+def comparability(protocol: str, metric: str) -> tuple[bool, str]:
+    """Is a recorded ``metric`` under ``protocol`` comparable with the champion's single-policy number?"""
+    if protocol == CHAMPION_PROTOCOL:
+        return True, "same protocol"
+    if protocol == "separate" and metric.startswith("disc"):
+        return True, "same discovery selection criterion (the discovery cell is chosen on discovery labels in both)"
+    if protocol == "separate":
+        return False, ("geo cell chosen on geographic labels; the deployable policy applies the discovery-chosen "
+                       "cell to the geographic zones, so a lower geo DTI is expected and not a defect")
+    return False, "a fixed historical cell, not a nested selection"
+
+
+def recorded_row(name: str, rec: dict, metric: str, got, tol: float) -> dict:
+    """One recorded-vs-reproduced row: REPRODUCED / NOT_REPRODUCED / NOT_AVAILABLE + protocol facts (pure)."""
+    proto = rec.get("protocol") or ("fixed" if rec.get("objective") == "fixed" else "separate")
+    comp, why = comparability(proto, metric)
+    v = None if got is None or not np.isfinite(float(got)) else float(got)
+    st = "NOT_AVAILABLE" if v is None else "REPRODUCED" if abs(v - float(rec[metric])) <= tol else "NOT_REPRODUCED"
+    return {"recorded_id": name, "source": rec["source"], "objective": rec.get("objective", "nested"),
+            "protocol": proto, "metric": metric, "recorded": float(rec[metric]), "reproduced": v,
+            "abs_diff": None if v is None else abs(v - float(rec[metric])), "tolerance": tol, "status": st,
+            "comparable_to_champion": comp, "comparability_note": why}
+
+
+def protocol_comparison(crow: dict, RR: pd.DataFrame, single: dict) -> pd.DataFrame:
+    """The champion's nested numbers next to every recorded value, with protocol and comparability (pure)."""
+    rows = [{"value_id": f"champion:{crow.get('candidate_id')}", "kind": "recomputed (this run)",
+             "protocol": CHAMPION_PROTOCOL, "metric": m, "value": crow.get(m), "comparable_to_champion": True,
+             "note": PROTOCOLS[CHAMPION_PROTOCOL]} for m in ("disc_dti", "disc_worst", "geo_dti")]
+    for r in (RR.to_dict("records") if len(RR) else []):
+        rows.append({"value_id": f"recorded:{r['recorded_id']}", "kind": f"recorded, {r['status']}",
+                     "protocol": r["protocol"], "metric": r["metric"], "value": r["recorded"],
+                     "comparable_to_champion": r["comparable_to_champion"], "note": r["comparability_note"]})
+    for n, rec in (single or {}).items():
+        for m in ("disc_dti", "disc_worst", "geo_dti"):
+            if rec.get(m) is not None:
+                rows.append({"value_id": f"recorded:{n}", "kind": "recorded (P6.1 run; context only)",
+                             "protocol": CHAMPION_PROTOCOL, "metric": m, "value": float(rec[m]),
+                             "comparable_to_champion": True, "note": "same protocol, recorded by the P6.1 recovery "
+                             "run; the exclusion it used is not re-verified here"})
+    return pd.DataFrame(rows)
 
 
 # =============================================================================== pure
@@ -116,16 +171,25 @@ def budget_rows(zones: pd.DataFrame, frac: float, tol: float) -> pd.DataFrame:
 
 # =============================================================================== Colab
 def champion_rows(sess) -> tuple[dict, pd.DataFrame, dict]:
+    from .session import StageBlocked, StageInvalid
+
     sel = sess.ws.read_json("selection/champion_selection.json") or {}
     name = sel.get("champion")
     if not name:
-        from .session import StageBlocked
-
-        raise StageBlocked("no champion recorded by notebook 01")
-    C = sess.ws.load_table("selection/champion_candidates.csv")
+        raise StageBlocked("no champion recorded by the selection stage")
+    C = sess.ws.require_table("selection/champion_candidates.csv", ("candidate_id", "deploy", "deploy_cell"))
+    if not (C.candidate_id == name).any():
+        raise StageInvalid(f"champion {name} absent from selection/champion_candidates.csv: re-run selection")
     row = C[C.candidate_id == name].iloc[0].to_dict()
-    PZ = sess.ws.load_table("selection/candidate_per_zone.csv")
-    return sel, PZ[PZ.name == name].reset_index(drop=True), row
+    PZ = sess.ws.require_table("selection/candidate_per_zone.csv", ("name", "task", "zone", "rep", "frac"))
+    P = PZ[PZ.name == name].reset_index(drop=True)
+    if not len(P):
+        raise StageInvalid(f"no per-zone rows for {name} in selection/candidate_per_zone.csv: re-run selection")
+    recipe_id = (sess.manifest("selection") or {}).get("recipe_id")
+    if recipe_id is not None and recipe_id != sel.get("recipe_id"):
+        raise StageInvalid(f"recipe ids disagree: selection manifest {recipe_id} != champion_selection.json "
+                           f"{sel.get('recipe_id')}: re-run selection")
+    return sel, P, row
 
 
 def recompute(sess, P: pd.DataFrame, tol: dict) -> pd.DataFrame:
@@ -157,20 +221,29 @@ def reproduce_recorded(sess) -> pd.DataFrame:
     from ..p6 import export_parity as EP
     from ..p6 import full_benchmark as FB
     from .champion import candidate_specs
+    from .session import StageInvalid
 
     cfg, fg = sess.cfg, sess.fg
     tol = float(cfg["validation"]["recorded_atol"])
-    G, _ = FB.load_grids(fg)
+    try:
+        G, _ = FB.load_grids(fg, sources=cfg["champion"]["grids"], required=cfg["champion"]["required_grids"])
+    except FB.GridUnavailable as e:
+        raise StageInvalid(str(e)) from e
     G = G[G.source == "boost_a"]
     specs = candidate_specs(fg.cfg, cfg)
     rows = []
     for name, rec in cfg["recorded"].items():
-        got = {}
+        got, note = {}, ""
         if rec["source"] == "stack_grid":
-            S, params = pd.read_csv(sess.p6.ws.root / "stack" / "grid.csv", dtype={"systems": str}), list(rec["params"])
-        else:                                            # the boost / stack summaries used nested_select per task
+            params = list(rec["params"])
+            S, facts = FB.read_csv_checked(sess.p6.ws.root / "stack" / "grid.csv",
+                                           ["task", "zone", *params, "tp_w", "fp_w", "fn_w"])
+            note = "" if S is not None else f"stack/grid.csv {facts['status']} ({facts['detail']})"
+        elif name in specs:                              # the boost / stack summaries used nested_select per task
             S, params = EP.policy_rows(G, FB.candidate_space(specs[name], G)), ["candidate", "blend", "rep", "frac"]
-        for task in S.task.unique():
+        else:
+            S, note = None, f"{name}: no candidate spec to recompute it from"
+        for task in (S.task.unique() if S is not None and len(S) else []):
             d = S[S.task == task]
             pre = "disc" if task == fg.prim else "geo"
             if rec.get("objective") == "fixed":
@@ -179,27 +252,34 @@ def reproduce_recorded(sess) -> pd.DataFrame:
                 _, s = nested_select(d, params)
                 got[f"{pre}_dti"], got[f"{pre}_worst"] = s.get("dti_crossfit"), s.get("fold_min")
         for k in ("disc_dti", "disc_worst", "geo_dti"):
-            if rec.get(k) is None:
-                continue
-            v = got.get(k)
-            ok = v is not None and np.isfinite(float(v)) and abs(float(v) - float(rec[k])) <= tol
-            rows.append({"recorded_id": name, "source": rec["source"], "objective": rec.get("objective", "nested"),
-                         "metric": k, "recorded": float(rec[k]), "reproduced": None if v is None else float(v),
-                         "abs_diff": None if v is None else abs(float(v) - float(rec[k])), "tolerance": tol,
-                         "status": "PASS" if ok else "BLOCKED"})
+            if rec.get(k) is not None:
+                rows.append({**recorded_row(name, rec, k, got.get(k), tol), "note": note})
     return pd.DataFrame(rows)
 
 
+def recorded_effect(RR: pd.DataFrame, mode: str) -> tuple[list[str], list[str]]:
+    """(blocking reasons, warnings) of the recorded reproduction table under ``validation.recorded_mismatch``."""
+    bad = RR[RR.status != "REPRODUCED"] if len(RR) else RR
+    msgs = [f"{r.recorded_id}.{r.metric} [{r.protocol}] {r.status}: reproduced {r.reproduced} vs recorded "
+            f"{r.recorded}" for r in bad.itertuples()]
+    return (msgs, []) if mode == "blocking" else ([], msgs)
+
+
 def validate(sess) -> dict:
-    """Notebook 02 stage ``validation``."""
+    """Stage ``validation``."""
     from ..gems3 import submission as SUB
     from ..p6 import final_submission as FS
+    from .session import StageBlocked
 
-    sess.require("artifacts", "selection")
     cfg, fg = sess.cfg, sess.fg
     vc = cfg["validation"]
     sel = sess.ws.read_json("selection/champion_selection.json") or {}
-    fp = sess.fp("validation", sess.manifest("selection").get("fingerprint"), vc, cfg["recorded"])
+    fp = sess.fp("validation", sess.manifest("selection").get("fingerprint"), vc, cfg["recorded"],
+                 cfg.get("recorded_single_policy"))
+    try:
+        sess.require("artifacts", "selection")
+    except StageBlocked as e:
+        return sess.record("validation", INCOMPLETE, fp, reasons=[str(e)])
 
     def run():
         import yaml
@@ -224,9 +304,10 @@ def validate(sess) -> dict:
         sess.ws.save_table(comp, "validation/weighted_components.csv")
         RR = reproduce_recorded(sess)
         sess.ws.save_table(RR, "validation/recorded_reproduction.csv")
-        if len(RR) and (RR.status != "PASS").any():
-            reasons.append("recorded values not reproduced: " + "; ".join(
-                f"{r.recorded_id}.{r.metric} {r.reproduced} vs {r.recorded}" for r in RR[RR.status != "PASS"].itertuples()))
+        sess.ws.save_table(protocol_comparison(crow, RR, cfg.get("recorded_single_policy")),
+                           "validation/protocol_comparison.csv")
+        rr_block, warns = recorded_effect(RR, vc.get("recorded_mismatch", "warning"))
+        reasons += rr_block
         try:
             spec = FS.inspect_spec(fg)
         except ValueError as e:
@@ -252,7 +333,8 @@ def validate(sess) -> dict:
         rc = recipe_consistency(recipe, built)
         reasons += [f"recipe mismatch: {x}" for x in rc]
         arr = SUB.finalise(built["q"], fg.p6.ctx.data, fg.cfg["submission"]["outside_valid"])
-        st = {"status": COMPLETE if not reasons else BLOCKED, "reasons": reasons, "champion": sel_["champion"],
+        status = BLOCKED if reasons else WARNING if warns else COMPLETE
+        st = {"status": status, "reasons": reasons, "warnings": warns, "champion": sel_["champion"],
               "recipe_id": sel_.get("recipe_id"), "validated_array_sha256": array_sha(arr),
               "positive_px": int((np.nan_to_num(arr) > 0).sum()), "coverage": cov, "official_spec": spec,
               "tolerances": vc, "summary": summ,
@@ -263,7 +345,8 @@ def validate(sess) -> dict:
 
         validation_figures(sess, V, RR, Z, par, crow)
         sess.ws.save_text(validation_report(st, V, RR, Z, par), "reports/validation_report.md")
-        return st["status"], reasons, {"validated_array_sha256": st["validated_array_sha256"]}
+        return (BLOCKED if reasons else COMPLETE), reasons, {"validated_array_sha256": st["validated_array_sha256"],
+                                                             "recipe_id": sel_.get("recipe_id")}, warns
 
     return sess.run_stage("validation", fp, OUT, run, inputs={"selection_fp": sess.manifest("selection").get(
         "fingerprint"), "champion": sel.get("champion")})
