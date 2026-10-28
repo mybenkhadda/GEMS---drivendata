@@ -1,0 +1,55 @@
+# P7 controlled ladder: predeclared, bounded, one change per rung. Each entry overrides configs/p7/geofaultformer.yaml
+# (deep merge). Same folds, inputs, trainer and evaluation protocol for every trained rung. No hyper-parameter grid.
+max_experiments: 8
+experiments:
+  T0:
+    kind: reference                               # existing B0 / B1 / fusion / W2 maps; nothing is trained
+    hypothesis: baseline
+    description: "Existing B0, B1, B0+B1 fusion and W2 under the identical nested protocol"
+  T1_cnn:
+    kind: train
+    hypothesis: H1-control
+    parent: null
+    description: "Matched pure-CNN control: GeoFaultFormer with attention bypassed (same trainer, inputs, heads)"
+    overrides: {model: {attention: {enabled: false}}}
+  T1:
+    kind: train
+    hypothesis: H1
+    parent: null
+    description: "CNN + shifted-window attention at 1/8 and 1/16; fault head only (loss L0)"
+    overrides: {}
+  T2:
+    kind: train
+    hypothesis: H2
+    parent: T1
+    description: "T1 + centerline + axial orientation supervision (loss L2)"
+    overrides:
+      model: {heads: {center: true, orient: true}}
+      loss: {weights: {center: 0.5, orient: 0.2}}
+  T2c:                                            # (name avoids the "_center" suffix of head candidates)
+    kind: train
+    hypothesis: H2-ablation
+    parent: T1
+    description: "Loss L1 (fault + centerline only): separates the centerline from the orientation effect"
+    overrides:
+      model: {heads: {center: true}}
+      loss: {weights: {center: 0.5}}
+  T3:
+    kind: train
+    hypothesis: H3
+    parent: T2
+    description: "T2 + ConvGRU refinement at 1/4 (3 shared steps)"
+    overrides:
+      model: {heads: {center: true, orient: true}, convgru: {enabled: true}}
+      loss: {weights: {center: 0.5, orient: 0.2}}
+  T4:
+    kind: tracer
+    hypothesis: H4
+    parent: T2                                    # traces on T2 held-out maps; compared with geometric linking
+    description: "Endpoint-conditioned FaultTraceGRU on T2 evidence (bounded rollout)"
+  T5:
+    kind: stacker
+    hypothesis: H5
+    parent: best                                  # best trained rung by nested disc DTI (resolved at run time)
+    description: "W2 features + P7 features (schema w2_p7.v1), cross-fitted on valid OOF provenance only"
+    requires: [heldout_all_units]

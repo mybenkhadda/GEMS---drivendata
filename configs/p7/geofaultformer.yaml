@@ -1,0 +1,167 @@
+# GEMS P7 GeoFaultFormer (docs/p7/P7_GEOFAULTFORMER_HANDOFF.md). Code-authoring-first: nothing here is a measured
+# result. Base configuration of every P7 experiment; `configs/p7/experiments.yaml` holds the bounded T0-T5 ladder,
+# `configs/p7/colab_gpu.yaml` the runtime presets (non-semantic: never part of a training spec hash).
+version: p7.1
+output_dir: outputs/p7_geofaultformer
+m9_output_dir: outputs/m9_geofault_production     # read-only: feature registry, cube cache, domains
+p6_output_dir: outputs/p6_fast_track              # read-only: frozen W2 maps / rows, boost grids
+seed: 2026
+overwrite_existing: false                         # P7 never rewrites a finished experiment (ids carry fingerprints)
+push_to_drive: true
+save_csv: true
+save_parquet: true
+save_figures: true
+save_rasters: true
+
+# Recorded reference values from earlier sessions (NOT recomputed here, NOT evidence for P7). The evaluation stage
+# recomputes every reference on the same units and the same protocol; gates use the recomputed values.
+recorded:
+  w2: {disc_official_dti: 0.2246, note: "P6 fast-track W2 crossfit (memory / P6 docs); META 0.224640"}
+  w2_policy_c_skeleton: {disc_dti: 0.242156, disc_worst: 0.198579, geo_dti: 0.105687, note: "P6.1 recovery run"}
+  fallback_fusion: {disc_official_dti: 0.162, disc_worst: 0.126, geo_dti: 0.183, geo_worst: 0.170}
+
+# ------------------------------------------------------------------------------------------------------- scope
+scope:
+  train_folds: all                                # geographic folds trained (CV-A units geo_f<k>); all | [0, 1, 2]
+  train_splits: all                               # discovery splits trained (CV-B units disc_s<d>)
+  # Nested comparisons need every zone: a subset is a smoke test only and is labelled INCOMPLETE in every table.
+
+# ------------------------------------------------------------------------------------------------------- inputs
+inputs:
+  # Local channels = the M9 section-02/03 selected registry (cube channel order), discovered at run time, never
+  # hard-coded. Each channel is assigned to a modality by case-insensitive substring patterns (first match wins);
+  # the resolved table is saved under features/channel_registry.csv for inspection.
+  m9_variant: core                                # M9 variant whose channel groups define the cube
+  modality_patterns:
+    magnetic: [rtp, mag, tmi, tilt, ahg_m, thdr_m]
+    gravity: [grav, bouguer, iso_g, cba, thdr_g]
+    geological: ["g01", "g02"]
+    dem: [dem, elev, slope, scarp]
+  geological:                                     # optional extra channels from G02 / G01 FULL-GRID label-free maps
+    enabled: false                                # needs stack.g02_full (heavy; G02-A cost unmeasured)
+    keys: {g02c: G02-C, g02a: G02-A}
+  label_free_maps:                                # optional extra channels from label-free model maps
+    enabled: false
+    allow: [B0_lineament]                         # anything not here is refused (LeakageError): OOF CNN maps saw
+                                                  #   the P7 held-out fold during their own training
+  dem: {enabled: false}                           # only through the M9 dem group with complete coverage
+
+# ------------------------------------------------------------------------------------------------------- data
+data:
+  patch_px: 256
+  min_valid_frac: 0.3
+  pos_patch_frac: 0.6
+  centerline: {dilate_px: 1}                      # skeleton of visible labels, dilated (100 m tolerance)
+  distance: {clip_px: 10}                         # clipped, normalised distance to visible geometry (1 = far)
+  augmentation: conservative                      # conservative | structural (see augment.PRESETS)
+  # kernel / orientation / topology / PU weighting targets come from the M9 config (m9.dataset.build_targets);
+  # their hash is part of every training spec.
+
+# ------------------------------------------------------------------------------------------------------- model
+model:
+  stem_width: 32
+  widths: [32, 64, 128, 192]                      # stages at 1/2, 1/4, 1/8, 1/16
+  depths: [1, 1, 2, 2]                            # residual blocks per stage
+  dropout: 0.1
+  norm: group                                     # GroupNorm: independent of the micro-batch size
+  fusion: {mode: early}                           # early | grouped (modality stems + learned gate)
+  attention:
+    enabled: true
+    scales: [3, 4]                                # encoder stage indices (3 = 1/8, 4 = 1/16)
+    window: 8
+    heads: 4
+    depth: 2                                      # blocks per stage, alternating regular / shifted windows
+    mlp_ratio: 2.0
+    drop_path: 0.1
+  convgru: {enabled: false, hidden: 64, kernel: 3, steps: 3, scale: 2, checkpoint: false}   # scale 2 = 1/4
+  heads: {fault: true, center: false, orient: false, distance: false, endpoint: false, junction: false}
+  uncertainty: {method: none, samples: 8}         # none | mc_dropout (seed ensembles = separate experiments)
+
+# ------------------------------------------------------------------------------------------------------- loss
+loss:
+  weights: {fault: 1.0, center: 0.0, orient: 0.0, distance: 0.0, topology: 0.0, endpoint: 0.0}
+  fault: {kind: focal, gamma: 1.5, pos_weight: 3.0, dice: 0.5, kernel_target: true}
+  center: {pos_weight: 5.0, dice: 0.5}
+  orient: {kind: axial_cosine}
+  distance: {kind: smooth_l1}
+  topology: {kind: soft_cldice, iters: 5}         # skeleton overlap only (never forces connectivity)
+  endpoint: {gamma: 2.0}
+
+# ------------------------------------------------------------------------------------------------------- training
+training:
+  optimizer: adamw
+  lr: 0.001
+  weight_decay: 0.0001
+  schedule: onecycle                              # onecycle | cosine
+  epochs: 20
+  steps_per_epoch: 100
+  effective_batch: 16                             # semantic; micro-batch x accumulation comes from colab_gpu.yaml
+  clip_grad: 1.0
+  amp: true
+  min_epochs: 5
+  patience: 5
+  select_frac: 0.03                               # inner checkpoint score: binary top-frac DTI on the inner zone
+  inner_every: 1
+  collapse_max_unlabeled_mean: 0.35
+  deterministic: false                            # true = deterministic cuDNN (slower; recorded either way)
+  # Predeclared checkpoint policy (recorded in every selection.json):
+  #   cv units   (geo_f<k>):  best epoch with inner status VALID (finite DTI, inner zone has scored truth);
+  #                           NaN / no-truth epochs are never an improvement; early stop on VALID epochs only.
+  #   disc units (disc_s<d>): no inner zone by design (status NOT_CONFIGURED); fixed epochs = median best epoch of
+  #                           the SAME experiment's cv units (>= min_epochs); the last epoch is the model.
+  disc_epochs_rule: median_cv_best
+
+# ------------------------------------------------------------------------------------------------------- inference
+inference:
+  stride_frac: 0.5
+  tile_px: 1024
+  halo_px: 64
+  tta_rot180: false
+  full_region: {construction: zone_stitched}      # zone_stitched (each geo zone by its own held-out model) |
+                                                  #   fold_average (diagnostic only, never deployed)
+
+# ------------------------------------------------------------------------------------------------------- evaluation
+evaluation:
+  tasks: [geo, disc_official]
+  objective: disc                                 # nested selection objective (p6g default)
+  geo_floor: 0.1758                               # only used by objective disc_geo_floor (sensitivity)
+  reps: [crest_1px, skeleton_1px]
+  area_fracs: [0.005, 0.01, 0.015, 0.03, 0.05]    # identical to the boost grid
+  fusion_blends: [0.5]                            # P7 + existing fusion (rank blend), in addition to P7 alone
+  references: [cnn_b0, cnn_b1, fallback_fusion, w2]
+  recall_budgets: [0.005, 0.01, 0.015, 0.03, 0.05]
+  shift_sample_px: 200000
+  heads_evaluated: [fault, center]                # each enabled head is ranked and scored as its own candidate
+
+# ------------------------------------------------------------------------------------------------------- promotion
+promotion:
+  primary: disc_dti
+  min_gain_over_w2: 0.005                         # nested disc DTI vs recomputed W2 on the same zones
+  geo_min: 0.1758                                 # brief's absolute geographic floor (see handoff: may block all)
+  max_worst_drop: 0.010                           # worst disc zone may not fall more than this below W2's
+  milestone_disc: 0.30
+  target_disc: 0.40                               # aspirational, never a gate
+  complementarity: {min_new_systems: 1, budget: 0.03}   # auxiliary-source rule (H5) at a matched budget
+
+# ------------------------------------------------------------------------------------------------------- tracer (T4)
+tracer:
+  hidden: 64
+  embed_px: 9                                     # local evidence window (rotated with the heading)
+  step_px: 2.0
+  min_step_px: 1.0
+  max_step_px: 4.0
+  max_steps: 60
+  max_length_px: 80                               # 8 km
+  min_evidence: 0.35                              # centre / fault probability floor for a supported step
+  max_gap_px: 6                                   # unsupported continuation allowed before a stop
+  loop_radius_px: 1.5
+  known: stop                                     # stop on reaching a mapped (known) fault: masked by the scorer
+  train: {epochs: 15, lr: 0.002, batch: 64, teacher_forcing: [1.0, 0.3], min_traj_px: 12, exclude_buffer_km: 2.0}
+  linking: {max_gap_px: 10, max_angle_deg: 20.0}  # geometric endpoint-linking baseline
+  accept: {min_disc_gain: 0.003, max_fp_increase: 0.10}
+
+# ------------------------------------------------------------------------------------------------------- W2 (T5)
+w2:
+  schema: w2_p7.v1                                # versioned; the frozen W2 schema is never changed in place
+  p7_features: [p7_fault, p7_center, p7_orient_coh, p7_b0_disagree, p7_b1_disagree]
+  control: true                                   # refit W2's own features on the SAME rebuilt rows (matched control)

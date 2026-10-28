@@ -1,0 +1,18 @@
+# P7 runtime presets (NON-semantic: excluded from every training spec hash). The effective batch is fixed in
+# geofaultformer.yaml (training.effective_batch); presets only split it into micro-batch x accumulation, so L4, A100
+# and T4 train the same model. GroupNorm keeps the result independent of the micro-batch size.
+# Memory numbers are PLANNING estimates for 256 px patches and ~30 channels, not measurements: the preflight stage
+# measures peak memory of every enabled experiment on synthetic tensors and records it.
+presets:
+  T4:   {min_vram_gb: 14, micro_batch: 8,  infer_batch: 8,  amp_dtype: float16, est_peak_gb: {T1: 6, T3: 9}}
+  L4:   {min_vram_gb: 22, micro_batch: 16, infer_batch: 16, amp_dtype: bfloat16, est_peak_gb: {T1: 10, T3: 15}}
+  A100: {min_vram_gb: 38, micro_batch: 16, infer_batch: 32, amp_dtype: bfloat16, est_peak_gb: {T1: 10, T3: 15}}
+  CPU:  {min_vram_gb: 0,  micro_batch: 2,  infer_batch: 2,  amp_dtype: none,     est_peak_gb: {}}
+select: auto                                      # auto (largest preset whose min_vram_gb fits) | preset name
+oom_retries: 2                                    # halve micro-batch, double accumulation (effective batch kept)
+ckpt_sync_min: 10.0
+max_runtime_min: 0                                # >0: clean resumable stop at an epoch boundary
+require_gpu: true                                 # training never falls back to the CPU silently
+min_free_gb: 6.0
+# Planning runtime (unmeasured): T1 ~ 20 epochs x 100 steps per unit; 6 units (3 geo + 3 disc). Read
+# environment/preflight.json -> throughput and the per-epoch logs before enabling T2 / T3.
