@@ -1,6 +1,12 @@
-# Leaderboard focus: Milestone 1 notebook
+# Leaderboard focus
 
-**Use `GEMS_M1_CHAMPION_TO_SUBMISSION.ipynb`.** It is the single canonical Milestone-1 notebook (code rev `m1.2-r1`):
+**To produce submission files, use `GEMS_SUBMISSION_FACTORY.ipynb`** (code rev `sf.1-r1`,
+`docs/leaderboard_focus/SUBMISSION_FACTORY.md`): every frozen candidate -> its own validated, read-back GeoTIFF; the
+internal geographic target is reported, not blocking. Outputs: `outputs/leaderboard_focus/submission_factory/`.
+
+## Milestone 1 notebook (research promotion path)
+
+`GEMS_M1_CHAMPION_TO_SUBMISSION.ipynb` It is the single canonical Milestone-1 notebook (code rev `m1.2-r1`):
 one configuration cell, one `Runner` (`gems_bench/leaderboard_focus/workflow.py`), one cell per stage.
 
 | stage | cell | runtime | gate to continue |

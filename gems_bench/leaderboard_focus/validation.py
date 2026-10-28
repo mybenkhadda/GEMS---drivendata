@@ -204,7 +204,8 @@ def recompute(sess, P: pd.DataFrame, tol: dict) -> pd.DataFrame:
     for r in P.to_dict("records"):
         u = sess.p6.m9.unit(f"{r['task']}:{int(r['zone'])}")
         orig = str(r["cell_candidate"]).partition(":")[2]
-        F, W = bst.fusion(u), bst.stack_rank(u, bst.w2_map(u))
+        F = bst.fusion(u)
+        W = bst.stack_rank(u, bst.w2_map(u)) if orig in ("w2", "hybrid") else None    # fusion / CNN: no W2 map
         b0, b1 = bst.cnn(u)
         s = score_expression(orig, float(r["blend"]) if pd.notna(r["blend"]) else np.nan, F, W,
                              {"cnn_b0": R.rank01(b0, u.ev), "cnn_b1": R.rank01(b1, u.ev)})

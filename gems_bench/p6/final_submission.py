@@ -218,12 +218,17 @@ def eval_score(fg, u, kind: str, cell: dict, src: dict, seeds_cand: dict | None)
     return zone_score(kind, cell, src)
 
 
-def build_map(fg, row: dict) -> dict:
-    """Zone-stitched binary map + score of one benchmark row (its all-zone deploy cell), with per-zone parity."""
+def build_map(fg, row: dict, fusion_w: str = "all_zones") -> dict:
+    """Zone-stitched binary map + score of one benchmark row (its all-zone deploy cell), with per-zone parity.
+    ``fusion_w``: ``all_zones`` = one weight (champion params_all) for every zone; ``per_zone`` = the nested per-zone
+    champion weight of each geo zone, exactly as the benchmark evaluated the fusion (``Boost.fusion``)."""
     from ..gems3 import representation as R
     from ..gems3 import submission as SUB
 
+    if fusion_w not in ("all_zones", "per_zone"):
+        raise ValueError(f"fusion_w {fusion_w!r}: all_zones | per_zone")
     p6, bst = fg.p6, fg.bst
+    w_zone = {}
     data = p6.ctx.data
     cell = row["deploy_cell"] if isinstance(row["deploy_cell"], dict) else json.loads(row["deploy_cell"])
     kind = row["deploy"]
@@ -243,6 +248,8 @@ def build_map(fg, row: dict) -> dict:
     for u in geo:
         m = np.asarray(zid[u.sl] == u.zone) & u.ev
         src = zone_sources(fg, u, kind, cell, w_all, sd, sc)
+        if fusion_w == "per_zone":
+            src["fusion"], w_zone[int(u.zone)] = bst.fusion(u), bst.champion_w(u)
         s = zone_score(kind, cell, src)
         el = el_full[u.sl] & m
         q = R.apply(rep, s, m, float(cell["frac"]), known=labels[u.sl], sigma_px=sigma, eligible=el)
@@ -272,8 +279,8 @@ def build_map(fg, row: dict) -> dict:
     Q, S_ = stitch(data.shape, qs), stitch(data.shape, ss)
     return {"q": Q, "score": S_, "q_eval": stitch(data.shape, qes), "zone_id": zid, "coverage": cov,
             "parity": pd.DataFrame(par),
-            "zones": pd.DataFrame(zrows), "cell": cell, "kind": kind, "w_all": w_all,
-            "stack_dir": str(sd.relative_to(p6.ws.root)) if sd is not None else None, "seeds": sc}
+            "zones": pd.DataFrame(zrows), "cell": cell, "kind": kind, "w_all": w_all, "fusion_w_mode": fusion_w,
+            "w_zone": w_zone, "stack_dir": str(sd.relative_to(p6.ws.root)) if sd is not None else None, "seeds": sc}
 
 
 def recipe(fg, row: dict, built: dict, objective: str) -> dict:
@@ -309,7 +316,9 @@ def recipe(fg, row: dict, built: dict, objective: str) -> dict:
                               for m in list(p6.m9.models)[:2]}},
         feature_schema=list(schema),
         preprocessing={"construction": "zone_stitched", "ranking": "gems3.representation.rank01 inside each geo fold "
-                       "zone (valid & fold_map == k): the validated construction", "fusion_w": built["w_all"],
+                       "zone (valid & fold_map == k): the validated construction",
+                       "fusion_w": built["w_all"] if built.get("fusion_w_mode", "all_zones") == "all_zones" else
+                       {"mode": "per_zone", "w": built["w_zone"]},
                        "sigma_px": float(sh["evaluation"]["ridge_sigma_px"]),
                        "representation": sh["baseline"]["representations"][cell["rep"]],
                        "eligibility": "gems3.submission.eligible_mask(data, 0, 'eligible') per zone",
@@ -437,7 +446,7 @@ def export_one(fg, row: dict, name: str, role: str, objective: str, selection: d
     atomic_write_text(fg.root / "submissions" / f"{stem}_sha256.txt", f"{sha}  {path.name}\n")
     rasters = fg.root / "submissions" / "rasters"
     fg.save_raster({"zone_stitched_score": built["score"], "binary": built["q"],
-                    "zone_id": built["zone_id"].astype(np.float32)}, f"submissions/rasters/{stem}_maps.tif")
+                    "zone_id": built["zone_id"].astype(np.float32)}, f"submissions/rasters/{stem}_maps.tif", data.grid)
     D = pd.concat([built["zones"].assign(kind="zone"), pd.DataFrame(ledger).assign(kind="ledger"),
                    built["parity"].assign(kind="parity")], ignore_index=True)
     fg.save_table(D, f"{stem}_diagnostics", "submissions")

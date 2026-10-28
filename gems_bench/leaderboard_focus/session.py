@@ -36,6 +36,10 @@ IMPL_MODULES = {
     "parity": ("leaderboard_focus/parity.py", "p6/final_submission.py", "p6/stack.py"),
     "submissions": ("leaderboard_focus/submission.py", "p6/final_submission.py", "gems3/submission.py"),
     "exploratory": ("leaderboard_focus/submission.py", "p6/final_submission.py", "gems3/submission.py"),
+    "factory": ("leaderboard_focus/factory.py", "leaderboard_focus/validation.py", "leaderboard_focus/champion.py",
+                "leaderboard_focus/submission.py", "leaderboard_focus/forensics.py", "p6/final_submission.py",
+                "p6/export_parity.py", "gems3/submission.py", "gems3/representation.py", "gems3/official.py",
+                "submission.py"),
 }
 DEPENDENCIES = ("numpy", "pandas", "scipy", "rasterio", "lightgbm", "scikit-learn")
 
