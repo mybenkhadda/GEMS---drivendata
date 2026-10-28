@@ -161,12 +161,16 @@ def array_sha(a: np.ndarray) -> str:
     return hashlib.sha256(np.ascontiguousarray(x).tobytes() + str(x.shape).encode()).hexdigest()
 
 
-def budget_rows(zones: pd.DataFrame, frac: float, tol: float) -> pd.DataFrame:
-    z = zones.copy()
-    z["target_frac"] = float(frac)
-    z["rel_error"] = (z.frac_of_eligible - frac) / frac
-    z["ok"] = (z.rel_error.abs() <= tol) & (z.positive_on_known_px == 0)
-    return z
+def budget_rows(zones: pd.DataFrame, frac: float, tol: float, evaluated: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Per-zone area budget under the upper-bound contract of ``audit_export`` (``forensics.budget_table``).
+
+    M1.3: M1.1-M1.2 required ``|area / frac - 1| <= tol``; a thin representation keeps only part of the frac pool, so
+    every zone of the M1.2 run failed (rel_error -0.51 to -0.54, 0 px on mapped faults) while the evaluated grid cells
+    had the same thinned area. The rule is now the one the written file is audited with (area <= frac x (1 + tol), no
+    positive mapped-fault pixel, non-empty); the old verdict is kept as ``m1_1_two_sided_ok``."""
+    from .forensics import budget_table
+
+    return budget_table(zones, frac, tol, evaluated)
 
 
 # =============================================================================== Colab
@@ -265,6 +269,52 @@ def recorded_effect(RR: pd.DataFrame, mode: str) -> tuple[list[str], list[str]]:
     return (msgs, []) if mode == "blocking" else ([], msgs)
 
 
+def forensics(sess, built: dict, Z: pd.DataFrame, cfg: dict) -> list[str]:
+    """M1.3 diagnostics of the dry build (never gating): evaluated vs deployed map, eligible domains, budget root
+    cause, geographic protocol figure. Returns warnings; an exception here is recorded (warning + traceback file),
+    because a diagnostic must not hide the validation verdict, and it is never silently dropped."""
+    import traceback
+
+    from ..gems3 import submission as SUB
+    from . import forensics as FO
+
+    try:
+        data = sess.fg.p6.ctx.data
+        el = SUB.eligible_mask(data, 0, "eligible")
+        RC, code = FO.map_comparison(built["q"], built["q_eval"], built["zone_id"], el, data.labels)
+        sess.ws.save_table(RC, "diagnostics/representation_comparison.csv", parquet=True)
+        from ..artifacts.atomic import atomic_save
+
+        def _npz(t):                                     # a file object: np.savez appends .npz to a bare path
+            with open(t, "wb") as fh:
+                np.savez_compressed(fh, code=code, zone_id=np.asarray(built["zone_id"], np.int16),
+                                    legend=np.array(["none", "both", "evaluated_only", "deployed_only"]))
+
+        atomic_save(sess.ws.path("diagnostics/evaluated_vs_exported_maps.npz"), _npz)
+        M = FO.mask_alignment(Z)
+        sess.ws.save_table(M, "diagnostics/mask_alignment.csv")
+        sess.ws.save_table(Z, "diagnostics/budget_root_cause.csv", parquet=True)
+        summ = {**FO.root_cause_summary(Z), "source": "validation stage (fresh zone-stitched build)",
+                "evidence": "OBSERVED", "map_comparison": RC.to_dict("records")}
+        sess.ws.save_json(summ, "diagnostics/root_cause_summary.json")
+        step = max(1, int(np.ceil(max(code.shape) / 1200)))
+        FO.budget_figure(sess.ws, Z)
+        FO.mask_figure(sess.ws, M)
+        FO.comparison_figure(sess.ws, RC, code, step)
+        FO.geo_figure(sess.ws, sess.ws.load_table("validation/protocol_comparison.csv"),
+                      float(cfg["selection"]["geo_floor"]))
+        sess.ws.save_json({"stage": "diagnostics", "status": "COMPLETE", "outputs": [
+            "diagnostics/representation_comparison.csv", "diagnostics/evaluated_vs_exported_maps.npz",
+            "diagnostics/mask_alignment.csv", "diagnostics/budget_root_cause.csv",
+            "diagnostics/root_cause_summary.json"]}, "manifests/diagnostics.json")
+        return []
+    except Exception as e:
+        sess.ws.save_text(traceback.format_exc(), "diagnostics/forensics_error.txt")
+        sess.ws.save_json({"stage": "diagnostics", "status": "FAILED", "reason": f"{type(e).__name__}: {e}"},
+                          "manifests/diagnostics.json")
+        return [f"forensics diagnostics failed ({type(e).__name__}: {e}); see diagnostics/forensics_error.txt"]
+
+
 def validate(sess) -> dict:
     """Stage ``validation``."""
     from ..gems3 import submission as SUB
@@ -326,10 +376,16 @@ def validate(sess) -> dict:
         cov = built["coverage"]
         if cov["uncovered_frac"] > float(vc["max_uncovered_frac"]):
             reasons.append(f"uncovered valid pixels {cov['uncovered_frac']:.5f} > {vc['max_uncovered_frac']}")
-        Z = budget_rows(built["zones"], float(built["cell"]["frac"]), float(fg.cfg["submission"]["budget_tolerance"]))
-        sess.ws.save_table(Z, "validation/zone_budget.csv")
+        from . import forensics as FO
+
+        Z = budget_rows(built["zones"], float(built["cell"]["frac"]), float(fg.cfg["submission"]["budget_tolerance"]),
+                        FO.evaluated_area(V))
+        sess.ws.save_table(Z, "validation/zone_budget.csv", parquet=True)
         if not Z.ok.all():
-            reasons.append(f"per-zone area budget / known-fault mask violated on zones {list(Z[~Z.ok].zone)}")
+            bad_z = Z[~Z.ok]
+            reasons.append(f"per-zone area budget / known-fault mask violated on zones {list(bad_z.zone)}: "
+                           f"{dict(zip(bad_z.zone.astype(int), bad_z.cause))}")
+        warns += forensics(sess, built, Z, cfg)
         rc = recipe_consistency(recipe, built)
         reasons += [f"recipe mismatch: {x}" for x in rc]
         arr = SUB.finalise(built["q"], fg.p6.ctx.data, fg.cfg["submission"]["outside_valid"])

@@ -239,7 +239,7 @@ def build_map(fg, row: dict) -> dict:
     el_full = SUB.eligible_mask(data, 0, "eligible")
     labels = np.asarray(data.labels, bool)
     pc = fg.cfg["submission"]
-    qs, ss, par, zrows = [], [], [], []
+    qs, ss, qes, par, zrows = [], [], [], [], []
     for u in geo:
         m = np.asarray(zid[u.sl] == u.zone) & u.ev
         src = zone_sources(fg, u, kind, cell, w_all, sd, sc)
@@ -262,12 +262,16 @@ def build_map(fg, row: dict) -> dict:
         pos = np.asarray(q) > 0
         zrows.append({"zone": int(u.zone), "zone_px": int(m.sum()), "eligible_px": int(el.sum()),
                       "positive_px": int(pos.sum()), "frac_of_eligible": float(pos.sum() / max(int(el.sum()), 1)),
-                      "positive_on_known_px": int((pos & labels[u.sl]).sum())})
+                      "positive_on_known_px": int((pos & labels[u.sl]).sum()),
+                      "eval_eligible_px": int((np.asarray(bst.elig(u), bool) & m).sum()),
+                      "known_in_zone_px": int((labels[u.sl] & m).sum())})
         qs.append((u.sl, m, q))
         ss.append((u.sl, m, s))
+        qes.append((u.sl, m, qe.astype(np.float32)))
         u.release()
     Q, S_ = stitch(data.shape, qs), stitch(data.shape, ss)
-    return {"q": Q, "score": S_, "zone_id": zid, "coverage": cov, "parity": pd.DataFrame(par),
+    return {"q": Q, "score": S_, "q_eval": stitch(data.shape, qes), "zone_id": zid, "coverage": cov,
+            "parity": pd.DataFrame(par),
             "zones": pd.DataFrame(zrows), "cell": cell, "kind": kind, "w_all": w_all,
             "stack_dir": str(sd.relative_to(p6.ws.root)) if sd is not None else None, "seeds": sc}
 

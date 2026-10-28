@@ -31,10 +31,11 @@ PKG = Path(__file__).resolve().parents[1]
 # Code each stage's numbers depend on (an edit elsewhere never invalidates the stage).
 IMPL_MODULES = {
     "selection": ("leaderboard_focus/champion.py", "p6/full_benchmark.py", "p6/export_parity.py"),
-    "validation": ("leaderboard_focus/validation.py", "p6/boost.py", "p6/final_submission.py", "gems3/official.py",
-                   "gems3/representation.py", "gems3/submission.py"),
+    "validation": ("leaderboard_focus/validation.py", "leaderboard_focus/forensics.py", "p6/boost.py",
+                   "p6/final_submission.py", "gems3/official.py", "gems3/representation.py", "gems3/submission.py"),
     "parity": ("leaderboard_focus/parity.py", "p6/final_submission.py", "p6/stack.py"),
     "submissions": ("leaderboard_focus/submission.py", "p6/final_submission.py", "gems3/submission.py"),
+    "exploratory": ("leaderboard_focus/submission.py", "p6/final_submission.py", "gems3/submission.py"),
 }
 DEPENDENCIES = ("numpy", "pandas", "scipy", "rasterio", "lightgbm", "scikit-learn")
 

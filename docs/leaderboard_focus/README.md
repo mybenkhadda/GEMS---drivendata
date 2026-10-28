@@ -9,22 +9,24 @@ Milestone 2 (GeoSelect: W2 + fallback fault-segment ranking) starts only after M
 
 ## One notebook
 
-`notebooks/leaderboard_focus/GEMS_M1_CHAMPION_TO_SUBMISSION.ipynb` is the only M1 entry point (code rev `m1.2-r1`). It
+`notebooks/leaderboard_focus/GEMS_M1_CHAMPION_TO_SUBMISSION.ipynb` is the only M1 entry point (code rev `m1.3-r1`). It
 replaces notebooks `00`–`04`, which are kept for history and marked superseded. One `CONFIG` cell, one `Runner`
 (`gems_bench/leaderboard_focus/workflow.py`), one cell per stage, every stage resumable.
 
 | stage | what | status that lets the next stage run |
 |---|---|---|
 | 0 | configuration, Drive, strict clone, version lock | – |
+| 0c | read-only Drive preflight (no engine; M1.3) | not BLOCKED |
 | 1 | artifact inventory + selective staging | COMPLETE |
 | 2 | frozen champion selection (boost-A grid only) | COMPLETE (= selection complete, not promotion) |
 | 3 | official validation | COMPLETE or WARNING |
 | 4 | export parity, then promotion gates | parity COMPLETE; promotion COMPLETE / WARNING = READY_FOR_EXPORT |
 | 5 | submission export | READY_FOR_UPLOAD |
+| 5b | opt-in exploratory baseline (fails only the geo gate; never the champion) | EXPLORATORY_READY |
 | 6 | leaderboard review (manual entry) | – |
 | 7 | final report | – |
 
-Modes: `FULL`, `RECOVER`, `VALIDATE`, `SUBMIT` (`M1_EXECUTION_GUIDE.md`).
+Modes: `FULL`, `RECOVER`, `VALIDATE`, `SUBMIT`, `PREFLIGHT` (`M1_EXECUTION_GUIDE.md`).
 
 ## Why nothing is retrained
 

@@ -74,6 +74,59 @@ A COMPLETE selection is not a promotion. READY_FOR_EXPORT requires every mandato
 The gates never change the selection: `selection.geo_floor_blocking` (default false) is the separate, older knob
 that makes the floor part of the selection rule itself.
 
+### Two decisions, never conflated (M1.3)
+
+`gates.decisions` writes both to `selection/promotion_gates.json` and the promotion manifest:
+
+| decision | gates | question |
+|---|---|---|
+| `technical_validity` | SELECTION_COMPLETE, VALIDATION_PASS, PARITY_PASS | can the recipe be written as a file that meets the official contract and reproduces the evaluated prediction? |
+| `internal_promotion` | DISCOVERY_ELIGIBLE, GEOGRAPHIC_GATE_PASS | does the model meet our own quality rules? |
+
+A candidate can be technically valid and still fail internal promotion. The floor is never lowered automatically.
+When the geographic gate is the **only** failure (`exploratory_eligible`), the opt-in exploratory export (stage 5b,
+`exploratory.enabled` + a written `reason`, default OFF) writes `exploratory_m1_<family>_<recipe_id>.tif` with the same
+checks as a champion file, status `EXPLORATORY_READY` (never `READY_FOR_UPLOAD`), its own manifest / sha256 / README. The
+champion submission stays BLOCKED, and the file is never described as the validated champion. Upload is manual.
+
+## Per-zone area budget (M1.3 contract)
+
+`frac` is the share of the zone's **eligible** domain the selector may take: pool = ceil(frac × eligible_px)
+(`representation._k`). Thin representations keep only part of that pool: `skeleton_1px` skeletonises the top-pool
+mask; `crest_1px` takes the top crest pixels, all of them when there are fewer. The benchmark DTI was measured on
+exactly that thinned area. A zone therefore passes when:
+
+* area / eligible ≤ frac × (1 + `budget_tolerance`) (0.02, `configs/p6/full_gpu.yaml`) — the same rule as
+  `export_parity.audit_export` on the written file and `boost_audit.budget_violations` on the grid;
+* no positive pixel lies on a mapped fault (the official pixel-exact mask);
+* the map is not empty.
+
+`validation/zone_budget.csv` records `pool_px`, `cap_px`, `pool_yield` (= positive / pool), `rel_error` (final area vs
+frac, informational), the evaluated cell's area (`eval_positive_px`, `eval_area_frac_eligible`), the old two-sided
+verdict `m1_1_two_sided_ok`, and a `cause`.
+
+**Why it changed (OBSERVED on Drive, M1.2 run 2026-10-28).** Champion cell skeleton_1px @ 0.01:
+
+| zone | eligible px | positive px | area / eligible | pool yield | evaluated cell px (area) | px on mapped faults |
+|---|---|---|---|---|---|---|
+| 0 | 1,868,064 | 9,232 | 0.494 % | 0.494 | 7,648 (0.405 %) | 0 |
+| 1 | 1,526,003 | 7,001 | 0.459 % | 0.459 | 6,009 (0.388 %) | 0 |
+| 2 | 1,709,351 | 8,089 | 0.473 % | 0.473 | 6,806 (0.394 %) | 0 |
+
+M1.1–M1.2 required |area / frac − 1| ≤ 0.02. No thin cell can satisfy that, including the evaluated grid cells
+themselves, so every zone failed (rel_error −0.51 to −0.54). This was a `CHECK_DEFINITION_MISMATCH`, not a builder
+defect: no over-allocation, no mapped-fault leak. The repair changes the check only. The prediction, the recipe id
+`0a8692b2ab` and the validated array are unchanged.
+
+**Evaluated vs deployed map.** The deployed zones have 17–21 % more pixels than the evaluated cells (binary Jaccard
+0.53–0.55, score Spearman 1.0; `parity/zone_stitched_parity.csv`, OBSERVED). This is by design. The geo-unit
+evaluation keeps the zone's mapped faults as truth, so part of its pool lands on them. The deployed eligible domain
+excludes mapped faults (they are masked by the scorer), so the whole pool lands elsewhere and survives
+skeletonisation. `diagnostics/representation_comparison.csv` splits the disagreement per zone into
+*evaluated-only on mapped faults* (official mask) and *re-ranked pool* (`map_comparison`). Measured in Colab only.
+Residual caveat: the geographic DTI is measured on the evaluated map, not on the deployed one. On the leaderboard the
+mapped faults are masked, so the deployed map's quality on new faults is estimated, not measured.
+
 ## Known parity problems (historical W2 export)
 
 See `M1_AUDIT.md` §3. The historical export had three defects:
@@ -108,7 +161,7 @@ eligible domain masks mapped faults, while geo evaluation counts them as truth.
 | recomputed ≠ grid | a frozen input changed after boost A | compare the provenance hashes; restore the input |
 | recorded `NOT_REPRODUCED` (WARNING) | a different grid on Drive, or a different selection tie-break | compare `grid_provenance.csv` sha256 with the boost-A manifest; never relax the tolerance |
 | zone parity WARNING | the blend < 1 champion uses a per-zone vs all-zone fusion w | explicit decision (`strict_parity`) |
-| budget fail | eligible-domain or known-mask problem | inspect `zone_budget.csv` |
+| budget fail (M1.3 rule) | over-allocation, mapped-fault leak or empty map | read `cause` in `zone_budget.csv` and `diagnostics/root_cause_summary.json` |
 
 ## What a valid champion is
 
@@ -120,3 +173,6 @@ All of the following must hold:
 * the zone parity is PASS, the per-zone budget and the known mask hold, and the recipe is consistent (stages 3–4);
 * every mandatory promotion gate passes, including the geographic floor unless you made it advisory (stage 4);
 * the written band is the validated array and every official and audit check passes (stage 5).
+
+An exploratory file (stage 5b) meets every bullet except the geographic floor. It is a leaderboard baseline, not a
+valid champion.

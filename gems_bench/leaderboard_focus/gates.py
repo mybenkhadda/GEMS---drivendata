@@ -13,6 +13,8 @@ PENDING = the evidence does not exist yet (an upstream stage has not run in this
 validation / parity result produced for another selection / validation fingerprint). The stage status is
 COMPLETE (READY_FOR_EXPORT PASS), WARNING (ready with warnings), BLOCKED or INCOMPLETE (something pending).
 Nothing here changes the selection: the same champion stays recorded whatever the gates say.
+M1.3: ``decisions`` separates technical validity (SELECTION / VALIDATION / PARITY) from internal promotion
+(DISCOVERY / GEOGRAPHIC); both are recorded in ``promotion_gates.json`` and the promotion manifest.
 """
 from __future__ import annotations
 
@@ -111,6 +113,29 @@ def evaluate(sel_manifest: dict, selection: dict, champion: dict, recipe_id_yaml
     return T, status, reasons, warns
 
 
+TECHNICAL = ("SELECTION_COMPLETE", "VALIDATION_PASS", "PARITY_PASS")
+INTERNAL = ("DISCOVERY_ELIGIBLE", "GEOGRAPHIC_GATE_PASS")
+
+
+def decisions(T: pd.DataFrame) -> dict:
+    """Two independent verdicts from the gate table (pure). ``technical_validity``: can the recipe be written as a
+    file that satisfies the official contract and reproduces the evaluated prediction (selection, validation,
+    parity). ``internal_promotion``: does it meet our own model-quality rules (discovery eligibility, geographic
+    floor). Only ``exploratory_eligible`` (technical PASS, discovery PASS, geographic gate the ONLY failure) allows the
+    opt-in exploratory export; it never makes the candidate the validated champion."""
+    st = dict(zip(T.gate, T.status))
+
+    def verdict(names):
+        v = [st.get(n, PENDING) for n in names]
+        return BLOCKED if BLOCKED in v else PENDING if PENDING in v else WARNING if WARNING in v else PASS
+
+    tech, internal = verdict(TECHNICAL), verdict(INTERNAL)
+    return {"technical_validity": tech, "internal_promotion": internal,
+            "exploratory_eligible": tech in (PASS, WARNING) and st.get("DISCOVERY_ELIGIBLE") in (PASS, WARNING)
+            and st.get("GEOGRAPHIC_GATE_PASS") == BLOCKED,
+            "technical_gates": list(TECHNICAL), "internal_gates": list(INTERNAL)}
+
+
 def promote(sess) -> dict:
     """Stage ``promotion``: re-evaluated on every call from the persisted manifests (cheap; never cached)."""
     import yaml
@@ -133,7 +158,7 @@ def promote(sess) -> dict:
     T, status, reasons, warns = evaluate(sess.manifest("selection"), sel, crow, rid, sess.manifest("validation"),
                                          sess.manifest("parity"), cfg, worst_floor)
     sess.ws.save_table(T, "selection/promotion_gates.csv")
-    out = {"status": status, "ready_for_export": status in PASSING, "gates": T.to_dict("records"),
+    out = {"status": status, "ready_for_export": status in PASSING, **decisions(T), "gates": T.to_dict("records"),
            "reasons": reasons, "warnings": warns, "champion": sel.get("champion"), "recipe_id": sel.get("recipe_id"),
            "geographic_gate": cfg["promotion"]["geographic_gate"],
            "override_note": cfg["promotion"].get("override_note") or None,
@@ -142,4 +167,5 @@ def promote(sess) -> dict:
     upstream = {s: sess.manifest(s).get("fingerprint") for s in ("selection", "validation", "parity")}
     return sess.record("promotion", status, sess.fp("promotion", upstream, cfg["promotion"], cfg["selection"]),
                        reasons=reasons, warnings=warns, inputs=upstream, outputs=list(OUT),
-                       ready_for_export=out["ready_for_export"], recipe_id=sel.get("recipe_id"))
+                       ready_for_export=out["ready_for_export"], recipe_id=sel.get("recipe_id"),
+                       **{k: out[k] for k in ("technical_validity", "internal_promotion", "exploratory_eligible")})

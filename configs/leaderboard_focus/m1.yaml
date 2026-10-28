@@ -124,6 +124,21 @@ submission:
   max_size_mb: 50
   expected: {epsg: 32611, res_m: 100.0, dtype: float32, count: 1}
 
+# Opt-in exploratory baseline (M1.3). Default OFF. Only when the champion is TECHNICALLY valid (selection,
+# discovery eligibility, validation and parity all PASS / WARNING) and the ONLY failing gate is GEOGRAPHIC_GATE_PASS.
+# Writes submissions/<prefix>_<family>_<recipe_id>.tif with status EXPLORATORY_READY (never READY_FOR_UPLOAD), its own
+# manifest / sha256 / README; the champion submission stays BLOCKED; nothing is uploaded. reason is mandatory.
+exploratory:
+  enabled: false
+  reason: ""
+  prefix: exploratory_m1
+
+# Read-only Drive preflight (M1.3): runs before the engine, writes diagnostics/ only.
+preflight:
+  sample_px: 2000000                              # max pixels sampled per NPY / GeoTIFF for value statistics
+  hash_max_mb: 16                                 # sha256 of files up to this size (GeoTIFFs: size + mtime)
+  full_read_max_mb: 32                            # CSV duplicate / null checks only below this size
+
 leaderboard:
   max_scored_per_week: 3
   tie_delta: 0.005

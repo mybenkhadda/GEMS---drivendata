@@ -19,16 +19,17 @@ from pathlib import Path
 import yaml
 
 M1_VERSION = "m1.1"
-M1_CODE_REV = "m1.2-r1"                          # checked by every notebook start-up cell (not fingerprinted)
+M1_CODE_REV = "m1.3-r1"                          # checked by every notebook start-up cell (not fingerprinted)
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "leaderboard_focus" / "m1.yaml"
 COMPLETE, BLOCKED, INCOMPLETE, FAILED = "COMPLETE", "BLOCKED", "INCOMPLETE", "FAILED"
 WARNING, SKIP_CACHED, NOT_REQUIRED = "WARNING", "SKIP_CACHED", "NOT_REQUIRED"
 READY = "READY_FOR_UPLOAD"
-STATUSES = (COMPLETE, WARNING, BLOCKED, INCOMPLETE, FAILED, SKIP_CACHED, NOT_REQUIRED, READY)
+EXPLORATORY_READY = "EXPLORATORY_READY"          # technically valid file of a candidate that FAILS internal promotion
+STATUSES = (COMPLETE, WARNING, BLOCKED, INCOMPLETE, FAILED, SKIP_CACHED, NOT_REQUIRED, READY, EXPLORATORY_READY)
 PASSING = (COMPLETE, WARNING)                     # a downstream stage may consume these
-STAGES = ("environment", "artifacts", "selection", "validation", "parity", "promotion", "submissions", "leaderboard",
-          "report")
-MODES = ("FULL", "RECOVER", "VALIDATE", "SUBMIT")
+STAGES = ("environment", "preflight", "artifacts", "selection", "validation", "parity", "promotion", "submissions",
+          "exploratory", "leaderboard", "report")
+MODES = ("FULL", "RECOVER", "VALIDATE", "SUBMIT", "PREFLIGHT")
 GEO_GATE_MODES = ("mandatory", "advisory")
 
 
@@ -84,6 +85,12 @@ def validate(cfg: dict) -> None:
     if pr["geographic_gate"] == "advisory" and not str(pr.get("override_note") or "").strip():
         raise M1ConfigError("promotion.geographic_gate 'advisory' needs promotion.override_note (why a champion "
                             "below the geographic floor may be exported); the floor is never lowered silently")
+    ex = cfg.get("exploratory") or {}
+    if ex.get("enabled") and not str(ex.get("reason") or "").strip():
+        raise M1ConfigError("exploratory.enabled needs exploratory.reason (why a candidate that fails the internal "
+                            "geographic gate should get a leaderboard baseline); it is never the validated champion")
+    if ex.get("enabled") and str(ex.get("prefix")) == str(cfg["submission"]["prefix"]):
+        raise M1ConfigError("exploratory.prefix must differ from submission.prefix (distinct file names)")
     if cfg["output_dir"] in (cfg["p6_output_dir"], cfg["m9_output_dir"]):
         raise M1ConfigError("output_dir must differ from every read-only source directory")
 

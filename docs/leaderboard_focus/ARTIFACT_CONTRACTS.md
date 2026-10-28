@@ -95,6 +95,42 @@ scikit-learn versions.
   code_rev, code, seconds, written` (+ `traceback` when FAILED); every write is also kept in `manifests/history/`.
 * **`leaderboard/leaderboard_history.csv`:** the `reporting.LB_COLUMNS`.
 
+### M1.3 schemas
+
+* **`validation/zone_budget.csv`** (one row per geo zone). Written by `final_submission.build_map` + `forensics.budget_table`:
+  * build facts: `zone, zone_px, eligible_px, positive_px, frac_of_eligible, positive_on_known_px, eval_eligible_px,
+    known_in_zone_px`;
+  * the rule: `budget_rule` (`upper_bound`), `target_frac, cap_frac, rel_error, pool_px, cap_px, pool_yield,
+    px_below_pool`;
+  * the evaluated cell: `eval_positive_px, eval_area_frac_eligible, deploy_vs_eval_px`;
+  * the verdict: `ok, m1_1_two_sided_ok, cause`.
+  The M1.2 file (columns up to `ok`, two-sided rule) is still readable: the preflight re-reads it under the new rule.
+* **`diagnostics/representation_comparison.csv`:** `zone, eval_px, deploy_px, both_px, eval_only_px,
+  eval_only_on_mapped_fault_px, eval_only_elsewhere_px, deploy_only_px, deploy_outside_eligible_px, jaccard, dice,
+  pixel_disagreement, disagreement_masking_share, disagreement_ranking_domain_share`.
+* **`diagnostics/mask_alignment.csv`:** `zone, zone_px, eval_eligible_px, eligible_px, known_in_zone_px,
+  eval_minus_deploy_eligible_px, unexplained_by_mapped_faults_px, note`.
+* **`diagnostics/root_cause_summary.json`:** `budget_rule, zones{<k>: ok, classes, cause, ...}, all_ok,
+  blocking_classes, source, evidence, map_comparison`. Classes come from `forensics.ROOT_CAUSES`.
+* **`diagnostics/drive_inventory.csv`:** `id, scope (frozen_source / m1_output), stage, required, path, rel, ext,
+  exists, size_bytes, modified, status (OK / MISSING / EMPTY / UNREADABLE), detail, meta (JSON), digest, evidence`.
+* **`diagnostics/schema_checks.csv`:** `id, rel, status (OK / SCHEMA_MISMATCH / MISSING / EMPTY / UNREADABLE), missing,
+  rows, duplicate_rows, null_cells, evidence, detail`.
+* **`diagnostics/artifact_compatibility.csv`:** `check, status (PASS / FAIL / UNVERIFIED), evidence, critical, detail`.
+  A FAIL with `critical` makes the preflight BLOCKED.
+* **`selection/promotion_gates.json`:** adds `technical_validity`, `internal_promotion`, `exploratory_eligible`.
+* **`submissions/exploratory_manifest.json`** (opt-in): `status (EXPLORATORY_READY / BLOCKED / ...)`,
+  `validated_champion: false`, `reason`, `technical_validity`, `internal_promotion`, `geographic_gate`, `geo_dti`,
+  `geo_floor`, `file`, `sha256`, `recipe_id`, `recipe_fp`, `cell`, `written_equals_validated`, `uploaded: false`.
+
+### Preflight access contract
+
+The preflight reads `<drive_root>` directly. It never stages, moves, deletes or rewrites a Drive file. It writes only
+`<output_dir>/diagnostics/`, `<output_dir>/figures/*_preflight*` and `manifests/preflight.json`, locally first and then
+through the normal M1 push. `DriveSync` never deletes on Drive. GeoTIFF values are sampled only for `oof.tif` and
+the template. The other rasters are metadata-only, and files above `preflight.hash_max_mb` get size + mtime instead
+of a sha256.
+
 ## Ownership
 
 | directory | owner | M1 access |

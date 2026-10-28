@@ -164,10 +164,11 @@ def _sess(tmp_path):
 
 
 def test_plan_per_mode():
-    assert WF.plan("full")[0] == "artifacts" and WF.plan("FULL")[-1] == "report"
+    assert WF.plan("full")[:2] == ("preflight", "artifacts") and WF.plan("FULL")[-1] == "report"   # M1.3: preflight
     assert "submissions" not in WF.plan("RECOVER") and "selection" not in WF.plan("VALIDATE")
-    assert WF.plan("SUBMIT") == ("artifacts", "promotion", "submissions", "leaderboard", "report")
-    assert all(WF.engine_needed(m) for m in CF.MODES)
+    assert WF.plan("SUBMIT") == ("preflight", "artifacts", "promotion", "submissions", "exploratory", "leaderboard",
+                                 "report")
+    assert all(WF.engine_needed(m) for m in CF.MODES if m != "PREFLIGHT") and not WF.engine_needed("PREFLIGHT")
 
 
 def test_blocked_results_are_re_evaluated_and_complete_reused(tmp_path):
