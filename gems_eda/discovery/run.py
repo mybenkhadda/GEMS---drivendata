@@ -1,0 +1,356 @@
+"""Colab orchestrator of the exhaustive geological discovery EDA (notebooks/colab/GEMS_EXHAUSTIVE_GEOLOGICAL_EDA.ipynb).
+
+    E = ExhaustiveEDA(CONFIG, HEAD, factory=F); E.run()
+
+``ExhaustiveEDA`` is a ``gems_bench.reset.run.FaultDiscoveryReset`` (itself a ``geomoe.run.DiscoveryGeoMoE``) with
+its own stage tables, so validated caching, dependency blocking (BLOCKED_UPSTREAM / NOT_EVALUATED), stage integrity,
+Drive sync, the frozen B0 / B1 / W2 engine (only for the model-forensics and candidate stages), honest zone-stitched
+maps and append-only reviews are reused unchanged. The data-only stages read the three competition rasters at native
+100 m through ``gems_eda`` and never need the engine.
+
+Stages: 00 tests | e01 inventory | e02 landscape (A) | e03 geometry (B) | e04 profiles (measurements) |
+e05 signatures (C) | e06 scales (D) | e07 cross-modal (E) | e08 label bias (F) | e09 regional (G) |
+01 attach + 03 scenarios (frozen engine) | e11 model forensics (H) | e12 candidates (I) | e13 DEM (opt-in) |
+e14 integrity | e15 synthesis (dashboards, findings, hypotheses, decision, reports).
+"""
+from __future__ import annotations
+
+import gc
+import subprocess
+import sys
+import time
+import traceback
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from gems_bench.geomoe.decide import COMPLETE, FAILED, SKIPPED_OK
+from gems_bench.geomoe.run import tests_verdict
+from gems_bench.reset.run import FaultDiscoveryReset
+
+from . import EDA_CODE_REV
+from . import core as K
+from . import data as DA
+
+REPO = Path(__file__).resolve().parents[2]
+OUT_DIR = "outputs/geological_discovery_eda"
+STAGE_SWITCH = {"e01_inventory": "inventory", "e02_landscape": "global_geology", "e03_geometry": "fault_geometry",
+                "e04_profiles": "fault_profiles", "e05_signatures": "modality_analysis", "e06_scales": "spatial_scales",
+                "e07_crossmodal": "crossmodal_evidence", "e08_label_bias": "label_bias",
+                "e09_regional": "regional_shift", "e11_forensics": "model_forensics",
+                "e12_candidates": "unmapped_candidates", "e13_dem": "dem_pilot", "e15_synthesis": "scientific_synthesis"}
+
+
+class ExhaustiveEDA(FaultDiscoveryReset):
+    STAGES = ("00_tests", "e01_inventory", "e02_landscape", "e03_geometry", "e04_profiles", "e05_signatures",
+              "e06_scales", "e07_crossmodal", "e08_label_bias", "e09_regional", "01_attach", "03_scenarios",
+              "e11_forensics", "e12_candidates", "e13_dem", "e14_integrity", "e15_synthesis")
+    DEPENDS = {"00_tests": (), "e01_inventory": ("00_tests",), "e02_landscape": ("e01_inventory",),
+               "e03_geometry": ("e01_inventory",), "e04_profiles": ("e02_landscape", "e03_geometry"),
+               "e05_signatures": ("e04_profiles",), "e06_scales": ("e04_profiles",),
+               "e07_crossmodal": ("e04_profiles", "e06_scales"), "e08_label_bias": ("e07_crossmodal",),
+               "e09_regional": ("e05_signatures", "e06_scales"), "01_attach": (), "03_scenarios": ("01_attach",),
+               "e11_forensics": ("03_scenarios", "e04_profiles"), "e12_candidates": ("e07_crossmodal",),
+               "e13_dem": ("e04_profiles",), "e14_integrity": (), "e15_synthesis": ()}
+    DECISION_STAGES = ()
+    REPORT_STAGES = ("e14_integrity", "e15_synthesis")
+    STAGE_IN = ("manifests", "audit", "datasets", "tables", "figures", "atlas", "reports", "rasters")
+    LABELS = {"00_tests": "Synthetic tests", "e01_inventory": "Data inventory", "e02_landscape": "Geological landscape",
+              "e03_geometry": "Fault geometry", "e04_profiles": "Fault profiles + controls",
+              "e05_signatures": "Fault signatures", "e06_scales": "Scale and localisation",
+              "e07_crossmodal": "Cross-modal evidence", "e08_label_bias": "Label bias", "e09_regional": "Regional",
+              "01_attach": "Frozen engine", "03_scenarios": "Validation units", "e11_forensics": "Model forensics",
+              "e12_candidates": "Discovery candidates", "e13_dem": "DEM pilot", "e14_integrity": "Stage integrity",
+              "e15_synthesis": "Scientific synthesis"}
+    OUTPUTS = {
+        "00_tests": [("audit/selftests.csv", ("test", "status")), ("audit/pytest_output.txt", None)],
+        "e01_inventory": [("audit/raw_data_inventory.csv", ("file", "exists")),
+                          ("audit/band_metadata.csv", ("band", "modality", "provenance_class")),
+                          ("audit/previous_eda_audit.csv", ("finding_id", "classification"))],
+        "e02_landscape": [("datasets/physical_regions.parquet", ("domain",)), ("tables/band_characterization.csv", None)],
+        "e03_geometry": [("datasets/fault_segments.parquet", ("seg_id", "length_km")),
+                         ("tables/fault_geometry.csv", None)],
+        "e04_profiles": [("datasets/matched_controls.parquet", ("sample_id", "kind", "system")),
+                         ("datasets/fault_profiles.parquet", ("sample_id", "signal", "abs_step")),
+                         ("datasets/station_structure.parquet", ("sample_id", "field"))],
+        "e05_signatures": [("tables/matched_control_tests.csv", ("signal", "metric", "effect"))],
+        "e06_scales": [("tables/scale_localization.csv", ("modality", "scale_km"))],
+        "e07_crossmodal": [("datasets/structural_lineaments.parquet", ("lineament_id", "status")),
+                           ("tables/crossmodal_complementarity.csv", None)],
+        "e08_label_bias": [("tables/label_selection_bias.csv", None)],
+        "e09_regional": [("tables/regional_robustness.csv", None)],
+        "03_scenarios": [("validation/scenarios.csv", ("scenario", "zone"))],
+        "e11_forensics": [("tables/model_failure_taxonomy.csv", None),
+                          ("datasets/model_error_cases.parquet", ("sample_id",))],
+        "e12_candidates": [("atlas/candidate_catalog.parquet", ("candidate_id",)),
+                           ("atlas/atlas_index.csv", ("candidate_id",))],
+        "e13_dem": [("tables/dem_pilot.csv", None)],
+        "e14_integrity": [("audit/stage_integrity.csv", ("stage", "actual_status"))],
+        "e15_synthesis": [("tables/evidence_synthesis.csv", None), ("reports/MODELING_DECISION.md", None)],
+    }
+
+    def __init__(self, CONFIG: dict, head: str, factory=None):
+        self.c = K.eda_config(CONFIG)
+        rc = {k: self.c[k] for k in ("repo", "ref", "drive_root", "local_root", "reuse_cached", "sync_to_drive",
+                                     "run_synthetic_tests")}
+        rc.update(mode="ATLAS", overrides={"output_dir": OUT_DIR},
+                  dem={"enabled": bool(self.c["dem"]["enabled"]), "cached_only": True, "pilot_only": True,
+                       "process_cached_tiles": False, "allow_download": False})
+        super().__init__(rc, head, factory)
+        self.reg = K.Registry(self)
+        self.current_stage = None
+        self._D = None
+        self.root = Path(self.c["drive_root"])
+        self.min_effect = float(self.c["statistics"]["min_effect"])
+        self.n_boot = int(self.c["n_boot"])
+        self.seed = int(self.c["sampling"]["seed"])
+
+    # =========================================================================== data access
+    @property
+    def D(self) -> DA.EDAData:
+        if self._D is None:
+            print("[eda] loading the native 100 m stack, mapped faults, template (gems_eda) ...")
+            self._D = DA.load_data(self.root, (3, 3))
+        return self._D
+
+    def table(self, rel: str) -> pd.DataFrame:
+        p = self.ws.path(rel)
+        if not p.exists():
+            return pd.DataFrame()
+        return pd.read_parquet(p) if p.suffix == ".parquet" else self.ws.load_table(rel)
+
+    def domains(self) -> np.ndarray:
+        if "domains" not in self.D.cache:
+            p = self.ws.path("rasters/spatial_domains/domains.npz")
+            with np.load(p) as z:
+                self.D.cache["domains"] = z["domain"]
+        return self.D.cache["domains"]
+
+    def stations_data(self):
+        """(stations, metrics, cube, offsets, signal names, structure metrics) from the persisted e04 outputs."""
+        if "S" not in self.D.cache:
+            S = self.table("datasets/matched_controls.parquet")
+            M = self.table("datasets/fault_profiles.parquet")
+            ST = self.table("datasets/station_structure.parquet")
+            with np.load(self.ws.path("datasets/fault_profile_cube.npz")) as z:
+                cube, off, sigs = z["cube"].astype(np.float32), z["offsets"], [str(s) for s in z["signals"]]
+            self.D.cache.update(S=S, M=M, cube=cube, off=off, sigs=sigs, ST=ST)
+        d = self.D.cache
+        return d["S"], d["M"], d["cube"], d["off"], d["sigs"], d["ST"]
+
+    def run_figures(self, funcs: list) -> dict:
+        ok, bad = [], []
+        for fn in funcs:
+            try:
+                fn(self)
+                ok.append(fn.__name__)
+            except Exception as e:                         # one figure never kills its stage; recorded
+                bad.append({"figure": fn.__name__, "error": f"{type(e).__name__}: {e}",
+                            "traceback": traceback.format_exc()[-1500:]})
+                print(f"      {fn.__name__} FAILED: {type(e).__name__}: {str(e)[:200]}")
+            gc.collect()
+        self.ws.save_json(bad, f"manifests/figure_failures/{self.current_stage}.json")
+        st = COMPLETE if len(bad) <= len(funcs) // 2 else FAILED
+        return {"status": st, "figures_ok": len(ok), "figure_failures": [b["figure"] for b in bad],
+                "error": f"{len(bad)} of {len(funcs)} figures failed" if st == FAILED else None,
+                "note": f"{len(ok)}/{len(funcs)} figures; failures {[b['figure'] for b in bad]}"}
+
+    def stage(self, name: str, parts: list, body) -> dict:
+        """Stage wrapper: CONFIG switch, current stage name for the registry, run_stage caching."""
+        sw = STAGE_SWITCH.get(name)
+        if sw and not self.c["stages"].get(sw, True):
+            return self.run_stage(name, ["disabled"], lambda: (SKIPPED_OK, {"reason": f"stages.{sw}=False"}))
+
+        def fn():
+            self.current_stage = name
+            r = body()
+            return r.pop("status", COMPLETE), r
+        return self.run_stage(name, [EDA_CODE_REV.split("-")[0], self.c["mode"], self.c["sampling"],
+                                     self.c["statistics"], self.c["scales_used_km"], *parts], fn)
+
+    # =========================================================================== stages
+    def s00_tests(self) -> dict:
+        from . import selftest as ST
+
+        def fn():
+            T = ST.run_selftests()
+            self.ws.save_table(T, "audit/selftests.csv")
+            r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-rfE", "tests/test_geological_eda.py"],
+                               cwd=str(REPO), capture_output=True, text=True)
+            out = r.stdout + "\n" + r.stderr
+            self.ws.save_text(f"exit code {r.returncode}\n\n{out}", "audit/pytest_output.txt")
+            st, why = tests_verdict(T, r.returncode, out)
+            return st, {"failing": why, "note": "; ".join(why)[:300] or "all tests passed",
+                        "error": ("tests failed: " + "; ".join(why)[:600]) if why else None}
+        if not self.c["run_synthetic_tests"]:
+            self.ws.save_text("not run\n", "audit/pytest_output.txt")
+            return self.run_stage("00_tests", ["disabled"], lambda: (SKIPPED_OK, {"reason": "disabled"}), force=True)
+        return self.run_stage("00_tests", [time.strftime("%Y-%m-%dT%H:%M")], fn, force=True)
+
+    def s_inventory(self):
+        from gems_bench.reset import audit as AU
+
+        def body():
+            F, B = DA.raster_inventory(self.root)
+            self.ws.save_table(F, "audit/raw_data_inventory.csv")
+            self.ws.save_table(B, "audit/band_metadata.csv")
+            rows = []
+            for fid, claim, src, cls, why, chk in AU.PRIOR:
+                if not src.startswith("outputs/eda"):
+                    continue
+                res, det = AU.verify(None, chk) if chk in ("header_grid", "bound_method_repr", "saturated_evidence") \
+                    else ("NOT_RUN", "re-measured in e03 at native 100 m" if chk == "segment_lengths" else "")
+                rows.append({"finding_id": fid, "claim": claim, "classification": cls, "reason": why,
+                             "check_result": res, "check_detail": det})
+            self.ws.save_table(pd.DataFrame(rows), "audit/previous_eda_audit.csv")
+            dep = [{"stage": s, "requires": ";".join(self.DEPENDS.get(s, ())), "engine_needed": s in (
+                "01_attach", "03_scenarios", "e11_forensics"), "outputs": ";".join(r for r, _ in self.OUTPUTS.get(
+                    s, []))} for s in self.STAGES]
+            self.ws.save_table(pd.DataFrame(dep), "audit/source_dependencies.csv")
+            self.ws.save_json({"commit": self.head, "code_rev": EDA_CODE_REV, "config": self.c,
+                               "inputs": F.to_dict("records")}, "audit/experiment_provenance.json")
+            bad = [c for c in ("check_epsg", "check_res", "check_shape") if c in F and not F[c].fillna(True).all()]
+            return {"note": f"files {list(F.file)}; recorded-property mismatches {bad or 'none'}",
+                    "mismatches": bad}
+        return self.stage("e01_inventory", [], body)
+
+    def s_landscape(self):
+        from . import parts_ab as AB
+
+        def body():
+            D = self.D
+            dom, B = DA.domains(D, 6, 50, self.seed)
+            self.save_npz("rasters/spatial_domains/domains.npz", domain=dom)
+            self.save_parquet(B, "datasets/physical_regions.parquet")
+            D.cache["domains"] = dom
+            return self.run_figures(AB.PART_A)
+        return self.stage("e02_landscape", [], body)
+
+    def s_geometry(self):
+        from . import parts_ab as AB
+
+        def body():
+            seg = self.D.net.segments
+            self.save_parquet(seg, "datasets/fault_segments.parquet")
+            return self.run_figures(AB.PART_B)
+        return self.stage("e03_geometry", [], body)
+
+    def s_profiles(self):
+        def body():
+            D, c = self.D, self.c
+            rng = np.random.default_rng(self.seed)
+            strata = DA.context_strata(D)
+            dom = self.domains()
+            S = DA.stations(D, c, rng, strata, dom)
+            sig, scale = DA.profile_signals(D)
+            off = DA.offsets(float(c["sampling"]["profile_half_width_km"]))
+            from gems_eda.profiles import extract_profiles
+
+            ps = extract_profiles(sig, S, off)
+            M = DA.station_metrics(ps.cube, S, list(sig), off)
+            fields = {m: D.band(DA.PRIMARY[m]) for m in ("magnetic", "gravity", "terrain") if D.has(DA.PRIMARY[m])}
+            ST = DA.structure_metrics(D, S, fields)
+            alt = []
+            half_px = int(np.ceil(c["sampling"]["profile_half_width_km"] / D.grid.pixel_km)) + 2
+            fs = S[S.kind == "fault"].reset_index(drop=True)
+            for lo, hi in c["sampling"]["control_sensitivity_km"]:
+                A = DA.matched_controls(D, fs, strata, int(c["sampling"]["matched_controls_per_fault"]), lo, hi,
+                                        half_px, np.random.default_rng(self.seed + int(10 * lo)),
+                                        kind=f"control_{lo:g}_{hi:g}km")
+                A["domain"] = dom[A.r, A.c]
+                A.insert(0, "sample_id", np.arange(len(A)) + 10_000_000 * (len(alt) + 1))
+                pa = extract_profiles({k: sig[k] for k in sig if not k.endswith("thdr1km")}, A, off)
+                alt.append(DA.station_metrics(pa.cube, A, [k for k in sig if not k.endswith("thdr1km")], off))
+            self.save_parquet(S, "datasets/matched_controls.parquet")
+            self.save_parquet(S[S.kind == "fault"], "datasets/fault_systems.parquet")
+            self.save_parquet(M, "datasets/fault_profiles.parquet")
+            self.save_parquet(ST, "datasets/station_structure.parquet")
+            self.save_parquet(pd.concat(alt, ignore_index=True) if alt else pd.DataFrame(),
+                              "datasets/control_sensitivity.parquet")
+            self.save_npz("datasets/fault_profile_cube.npz", cube=ps.cube.astype(np.float16), offsets=off,
+                          signals=np.asarray(list(sig)))
+            self.ws.save_table(scale, "tables/profile_signal_scaling.csv")
+            D.cache.update(S=S, M=M, cube=ps.cube, off=off, sigs=list(sig), ST=ST)
+            lv = S[S.kind == "control"].match_level.value_counts().to_dict()
+            return {"note": f"{int((S.kind == 'fault').sum())} fault stations on {S[S.kind == 'fault'].system.nunique()} "
+                            f"systems; controls by match level {lv}"}
+        return self.stage("e04_profiles", [], body)
+
+    def s_part(self, name: str, module: str, attr: str, extra=None):
+        import importlib
+
+        def body():
+            m = importlib.import_module(f"gems_eda.discovery.{module}")
+            if extra:
+                extra()
+            return self.run_figures(getattr(m, attr))
+        return self.stage(name, [], body)
+
+    def s_forensics(self):
+        def prep():
+            from gems_bench.reset.atlas import honest_maps
+
+            self.D.cache["maps"] = honest_maps(self)
+        return self.s_part("e11_forensics", "parts_hi", "PART_H", prep)
+
+    def s_candidates(self):
+        def prep():
+            p = self.ws.path("atlas/cache/honest_maps.npz")
+            if p.exists() and "maps" not in self.D.cache:
+                from gems_bench.reset.atlas import honest_maps
+
+                self.D.cache["maps"] = honest_maps(self)
+        return self.s_part("e12_candidates", "parts_hi", "PART_I", prep)
+
+    def s_dem(self):
+        if not self.c["dem"]["enabled"]:
+            return self.stage("e13_dem", ["disabled"], lambda: {"status": SKIPPED_OK,
+                                                                "reason": "dem.enabled=False (DEM coverage not "
+                                                                          "evaluated; never evidence of absence)"})
+        return self.s_part("e13_dem", "parts_hi", "PART_DEM")
+
+    def s_integrity(self):
+        def fn():
+            self.ws.save_table(self.integrity(), "audit/stage_integrity.csv")
+            self.ws.save_table(pd.DataFrame([{"stage": k, "status": v} for k, v in self.status.items()]),
+                               "manifests/stage_status.csv")
+            self.ws.save_json(self.fps, "manifests/cache_fingerprints.json")
+            return COMPLETE, {"note": "audit/stage_integrity.csv"}
+        return self.run_stage("e14_integrity", [time.time()], fn, force=True)
+
+    def s_synthesis(self):
+        from . import synthesis as SY
+
+        def fn():
+            self.current_stage = "e15_synthesis"
+            return COMPLETE, SY.run(self)
+        return self.run_stage("e15_synthesis", [time.time()], fn, force=True)
+
+    # =========================================================================== run
+    def run(self) -> dict:
+        self.s00_tests()
+        self.s_inventory()
+        self.s_landscape()
+        self.s_geometry()
+        self.s_profiles()
+        self.s_part("e05_signatures", "parts_cd", "PART_C")
+        self.s_part("e06_scales", "parts_cd", "PART_D")
+        self.s_part("e07_crossmodal", "parts_efg", "PART_E")
+        self.s_part("e08_label_bias", "parts_efg", "PART_F")
+        self.s_part("e09_regional", "parts_efg", "PART_G")
+        if self.c["stages"]["model_forensics"] or self.c["stages"]["unmapped_candidates"]:
+            if self.F is not None:
+                self.s01_attach()
+                self.s03_scenarios()
+            else:
+                print("[eda] no factory passed: model forensics BLOCKED (frozen engine not attached)")
+        self.s_forensics()
+        self.s_candidates()
+        self.s_dem()
+        self.s_integrity()
+        self.s_synthesis()
+        ran = {k: v for k, v in self.status.items() if v != "NOT_RUN"}
+        print(f"\ncode rev {EDA_CODE_REV} | mode {self.c['mode']} | {ran}")
+        print(f"Figures: {self.ws.path('figures/FIGURE_CATALOG.csv')} | Drive: {self.drive / self.out}")
+        return self.status
