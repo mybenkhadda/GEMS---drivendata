@@ -1,7 +1,8 @@
-# GEMS exhaustive geological discovery EDA — handoff (code rev gde.1-r1)
+# GEMS exhaustive geological discovery EDA — handoff (code rev gde.1-r2)
 
-**State: authored, never executed.** No figure, table, statistic or verdict exists yet. Everything below describes
-what the code *will* compute when it runs in Colab; nothing here is a result.
+**State:** gde.1-r1 ran once in Colab (commit c1cfd90): tests and inventory passed; e02 / e03 FAILED on missing
+contracted tables and blocked everything downstream. gde.1-r2 repairs the producers (section "r2 recovery" at the
+end). r2 is authored only: nothing in it has been executed (no pytest, no lint, no notebook run).
 
 ## How to run
 
@@ -95,3 +96,96 @@ tuning target; nothing is uploaded to DrivenData.
   download. Missing coverage is NOT_AVAILABLE, never evidence of absence.
 * Crest thresholds (top 3 %), the 300 m / 2 km / rank 0.9 forensic cut-offs and the 5 km domain blocks are analysis
   choices recorded in each interpretation's limitations.
+
+## r2 recovery (gde.1-r2)
+
+### Root causes
+
+| Colab symptom | Root cause | Fix |
+|---|---|---|
+| e02 FAILED, 12/12 figures, `tables/band_characterization.csv: missing` | contract declared, no writer anywhere (not renamed, not cache-suppressed) | `products.band_characterization` (core, before the figures) + `enrich_band_characterization` (after F005–F008), schema-validated, atomic |
+| e03 FAILED, 10/10 figures, `tables/fault_geometry.csv: missing` | same: contract without writer | `products.fault_geometry` (core, before the figures) |
+| e04–e12 BLOCKED_UPSTREAM, their tables absent | consequence of e02 / e03 (dependency machinery correct) | none needed; they become eligible once e02 / e03 are COMPLETE in the session |
+| widget `AttributeError: ... candidate_id` | `review_widget` read `atlas_index.csv` blindly (absent because e12 was blocked) | `reset.atlas.review_readiness` gate inside `review_widget` + notebook gate |
+| inventory `mismatches ['check_shape']` | `data.RECORDED` had width / height swapped (repo evidence `outputs/benchmark/tables/native_grid_summary.csv`: rows 3730, cols 3292) | constant fixed; `shape_detail` per file; new `check_same_grid_as_features` (a raster off the features grid FAILS e01) |
+| FutureWarning `reset/atlas.py:167` | `fillna("")` on float / bool columns of a reloaded review CSV | `review_keys`: object dtype, `where(notna, "")`, then `str` (same keys) |
+| FutureWarning `morphology.py:296` | `fillna(False)` on an object column after `reindex` | nullable `boolean` -> `fillna(False)` -> `bool` (missing = no loop, as before) |
+
+Latent defects found during the audit (would have surfaced after unblocking):
+* `tests/test_geological_eda.py::test_notebook_structure` asserted that the notebook has no outputs: it would FAIL
+  stage 00 (blocking everything) once the Colab-saved notebook is committed. Now only code is checked.
+* `parts_cd.scale_data` kept 1 km crests only when 1 km is in the mode's scale list (not in QUICK_LOOK): part E would
+  have run on empty crests. 1 km crests are now always computed.
+* Mandatory tables of e07 / e08 / e09 / e11 / e12 were written inside figure functions (a failed plot = missing core
+  product). They are now stage producers (`run.CORE`), run before (or, for the e07 summary, after) the figures.
+* Downstream caches read by later stages (`fault_profile_cube.npz`, `crests_1km.npz`, `scale_regional.csv`,
+  `station_scale_values.parquet`, `lineaments.npz`, `domains.npz`) were not in the contract: a REUSED stage could
+  lack them. They are now contracted and `.npz` files must load with their arrays.
+
+### Stage contract audit (stage -> output -> producer -> consumers)
+
+| stage | contracted output (required columns / arrays) | producer | consumers |
+|---|---|---|---|
+| e01 | audit/raw_data_inventory.csv, band_metadata.csv, previous_eda_audit.csv | `run.s_inventory` | e02 (units), reports |
+| e02 | datasets/physical_regions.parquet (domain); rasters/spatial_domains/domains.npz (domain); **tables/band_characterization.csv** | `run.s_landscape`, `products` | e04 (domains), part A/G figures, FE register |
+| e03 | datasets/fault_segments.parquet; **tables/fault_geometry.csv** | `run.s_geometry`, `products` | parts B, H, reports |
+| e04 | matched_controls / fault_profiles / station_structure .parquet; fault_profile_cube.npz | `run.s_profiles` | e05–e11 |
+| e05 | tables/matched_control_tests.csv | `parts_cd.effects` (core) | part G, synthesis |
+| e06 | scale_localization.csv, scale_regional.csv, station_scale_values.parquet, crests_1km.npz | `parts_cd.scale_data` (core) | e07, part G |
+| e07 | structural_lineaments.parquet, lineaments.npz, crossmodal_complementarity.csv | `parts_efg.lin_data` (core), `crossmodal_table` (post) | e08, e11, e12 |
+| e08 | label_selection_bias.csv | `parts_efg.label_bias_table` (core) | synthesis |
+| e09 | regional_robustness.csv (typed header even with 0 regions) | `parts_efg.lro_table` (core) | synthesis |
+| e11 | model_failure_taxonomy.csv, model_error_cases.parquet | `parts_hi.failure_taxonomy` (core) | e12, synthesis |
+| e12 | candidate_catalog.parquet, atlas_index.csv, reviewed_annotations.csv (created once, never overwritten) | `parts_hi.write_atlas` (core) | review widget, F096/F097 |
+| e13–e15 | unchanged | | |
+
+`test_every_contracted_output_has_a_producer` checks statically that every contracted path is written somewhere.
+
+### New / corrected artifacts
+
+`tables/band_characterization.csv` (one row per band; `products.BAND_COLUMNS`): band, band_index, modality,
+provenance_class, units (from e01 metadata, else "not available"), description, is_primary_of_modality, is_derived,
+parent_band, n_footprint_px, n_valid_px, valid_frac_footprint, p01–p99, mean, std, robust_scale_mad, iqr,
+dynamic_range_p01_p99, robust_cv, local_regional_std_ratio (median std 1 km / 10 km on a 200 k pixel sample),
+n_sample_ratio, corr_length_km (F005), anisotropy_ratio_2km / anisotropy_max_dir_deg (F006, primary fields),
+short_wavelength_power_share (F007, computed at 200 m), spearman_vs_recomputed_from_parent (F008),
+n_unique_sample, measured_in, limitations (rules on the measured values only). Unmeasured = NaN. Rules: unique band,
+fractions in [0, 1], ordered quantiles, non-negative spread.
+
+`tables/fault_geometry.csv` (one row per traced branch; `products.GEOMETRY_COLUMNS`): seg_id, system_id (connected
+component of the mapped raster), length_km, chord_km, sinuosity, strike_deg (axial, clockwise from north, [0, 180)),
+linearity, curv_mean / p90 (deg/km), n_px, nodes and degrees, n_junction_ends, n_free_ends, is_loop, touches_edge,
+is_short_lt_2km, aligned_gap_partners (≤ 5 km, ≤ 25 deg, other systems), system_n_segments / length_km / kind,
+region, region_name, domain, trace_density_km_per_100km2 (10 km kernel), r/c_mid, x/y_mid_utm, in_footprint,
+crs. Rules: unique seg_id, length > 0, chord ≤ length, strike in [0, 180), linearity in [0, 1], system_id > 0.
+
+### Cache lifecycle
+
+* Fingerprint = code version (`gde.1`), mode, sampling, statistics, scales, **the stage's output contract and its
+  `STAGE_SCHEMA` version**, stage parts. Bumping one stage's schema invalidates only that stage. r2 bumps e01, e02,
+  e03, e06, e07, e08, e09, e11, e12; e04 / e05 caches (if any) stay valid. e02 / e03 never had a COMPLETE manifest.
+* Reuse needs: same fingerprint, manifest COMPLETE / REUSED / SKIPPED, every contracted output present, non-empty,
+  readable, with its columns / arrays; otherwise the stage recomputes (the earlier files are overwritten atomically
+  only by a successful producer; nothing is deleted).
+* Session caches (`E.D.cache`) of a stage are dropped when it recomputes (`SESSION_CACHE`).
+* Every atlas run is also archived at `atlas/catalog_history/<fingerprint>.parquet`; reviews stay append-only.
+
+### Colab recovery sequence
+
+0. Locally (or in any checkout): `git pull` (brings the Colab-saved notebook b43f49e), then
+   `python scripts/eda/patch_gems_eda_notebook.py --check` and `python scripts/eda/patch_gems_eda_notebook.py`
+   (idempotent, keeps all outputs), commit + push; note the SHA.
+1. Notebook config cell: set `CONFIG['ref']` (and optionally `EXPECT['commit']`) to that SHA; keep
+   `mode='FULL_EDA'`, `reuse_cached=True`. Runtime -> Restart session, run the config + environment cells
+   (asserts `gde.1-r2`).
+2. `E.s00_tests()` -> must be COMPLETE; else read `audit/pytest_output.txt` (all tests are new and unexecuted).
+3. `E.s_inventory()` -> check the note: `check_shape` should no longer be listed; `audit/raw_data_inventory.csv`
+   has `shape_detail` and `check_same_grid_as_features` (must be True for faults and submission).
+4. `E.s_landscape(); E.s_geometry(); diag(['e02_landscape', 'e03_geometry'])` -> both COMPLETE, then
+   `show('tables/band_characterization.csv')`, `show('tables/fault_geometry.csv')`.
+5. Continue cell by cell (each ends with `diag(...)`): profiles -> signatures -> scales -> cross-modal -> label bias
+   -> regional. These stages have never run: expect first-run errors there; `diag` names the file / error.
+6. Engine only now: `E.s01_attach(); E.s03_scenarios(); E.s_forensics()`; then `E.s_candidates()`.
+7. Review cell: prints READY / SKIPPED with the reason; the widget opens only when READY.
+8. `E.s_dem(); E.s_integrity(); E.s_synthesis()`, then the health-check cell (`diag(all_rows=False)`).
+9. Full integration: a fresh session with `E.run()`; every stage should be COMPLETE or REUSED_VALID_CACHE.

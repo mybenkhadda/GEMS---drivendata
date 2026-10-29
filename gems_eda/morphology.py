@@ -291,9 +291,11 @@ def component_diagnostics(net: FaultNetwork, grid: Grid, short_km: float) -> pd.
     df["n_segments"] = df.n_segments.fillna(0).astype(int)
     df["length_km"] = df.length_km.fillna(0.0)
     df["mean_width_px"] = df.area_px / np.maximum(df.skeleton_px, 1)
+    # components without a traced segment have has_loop = NaN after the reindex (object dtype): nullable boolean
+    # first, so the fill is an explicit missing -> False without pandas' object-downcasting FutureWarning
+    df["has_loop"] = df.has_loop.astype("boolean").fillna(False).astype(bool)
     df["kind"] = np.select(
-        [df.mean_width_px > 4, df.length_km < short_km, df.n_segments > 1,
-         df.has_loop.fillna(False).astype(bool)],
+        [df.mean_width_px > 4, df.length_km < short_km, df.n_segments > 1, df.has_loop],
         ["blob", "fragment", "network", "loop"], "single_trace",
     )
     return df

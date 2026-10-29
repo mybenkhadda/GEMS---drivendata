@@ -63,32 +63,65 @@ class ExhaustiveEDA(FaultDiscoveryReset):
               "01_attach": "Frozen engine", "03_scenarios": "Validation units", "e11_forensics": "Model forensics",
               "e12_candidates": "Discovery candidates", "e13_dem": "DEM pilot", "e14_integrity": "Stage integrity",
               "e15_synthesis": "Scientific synthesis"}
+    # Output contract: every entry has a producer in the stage body (audit: docs/GEMS_EXHAUSTIVE_EDA_HANDOFF.md,
+    # "Stage contract audit"). Column tuples are the required schema; None = existence + readability only. Raster /
+    # array caches (.npz) that a LATER stage reads are part of the contract, so a reused stage always provides them.
     OUTPUTS = {
         "00_tests": [("audit/selftests.csv", ("test", "status")), ("audit/pytest_output.txt", None)],
         "e01_inventory": [("audit/raw_data_inventory.csv", ("file", "exists")),
                           ("audit/band_metadata.csv", ("band", "modality", "provenance_class")),
                           ("audit/previous_eda_audit.csv", ("finding_id", "classification"))],
-        "e02_landscape": [("datasets/physical_regions.parquet", ("domain",)), ("tables/band_characterization.csv", None)],
+        "e02_landscape": [("datasets/physical_regions.parquet", ("domain",)),
+                          ("rasters/spatial_domains/domains.npz", ("domain",)),
+                          ("tables/band_characterization.csv", ("band", "modality", "provenance_class", "units",
+                                                                "valid_frac_footprint", "p50", "robust_scale_mad",
+                                                                "local_regional_std_ratio", "limitations"))],
         "e03_geometry": [("datasets/fault_segments.parquet", ("seg_id", "length_km")),
-                         ("tables/fault_geometry.csv", None)],
+                         ("tables/fault_geometry.csv", ("seg_id", "system_id", "length_km", "strike_deg",
+                                                        "sinuosity", "n_junction_ends", "system_kind", "region",
+                                                        "x_mid_utm", "y_mid_utm"))],
         "e04_profiles": [("datasets/matched_controls.parquet", ("sample_id", "kind", "system")),
                          ("datasets/fault_profiles.parquet", ("sample_id", "signal", "abs_step")),
-                         ("datasets/station_structure.parquet", ("sample_id", "field"))],
+                         ("datasets/station_structure.parquet", ("sample_id", "field")),
+                         ("datasets/fault_profile_cube.npz", ("cube", "offsets", "signals"))],
         "e05_signatures": [("tables/matched_control_tests.csv", ("signal", "metric", "effect"))],
-        "e06_scales": [("tables/scale_localization.csv", ("modality", "scale_km"))],
+        "e06_scales": [("tables/scale_localization.csv", ("modality", "scale_km")),
+                       ("tables/scale_regional.csv", None),
+                       ("datasets/station_scale_values.parquet", ("sample_id", "modality", "scale_km")),
+                       ("rasters/evidence_maps/crests_1km.npz", ("shape",))],
         "e07_crossmodal": [("datasets/structural_lineaments.parquet", ("lineament_id", "status")),
-                           ("tables/crossmodal_complementarity.csv", None)],
-        "e08_label_bias": [("tables/label_selection_bias.csv", None)],
-        "e09_regional": [("tables/regional_robustness.csv", None)],
+                           ("rasters/evidence_maps/lineaments.npz", ("labels", "family_count")),
+                           ("tables/crossmodal_complementarity.csv", ("figure", "status"))],
+        "e08_label_bias": [("tables/label_selection_bias.csv", ("label", "effect", "ci_lo", "ci_hi"))],
+        "e09_regional": [("tables/regional_robustness.csv", ("held_out_region", "signal", "metric", "effect",
+                                                             "supported_same_direction"))],
         "03_scenarios": [("validation/scenarios.csv", ("scenario", "zone"))],
-        "e11_forensics": [("tables/model_failure_taxonomy.csv", None),
-                          ("datasets/model_error_cases.parquet", ("sample_id",))],
+        "e11_forensics": [("tables/model_failure_taxonomy.csv", ("side", "error_class", "n", "length_km")),
+                          ("datasets/model_error_cases.parquet", ("sample_id", "side", "error_class"))],
         "e12_candidates": [("atlas/candidate_catalog.parquet", ("candidate_id",)),
-                           ("atlas/atlas_index.csv", ("candidate_id",))],
+                           ("atlas/atlas_index.csv", ("candidate_id", "category", "review_split")),
+                           ("atlas/reviewed_annotations.csv", None)],
         "e13_dem": [("tables/dem_pilot.csv", None)],
         "e14_integrity": [("audit/stage_integrity.csv", ("stage", "actual_status"))],
         "e15_synthesis": [("tables/evidence_synthesis.csv", None), ("reports/MODELING_DECISION.md", None)],
     }
+    # bump a stage's schema version when its producer changes the content of its outputs: only that stage's cache
+    # (and, through the dependency chain at run time, nothing else) is invalidated
+    STAGE_SCHEMA = {"e01_inventory": "2", "e02_landscape": "2", "e03_geometry": "2", "e06_scales": "2",
+                    "e07_crossmodal": "2",
+                    "e08_label_bias": "2", "e09_regional": "2", "e11_forensics": "2", "e12_candidates": "2"}
+    # mandatory products written BEFORE the figures (core) and after them (post); "module:function"
+    CORE = {"e05_signatures": ("parts_cd:effects", None), "e06_scales": ("parts_cd:scale_data", None),
+            "e07_crossmodal": ("parts_efg:lin_data", "parts_efg:crossmodal_table"),
+            "e08_label_bias": ("parts_efg:label_bias_table", None), "e09_regional": ("parts_efg:lro_table", None),
+            "e11_forensics": ("parts_hi:failure_taxonomy", None), "e12_candidates": ("parts_hi:write_atlas", None)}
+    # session caches (E.D.cache keys) each stage's producers fill: dropped when the stage (re)computes, so a rerun
+    # after a config change never reuses the previous in-memory result
+    SESSION_CACHE = {"e05_signatures": ("effects",), "e06_scales": ("scale", "crests1", "persistence"),
+                     "e07_crossmodal": ("LIN", "LINLAB", "FAMCOUNT", "FAMST"), "e08_label_bias": ("LABELBIAS",),
+                     "e09_regional": ("LRO",), "e11_forensics": ("SEGERR", "FPERR", "OFFICIAL", "TAXONOMY"),
+                     "e12_candidates": ("ATLAS", "ATLAS_WRITTEN")}
+    ATLAS_STAGE = "e12_candidates"                     # read by gems_bench.reset.atlas.review_readiness
 
     def __init__(self, CONFIG: dict, head: str, factory=None):
         self.c = K.eda_config(CONFIG)
@@ -156,18 +189,91 @@ class ExhaustiveEDA(FaultDiscoveryReset):
                 "error": f"{len(bad)} of {len(funcs)} figures failed" if st == FAILED else None,
                 "note": f"{len(ok)}/{len(funcs)} figures; failures {[b['figure'] for b in bad]}"}
 
+    def stage_parts(self, name: str, parts: list) -> list:
+        """Cache-fingerprint parts: code version, mode / sampling / statistics / scales, the stage's OUTPUT CONTRACT
+        and schema version (a changed contract or producer invalidates exactly that stage), plus stage parts."""
+        return [EDA_CODE_REV.split("-")[0], self.c["mode"], self.c["sampling"], self.c["statistics"],
+                self.c["scales_used_km"], {"contract": self.OUTPUTS.get(name, []),
+                                           "schema": self.STAGE_SCHEMA.get(name, "1")}, *parts]
+
     def stage(self, name: str, parts: list, body) -> dict:
-        """Stage wrapper: CONFIG switch, current stage name for the registry, run_stage caching."""
+        """Stage wrapper: CONFIG switch, current stage name for the registry, session-cache reset, run_stage caching.
+        The status is decided by ``run_stage``: COMPLETE only when ``body`` succeeded AND every contracted output
+        exists and validates (``check_outputs``); figure counts never override a missing product."""
         sw = STAGE_SWITCH.get(name)
         if sw and not self.c["stages"].get(sw, True):
             return self.run_stage(name, ["disabled"], lambda: (SKIPPED_OK, {"reason": f"stages.{sw}=False"}))
 
         def fn():
             self.current_stage = name
+            for k in self.SESSION_CACHE.get(name, ()):
+                self.D.cache.pop(k, None)
             r = body()
             return r.pop("status", COMPLETE), r
-        return self.run_stage(name, [EDA_CODE_REV.split("-")[0], self.c["mode"], self.c["sampling"],
-                                     self.c["statistics"], self.c["scales_used_km"], *parts], fn)
+        return self.run_stage(name, self.stage_parts(name, parts), fn)
+
+    def check_outputs(self, specs) -> tuple[list[str], list[str]]:
+        """Base checks (exists, readable, required columns) + zero-byte files are invalid + ``.npz`` caches must load
+        and hold their required arrays. File existence alone never validates an output."""
+        ok, bad = super().check_outputs([(r, c) for r, c in specs if not r.endswith(".npz")])
+        for rel, keys in specs:
+            p = self.ws.path(rel)
+            if rel in ok and p.exists() and not p.stat().st_size:
+                ok.remove(rel)
+                bad.append(f"{rel}: empty file (0 bytes)")
+            if not rel.endswith(".npz"):
+                continue
+            if not p.exists() or not p.stat().st_size:
+                bad.append(f"{rel}: missing")
+                continue
+            try:
+                with np.load(p, allow_pickle=False) as z:
+                    miss = [k for k in (keys or ()) if k not in z.files]
+            except Exception as e:
+                bad.append(f"{rel}: unreadable ({type(e).__name__})")
+                continue
+            (bad.append(f"{rel}: arrays {miss} absent") if miss else ok.append(rel))
+        return ok, bad
+
+    def run_core(self, name: str, which: int) -> None:
+        """Run a stage's mandatory producer (0 = before the figures, 1 = after). Exceptions propagate: a failed
+        mandatory product FAILS the stage whatever the figures did."""
+        import importlib
+
+        ref = self.CORE.get(name, (None, None))[which]
+        if ref:
+            mod, fn = ref.split(":")
+            getattr(importlib.import_module(f"gems_eda.discovery.{mod}"), fn)(self)
+
+    def health(self, stages=None) -> pd.DataFrame:
+        """Low-overhead diagnostic: per stage, status of this session, manifest status, missing / invalid contracted
+        outputs, upstream stages that are not valid, root error, figure failures and a recovery hint."""
+        from gems_bench.geomoe.decide import PRODUCED, VALID
+
+        rows = []
+        for s in stages or self.STAGES:
+            m = self.manifest(s)
+            st = self.status.get(s, "NOT_RUN")
+            # a validly skipped stage (disabled switch / decision) has no contracted outputs to check
+            _, probs = ([], []) if st == SKIPPED_OK else self.check_outputs(self.OUTPUTS.get(s, []))
+            up = [f"{d}={self.status.get(d, 'NOT_RUN')}" for d in self.DEPENDS.get(s, ())
+                  if self.status.get(d) not in VALID]
+            ff = self.ws.read_json(f"manifests/figure_failures/{s}.json") or []
+            if st == SKIPPED_OK or (st in PRODUCED and not probs):
+                hint = ""
+            elif up:
+                hint = f"run / fix upstream first: {up}"
+            elif probs:
+                hint = f"re-run {s} (contracted outputs invalid)"
+            elif st == "NOT_RUN":
+                hint = f"not run in this session (last manifest: {m.get('status', 'none')})"
+            else:
+                hint = f"see manifests/stages/{s}.json and runtime_errors.json"
+            rows.append({"stage": s, "status": st, "manifest_status": m.get("status"),
+                         "missing_or_invalid": "; ".join(probs), "upstream_not_valid": "; ".join(up),
+                         "error": str(m.get("error") or "")[:300], "affected_file": m.get("affected_file"),
+                         "figure_failures": ";".join(f.get("figure", "") for f in ff), "recovery": hint})
+        return pd.DataFrame(rows)
 
     # =========================================================================== stages
     def s00_tests(self) -> dict:
@@ -210,13 +316,23 @@ class ExhaustiveEDA(FaultDiscoveryReset):
             self.ws.save_table(pd.DataFrame(dep), "audit/source_dependencies.csv")
             self.ws.save_json({"commit": self.head, "code_rev": EDA_CODE_REV, "config": self.c,
                                "inputs": F.to_dict("records")}, "audit/experiment_provenance.json")
-            bad = [c for c in ("check_epsg", "check_res", "check_shape") if c in F and not F[c].fillna(True).all()]
-            return {"note": f"files {list(F.file)}; recorded-property mismatches {bad or 'none'}",
-                    "mismatches": bad}
+            bad = [c for c in ("check_epsg", "check_res", "check_shape", "check_bands")
+                   if c in F and not F[c].astype("boolean").fillna(True).all()]
+            detail = {r.file: r.shape_detail for r in F.itertuples() if isinstance(getattr(r, "shape_detail", None),
+                                                                               str)}
+            off = list(F.file[~F["check_same_grid_as_features"].astype("boolean").fillna(True)]) \
+                if "check_same_grid_as_features" in F else []
+            if off:                                      # labels / template off the feature grid would be resampled
+                return {"status": FAILED, "error": f"rasters not on the features grid: {off} ({detail})",
+                        "affected_file": "audit/raw_data_inventory.csv", "mismatches": bad}
+            return {"note": f"files {list(F.file)}; recorded-property mismatches {bad or 'none'}; grids {detail}",
+                    "mismatches": bad, "shape_detail": detail}
         return self.stage("e01_inventory", [], body)
 
     def s_landscape(self):
         from . import parts_ab as AB
+
+        from . import products as PR
 
         def body():
             D = self.D
@@ -224,16 +340,24 @@ class ExhaustiveEDA(FaultDiscoveryReset):
             self.save_npz("rasters/spatial_domains/domains.npz", domain=dom)
             self.save_parquet(B, "datasets/physical_regions.parquet")
             D.cache["domains"] = dom
-            return self.run_figures(AB.PART_A)
+            T = PR.write_band_characterization(self, PR.band_characterization(self))   # core, before any figure
+            r = self.run_figures(AB.PART_A)
+            T = PR.write_band_characterization(self, PR.enrich_band_characterization(self, T))  # + F005-F008 data
+            r["note"] += f"; band_characterization {len(T)} bands ({T.measured_in.iloc[0] if len(T) else ''})"
+            return r
         return self.stage("e02_landscape", [], body)
 
     def s_geometry(self):
         from . import parts_ab as AB
+        from . import products as PR
 
         def body():
             seg = self.D.net.segments
             self.save_parquet(seg, "datasets/fault_segments.parquet")
-            return self.run_figures(AB.PART_B)
+            T = PR.write_fault_geometry(self, PR.fault_geometry(self))                     # core, before any figure
+            r = self.run_figures(AB.PART_B)
+            r["note"] += f"; fault_geometry {len(T)} branches on {T.system_id.nunique()} systems"
+            return r
         return self.stage("e03_geometry", [], body)
 
     def s_profiles(self):
@@ -284,7 +408,10 @@ class ExhaustiveEDA(FaultDiscoveryReset):
             m = importlib.import_module(f"gems_eda.discovery.{module}")
             if extra:
                 extra()
-            return self.run_figures(getattr(m, attr))
+            self.run_core(name, 0)                       # mandatory products first: never coupled to a figure
+            r = self.run_figures(getattr(m, attr))
+            self.run_core(name, 1)
+            return r
         return self.stage(name, [], body)
 
     def s_forensics(self):

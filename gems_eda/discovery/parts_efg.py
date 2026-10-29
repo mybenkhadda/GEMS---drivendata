@@ -429,14 +429,27 @@ def f058(E):
                              ("mapped", "unmapped lineaments")))
 
 
-def f059(E):
+CROSSMODAL_TESTS = ("F048", "F049", "F050", "F051", "F052", "F055", "F058")
+CROSSMODAL_COLUMNS = ("figure", "title", "status", "effect", "ci_lo", "ci_hi", "summary")
+
+
+def crossmodal_table(E) -> pd.DataFrame:
+    """Stage e07 product (written after the figures, independent of F059 rendering): one row per cross-modal test,
+    NOT_RUN when its interpretation record does not exist (a failed figure is visible, never silently dropped)."""
     rows = []
-    for fid in ("F048", "F049", "F050", "F051", "F052", "F055", "F058"):
+    for fid in CROSSMODAL_TESTS:
         j = E.ws.read_json(f"figures/interpretations/{fid}.json") or {}
         m = j.get("measured", {})
-        rows.append({"figure": fid, "title": j.get("title"), "status": m.get("status"), "effect": m.get("effect"),
-                     "ci_lo": m.get("ci_lo"), "ci_hi": m.get("ci_hi"), "summary": j.get("interpretation", "")[:200]})
-    R = pd.DataFrame(rows)
+        rows.append({"figure": fid, "title": j.get("title"), "status": m.get("status", "NOT_RUN"),
+                     "effect": m.get("effect"), "ci_lo": m.get("ci_lo"), "ci_hi": m.get("ci_hi"),
+                     "summary": j.get("interpretation", "")[:200]})
+    R = pd.DataFrame(rows, columns=list(CROSSMODAL_COLUMNS))
+    E.ws.save_table(R, "tables/crossmodal_complementarity.csv")
+    return R
+
+
+def f059(E):
+    R = crossmodal_table(E)
     s = sp("F059", "crossmodal_synthesis", "Cross-modal synthesis", "E", "Which complementary families are most "
            "promising?", "Results of F048-F058 side by side", "Synthesis without forcing a weighted fusion score",
            "Status and effect per test", {DESCRIPTIVE: "Synthesis table."}, {DESCRIPTIVE: "Feeds the hypothesis "
@@ -452,7 +465,6 @@ def f059(E):
                   loc="center")
     tb.auto_set_font_size(False)
     tb.set_fontsize(7)
-    E.ws.save_table(R, "tables/crossmodal_complementarity.csv")
     E.reg.save(s, fig, R, Result(DESCRIPTIVE, f"statuses {R.status.value_counts().to_dict()}", {}, len(R)))
 
 
@@ -494,8 +506,26 @@ def f060(E):
                                               f"{R.mapped_to_lineament.max():.2f}; rho {rho:.2f}", {}, len(R)))
 
 
-def f061(E):
+LABEL_BIAS_COLUMNS = ("label", "effect", "ci_lo", "ci_hi", "n_groups", "n_fault", "n_control")
+
+
+def label_bias_table(E) -> pd.DataFrame:
+    """Stage e08 product: mapped vs unmapped label-free lineaments per attribute (Cliff's delta, cluster bootstrap over
+    regions; n_fault / n_control = mapped / unmapped lineaments)."""
+    if "LABELBIAS" in E.D.cache:
+        return E.D.cache["LABELBIAS"]
     L, *_ = lin_data(E)
+    a, b = L[L.status == "mapped"], L[L.status == "unmapped"]
+    cols = [c for c in ("length_km", "linearity", "n_families", "mean_rtp_grad_z", "mean_iso_grav_anom_grad_z")
+            if c in L]
+    rows = [{"label": c, **cluster_effect(a[c], a.region, b[c], b.region, E.n_boot, E.seed)} for c in cols]
+    R = pd.DataFrame(rows).reindex(columns=list(LABEL_BIAS_COLUMNS))
+    E.ws.save_table(R, "tables/label_selection_bias.csv")
+    E.D.cache["LABELBIAS"] = R
+    return R
+
+
+def f061(E):
     s = sp("F061", "mapped_vs_unmapped_lineaments", "Mapped vs unmapped lineament characteristics", "F", "Do "
            "unmapped proposals occupy a different evidence distribution?", "Length, linearity, families, gradient "
            "strength: mapped vs unmapped lineaments", "A different distribution tells what kind of structures the "
@@ -503,17 +533,14 @@ def f061(E):
            {SUPPORTED: "Unmapped lineaments differ (see the largest attribute): the label set is selective.",
             "NOT_SUPPORTED": "Indistinguishable: unmapped lineaments look like mapped ones.",
             INCONCLUSIVE: "Undecided."}, "Unmapped proposals are not confirmed faults.", 1)
-    a, b = L[L.status == "mapped"], L[L.status == "unmapped"]
-    cols = [c for c in ("length_km", "linearity", "n_families", "mean_rtp_grad_z", "mean_iso_grav_anom_grad_z")
-            if c in L]
-    rows = [{"label": c, **cluster_effect(a[c], a.region, b[c], b.region, E.n_boot, E.seed)} for c in cols]
-    R = pd.DataFrame(rows)
+    R = label_bias_table(E)
+    if not len(R) or R.effect.notna().sum() == 0:
+        return E.reg.skip(s, "no mapped / unmapped lineament attribute measurable")
     fig, ax = V.grid(1, 1, 7, 3)
     V.effect_bars(ax[0], R, title="mapped (positive) vs unmapped", min_effect=E.min_effect)
-    best = R.iloc[R.effect.abs().argmax()].to_dict()
+    best = R.loc[R.effect.abs().idxmax()].to_dict()
     E.reg.save(s, fig, R, effect_result(best, E.min_effect, None, f"largest: {best['label']}:", "regions",
                                         ("mapped", "unmapped lineaments")))
-    E.ws.save_table(R, "tables/label_selection_bias.csv")
 
 
 def f062(E):
@@ -923,16 +950,17 @@ def f076(E):
                                  "insufficient", {}, len(P)))
 
 
-def f077(E):
+LRO_COLUMNS = ("held_out_region", "signal", "metric", "dev_effect", "effect", "ci_lo", "ci_hi", "n_groups", "n_fault",
+               "n_control", "supported_same_direction")
+
+
+def lro_table(E) -> pd.DataFrame:
+    """Stage e09 product: for each region, the (signal, metric) with the largest |delta| on the OTHER regions, tested
+    on the held-out region (cluster bootstrap over fault systems). Zero rows (no region with min_region_stations) is
+    a valid, explicitly typed empty result: the header is always written."""
+    if "LRO" in E.D.cache:
+        return E.D.cache["LRO"]
     S, M, *_ = E.stations_data()
-    s = sp("F077", "leave_region_out", "Leave-region-out robustness of the best signature", "G", "Does the most "
-           "promising signature persist in regions not used to select it?", "For each region: choose the "
-           "(signal, metric) with the largest |delta| on the OTHER regions; test it on the held-out region",
-           "Avoids circular selection-and-validation on the same data", "Held-out delta with cluster CI; share of "
-           "regions where it is supported in the selected direction", TEST_OUT,
-           {SUPPORTED: "The selected signature transfers to held-out regions.", "NOT_SUPPORTED": "It does not "
-                                                                                                 "transfer.",
-            INCONCLUSIVE: "Mixed transfer."}, "Selection among the profile metrics only.", 1)
     rows = []
     mets = ("abs_step", "abs_peak", "local_contrast")
     for k in sorted(S.region.unique()):
@@ -953,7 +981,22 @@ def f077(E):
         sup = (e["ci_lo"] > E.min_effect) if bv > 0 else (e["ci_hi"] < -E.min_effect)
         rows.append({"held_out_region": int(k), "signal": best[0], "metric": best[1], "dev_effect": bv, **e,
                      "supported_same_direction": bool(sup)})
-    R = pd.DataFrame(rows)
+    R = pd.DataFrame(rows, columns=list(LRO_COLUMNS))
+    E.ws.save_table(R, "tables/regional_robustness.csv")
+    E.D.cache["LRO"] = R
+    return R
+
+
+def f077(E):
+    s = sp("F077", "leave_region_out", "Leave-region-out robustness of the best signature", "G", "Does the most "
+           "promising signature persist in regions not used to select it?", "For each region: choose the "
+           "(signal, metric) with the largest |delta| on the OTHER regions; test it on the held-out region",
+           "Avoids circular selection-and-validation on the same data", "Held-out delta with cluster CI; share of "
+           "regions where it is supported in the selected direction", TEST_OUT,
+           {SUPPORTED: "The selected signature transfers to held-out regions.", "NOT_SUPPORTED": "It does not "
+                                                                                                 "transfer.",
+            INCONCLUSIVE: "Mixed transfer."}, "Selection among the profile metrics only.", 1)
+    R = lro_table(E)
     if not len(R):
         return E.reg.skip(s, "no region with enough stations")
     fig, ax = V.grid(1, 1, 7, 3.5)
@@ -961,7 +1004,6 @@ def f077(E):
                   title="held-out region effect of the signature selected elsewhere", min_effect=E.min_effect)
     share = float(R.supported_same_direction.mean())
     st = SUPPORTED if share >= 2 / 3 else ("NOT_SUPPORTED" if share <= 1 / 3 else INCONCLUSIVE)
-    E.ws.save_table(R, "tables/regional_robustness.csv")
     E.reg.save(s, fig, R, Result(st, f"selected signature supported in {share:.0%} of {len(R)} held-out regions",
                                  {"share": share}, len(R)))
 

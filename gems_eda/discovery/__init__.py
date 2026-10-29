@@ -9,4 +9,4 @@ B0 / B1 / W2 predictions, a reviewable discovery-candidate atlas and an evidence
 carries an interpretation record computed from its own statistics.
 """
 EDA_VERSION = "gde.1"
-EDA_CODE_REV = "gde.1-r1"
+EDA_CODE_REV = "gde.1-r2"   # r2: e02 / e03 mandatory products, contract audit, safe review widget, grid-shape fix

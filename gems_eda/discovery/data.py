@@ -31,7 +31,9 @@ LOCAL = ("magnetic", "gravity", "terrain", "basement", "conductivity")       # c
 PROFILE_SIGNALS = {"magnetic": ("rtp", "tmi_hg"), "gravity": ("iso_grav_anom", "iso_grav_anom_hg"),
                    "terrain": ("det_elev", "det_elev_slope"), "basement": ("depth_to_base_surf",),
                    "conductivity": ("cond_surf",), "strain": ("geod_shearrate",), "seismicity": ("ieq_n100a15",)}
-RECORDED = {"epsg": 32611, "res_m": 100.0, "width": 3730, "height": 3292, "bands": 19, "valid_frac": 0.42,
+# Recorded grid (outputs/benchmark/tables/native_grid_summary.csv): height (rows) 3730, width (cols) 3292. gde.1-r1 had
+# width / height swapped, which made check_shape fail on every file although the rasters were coherent.
+RECORDED = {"epsg": 32611, "res_m": 100.0, "height": 3730, "width": 3292, "bands": 19, "valid_frac": 0.42,
             "fault_px": 60988}
 
 
@@ -97,7 +99,8 @@ def raster_inventory(root) -> tuple[pd.DataFrame, pd.DataFrame]:
     from gems_eda.config import RAW_FILES, band_modality, resolve_raw
 
     files, bands = [], []
-    for key in RAW_FILES:
+    ref = None                                           # (rows, cols, transform, epsg) of the features raster
+    for key in RAW_FILES:                                # features first (gems_eda.config order)
         p = resolve_raw(root, key)
         if not p.exists():
             files.append({"file": key, "path": str(p), "exists": False})
@@ -106,9 +109,16 @@ def raster_inventory(root) -> tuple[pd.DataFrame, pd.DataFrame]:
             epsg = src.crs.to_epsg() if src.crs else None
             row = {"file": key, "path": str(p), "exists": True, "epsg": epsg, "res_x": src.res[0], "res_y": src.res[1],
                    "width": src.width, "height": src.height, "count": src.count, "dtype": src.dtypes[0],
-                   "nodata": src.nodata, "bounds": str(tuple(src.bounds)), "size_mb": p.stat().st_size / 2 ** 20}
+                   "nodata": src.nodata, "bounds": str(tuple(src.bounds)), "size_mb": p.stat().st_size / 2 ** 20,
+                   "transform": str(tuple(src.transform)[:6])}
             row.update(check_epsg=epsg == RECORDED["epsg"], check_res=abs(src.res[0] - RECORDED["res_m"]) < 1e-6,
-                       check_shape=(src.width, src.height) == (RECORDED["width"], RECORDED["height"]))
+                       check_shape=(src.height, src.width) == (RECORDED["height"], RECORDED["width"]),
+                       shape_detail=f"(rows, cols) = ({src.height}, {src.width}); recorded ({RECORDED['height']}, "
+                                    f"{RECORDED['width']})")
+            if key == "features":
+                ref = (src.height, src.width, tuple(src.transform)[:6], epsg)
+            elif ref is not None:                        # every other raster must sit on the features grid
+                row["check_same_grid_as_features"] = (src.height, src.width, tuple(src.transform)[:6], epsg) == ref
             if key == "features":
                 row["check_bands"] = src.count == RECORDED["bands"]
                 for i in range(1, src.count + 1):

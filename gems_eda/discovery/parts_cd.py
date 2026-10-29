@@ -525,6 +525,8 @@ def scale_data(E) -> pd.DataFrame:
             if abs(sc - 1.0) < 1e-9:
                 crests1[mod] = cr
             del g
+        if mod not in crests1:                           # part E needs 1 km crests whatever the mode's scale list
+            crests1[mod] = crest_mask(D, D.enh.thdr(D.band(b), 1.0), 1.0)
     T = pd.DataFrame(rows)
     E.ws.save_table(T, "tables/scale_localization.csv")
     E.ws.save_table(pd.DataFrame(reg), "tables/scale_regional.csv")

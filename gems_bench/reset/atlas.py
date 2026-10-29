@@ -157,6 +157,13 @@ def validate_review(r: dict, known_ids) -> list[str]:
     return bad
 
 
+def review_keys(existing: pd.DataFrame, cols: list[str]) -> list[tuple]:
+    """Dedupe keys of stored reviews: missing field -> "" and every value as its string form. Object dtype first, so
+    filling "" into float / bool columns (a reloaded CSV) never triggers pandas' incompatible-dtype FutureWarning."""
+    X = existing.reindex(columns=cols).astype(object)
+    return list(X.where(X.notna(), "").astype(str).apply(tuple, axis=1))
+
+
 def append_reviews(existing: pd.DataFrame, new: list[dict], catalog: pd.DataFrame, hard_negative=()) -> tuple[
         pd.DataFrame, list[str]]:
     """Append validated review events (never edits or drops an earlier row); identical repeats are skipped."""
@@ -164,7 +171,7 @@ def append_reviews(existing: pd.DataFrame, new: list[dict], catalog: pd.DataFram
     cat = catalog.set_index("candidate_id")
     rows, errs = [], []
     cols = [k for k in REVIEW_FIELDS if k not in ("review_id", "review_date")]
-    seen = set(existing.reindex(columns=cols).fillna("").astype(str).apply(tuple, axis=1)) if len(existing) else set()
+    seen = set(review_keys(existing, cols)) if len(existing) else set()
     for r in new:
         r = {k: ("" if isinstance(v, float) and np.isnan(v) else v) for k, v in r.items()}   # template NaNs
         r = {k: r.get(k, "") for k in REVIEW_FIELDS if k not in ("review_id", "review_date", "label_class",
@@ -483,15 +490,62 @@ def overview_html(C: pd.DataFrame, P: pd.DataFrame, reviews: pd.DataFrame) -> st
     return head + "".join(rows) + "</table></body></html>"
 
 
+ATLAS_INDEX = "atlas/atlas_index.csv"
+ATLAS_REQUIRED = ("candidate_id", "review_split")
+ATLAS_READY_STATUSES = ("COMPLETE", "REUSED_VALID_CACHE")       # geomoe.decide.PRODUCED
+
+
+def review_readiness(R) -> dict:
+    """Whether the atlas of THIS run can be reviewed: the atlas stage of this run is COMPLETE / REUSED (a stale atlas
+    left by an earlier run is never presented as current), the index exists, is readable, has the required columns
+    and >= 1 candidate, and the candidate's EVIDENCE_ONLY panel exists. Returns {ready, reason, stage, status,
+    candidates (DataFrame of reviewable rows), missing_panels}."""
+    stage = getattr(R, "ATLAS_STAGE", "04_atlas")
+    st = (getattr(R, "status", None) or {}).get(stage, "NOT_RUN")
+    out = {"ready": False, "stage": stage, "status": st, "candidates": pd.DataFrame(), "missing_panels": []}
+    if st not in ATLAS_READY_STATUSES:
+        return {**out, "reason": f"atlas stage {stage} is {st} in this run (needs one of {ATLAS_READY_STATUSES}); "
+                                 f"run it first (or fix its upstream stages)"}
+    p = R.ws.path(ATLAS_INDEX)
+    if not p.exists() or not p.stat().st_size:
+        return {**out, "reason": f"{ATLAS_INDEX} is absent or empty although {stage} is {st}: re-run {stage}"}
+    try:
+        C = pd.read_csv(p)
+    except Exception as e:                               # corrupted / truncated index
+        return {**out, "reason": f"{ATLAS_INDEX} unreadable ({type(e).__name__}: {e}): re-run {stage}"}
+    miss = [c for c in ATLAS_REQUIRED if c not in C.columns]
+    if miss:
+        return {**out, "reason": f"{ATLAS_INDEX} lacks required columns {miss}: re-run {stage}"}
+    C = C[C.candidate_id.notna()]
+    if not len(C):
+        return {**out, "reason": f"{ATLAS_INDEX} has no candidate (nothing to review)"}
+    has = [R.ws.path(f"atlas/panels/{c}_evidence_only.png").exists() for c in C.candidate_id]
+    gone = [c for c, h in zip(C.candidate_id, has) if not h]
+    C = C[has]
+    if not len(C):
+        return {**out, "missing_panels": gone, "reason": f"no EVIDENCE_ONLY panel found for any of the {len(gone)} "
+                                                         f"candidates: re-run {stage}"}
+    return {**out, "ready": True, "candidates": C.reset_index(drop=True), "missing_panels": gone,
+            "reason": f"{len(C)} candidates reviewable" + (f"; {len(gone)} without panels skipped" if gone else "")}
+
+
 def review_widget(R):
-    """ipywidgets form (Colab): pick a candidate, view its EVIDENCE_ONLY panel, record a review (append-only)."""
+    """ipywidgets form (Colab): pick a candidate, view its EVIDENCE_ONLY panel, record a review (append-only).
+    Returns None (with the reason printed) when the atlas of this run is not reviewable (``review_readiness``)."""
+    rd = review_readiness(R)
+    if not rd["ready"]:
+        print(f"review unavailable: {rd['reason']}")
+        return None
     try:
         import ipywidgets as wd
         from IPython.display import Image, clear_output, display
     except ImportError:
-        print("ipywidgets unavailable: fill atlas/annotation_template.csv and run R.import_reviews(path)")
+        print("ipywidgets unavailable: fill the atlas annotation / review template and run R.import_reviews(path)")
         return None
-    C = R.ws.load_table("atlas/atlas_index.csv")
+    C = rd["candidates"]
+    if rd["missing_panels"]:
+        print(f"note: {len(rd['missing_panels'])} candidates have no EVIDENCE_ONLY panel and are not offered: "
+              f"{rd['missing_panels'][:5]}")
     pick = wd.Dropdown(options=list(C.candidate_id), description="candidate")
     mode = wd.ToggleButtons(options=list(REVIEW_MODES), description="mode")
     interp = wd.Dropdown(options=list(INTERPRETATIONS), value="NOT_REVIEWED", description="interpretation")

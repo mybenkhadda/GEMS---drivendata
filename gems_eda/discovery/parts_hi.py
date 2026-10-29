@@ -429,7 +429,12 @@ def f089(E):
     E.reg.save(s, fig, P, Result(DESCRIPTIVE, f"{len(P)} examples", {}, len(P)))
 
 
-def f090(E):
+TAXONOMY_COLUMNS = ("side", "error_class", "n", "length_km", "median_family_count", "median_w2_rank")
+
+
+def failure_taxonomy(E) -> pd.DataFrame:
+    """Stage e11 product (independent of figure rendering): class counts / length / evidence on both sides of the
+    metric -> tables/model_failure_taxonomy.csv, and every case -> datasets/model_error_cases.parquet."""
     S, F = segment_errors(E), fp_components(E)
     rows = [{"side": "mapped_branch", "error_class": c, "n": int((S.error_class == c).sum()),
              "length_km": float(S.length_km[S.error_class == c].sum()),
@@ -439,7 +444,21 @@ def f090(E):
               "length_km": float(F.length_km[F.error_class == c].sum()) if len(F) else 0.0,
               "median_family_count": float(F.family_count_mean[F.error_class == c].median()) if len(F) else np.nan,
               "median_w2_rank": np.nan} for c in FP_CLASSES]
-    T = pd.DataFrame(rows)
+    T = pd.DataFrame(rows, columns=list(TAXONOMY_COLUMNS))
+    E.ws.save_table(T, "tables/model_failure_taxonomy.csv")
+    cases = pd.concat([S.assign(side="mapped_branch"), F.assign(side="prediction")], ignore_index=True)
+    for c in ("sample_id", "side", "error_class"):          # typed even when both sides are empty
+        if c not in cases:
+            cases[c] = pd.Series(dtype=str)
+    E.save_parquet(cases, "datasets/model_error_cases.parquet")
+    E.D.cache["TAXONOMY"] = (T, cases)
+    return T
+
+
+def f090(E):
+    if "TAXONOMY" not in E.D.cache:
+        failure_taxonomy(E)
+    T, cases = E.D.cache["TAXONOMY"]
     s = sp("F090", "failure_taxonomy", "Frozen-W2 failure taxonomy", "H", "Synthesis of the model forensics",
            "Counts, length and evidence per error class on both sides of the metric", "One table for the modeling "
            "decision", "Table", {DESCRIPTIVE: "Taxonomy table."}, {DESCRIPTIVE: "MODELING_DECISION Q3 / Q4."},
@@ -450,9 +469,6 @@ def f090(E):
     tb = ax.table(cellText=T.round(3).astype(str).values, colLabels=T.columns, loc="center")
     tb.auto_set_font_size(False)
     tb.set_fontsize(7)
-    E.ws.save_table(T, "tables/model_failure_taxonomy.csv")
-    cases = pd.concat([S.assign(side="mapped_branch"), F.assign(side="prediction")], ignore_index=True)
-    E.save_parquet(cases, "datasets/model_error_cases.parquet")
     E.reg.save(s, fig, T, Result(DESCRIPTIVE, "; ".join(f"{r.error_class} {r.length_km:.0f} km" for r in
                                                        T.itertuples()), {}, len(cases)))
 
@@ -652,20 +668,26 @@ def f091(E):
                                    f"{meta['categories_unavailable'] or 'none'}", meta, len(C)))
 
 
-def f092(E):
-    """Write the review atlas: catalog, index, geometries, panels, template, html. Reviews are never overwritten."""
+def write_atlas(E) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Stage e12 product (independent of the F092 summary plot): panels, geometry cache, catalog, index, gpkg, review
+    template, html. ``atlas/reviewed_annotations.csv`` is created once and never overwritten; the catalog of every run
+    is also kept under ``atlas/catalog_history/<stage fingerprint>.parquet`` so earlier reviews stay traceable."""
     from gems_bench.artifacts.atomic import atomic_save
     from gems_bench.reset import atlas as AT
 
+    if "ATLAS_WRITTEN" in E.D.cache:
+        return E.D.cache["ATLAS_WRITTEN"]
     C, geom, meta = build_atlas(E)
-    s = sp("F092", "review_panels", "Evidence-only and diagnostic review panels", "I", "Can a reviewer judge each "
-           "candidate from evidence alone first?", "2 x 3 panels per candidate: EVIDENCE_ONLY (no mapped faults or "
-           "model output), DIAGNOSTIC (mapped faults, frozen W2, B0 / B1 ranks)", "Blind review avoids confirming the "
-           "labels", "Panels written", {DESCRIPTIVE: "Atlas written."},
-           {DESCRIPTIVE: "Review EVIDENCE_ONLY first; record with E.record_review or the widget."},
-           "Panels show 12 km windows at native resolution.", 2)
-    if not len(C):
-        return E.reg.skip(s, "no candidate")
+    if not E.ws.path("atlas/reviewed_annotations.csv").exists():          # never overwritten
+        E.ws.save_table(pd.DataFrame(columns=list(AT.REVIEW_FIELDS)), "atlas/reviewed_annotations.csv")
+    if not len(C):                                       # valid empty result: typed header, nothing to review
+        cols = list(dict.fromkeys([*AT.CATALOG_FIELDS, "supporting_families", "n_supporting_families",
+                                   "mean_family_count", "geometry_wkt"]))
+        E.ws.save_table(pd.DataFrame(columns=cols), "atlas/atlas_index.csv")
+        E.save_parquet(pd.DataFrame(columns=cols), "atlas/candidate_catalog.parquet")
+        P = pd.DataFrame(columns=["candidate_id", "panel_evidence_only", "panel_diagnostic"])
+        E.D.cache["ATLAS_WRITTEN"] = (C, P)
+        return C, P
     p = V.plt()
     P = []
     for row in C.itertuples():
@@ -687,15 +709,29 @@ def f092(E):
                cc=np.concatenate([geom[i][1] for i in ids]).astype(np.int32))
     E._geom = None
     E.save_parquet(C, "atlas/candidate_catalog.parquet")
+    E.save_parquet(C, f"atlas/catalog_history/{(E.fps.get('e12_candidates') or 'unknown')[:12]}.parquet")
     E.ws.save_table(C, "atlas/atlas_index.csv")
     gpkg(E, C)
     tpl = C[[c for c in AT.CATALOG_FIELDS if c in C]].copy()
     for k in ("reviewer", "review_mode", "evidence_sources", "data_license"):
         tpl[k] = ""
     E.ws.save_table(tpl, "atlas/review_template.csv")
-    if not E.ws.path("atlas/reviewed_annotations.csv").exists():          # never overwritten
-        E.ws.save_table(pd.DataFrame(columns=list(AT.REVIEW_FIELDS)), "atlas/reviewed_annotations.csv")
     E.ws.save_text(AT.overview_html(C, P, E.load_reviews()), "atlas/atlas_index.html")
+    E.D.cache["ATLAS_WRITTEN"] = (C, P)
+    return C, P
+
+
+def f092(E):
+    """Summary of the written review atlas (the atlas itself is the e12 core product, ``write_atlas``)."""
+    C, P = write_atlas(E)
+    s = sp("F092", "review_panels", "Evidence-only and diagnostic review panels", "I", "Can a reviewer judge each "
+           "candidate from evidence alone first?", "2 x 3 panels per candidate: EVIDENCE_ONLY (no mapped faults or "
+           "model output), DIAGNOSTIC (mapped faults, frozen W2, B0 / B1 ranks)", "Blind review avoids confirming the "
+           "labels", "Panels written", {DESCRIPTIVE: "Atlas written."},
+           {DESCRIPTIVE: "Review EVIDENCE_ONLY first; record with E.record_review or the widget."},
+           "Panels show 12 km windows at native resolution.", 2)
+    if not len(C):
+        return E.reg.skip(s, "no candidate")
     fig, ax = V.grid(1, 1, 7, 3.5)
     cnt = C.category.value_counts()
     ax[0].barh(cnt.index, cnt.values, color="0.4")
