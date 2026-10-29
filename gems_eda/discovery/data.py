@@ -37,6 +37,11 @@ RECORDED = {"epsg": 32611, "res_m": 100.0, "height": 3730, "width": 3292, "bands
             "fault_px": 60988}
 
 
+class InsufficientData(ValueError):
+    """The data cannot support the measurement (e.g. no station, no control pixel): a FAILED stage with this reason,
+    never a fabricated sample or a silent empty table."""
+
+
 @dataclass
 class EDAData:
     stack: object
@@ -221,6 +226,9 @@ def fault_stations(D: EDAData, c: dict, rng) -> pd.DataFrame:
     half_px = int(np.ceil(sc["profile_half_width_km"] / D.grid.pixel_km))
     st = sample_fault_stations(D.net, D.grid, D.valid, float(sc["along_strike_spacing_m"]) / 1000.0, 1.0, 0.5,
                                half_px + 2, D.region_grid, rng, int(c["max_fault_stations"]))
+    if not len(st):                                      # scientific insufficiency: report, never fabricate
+        raise InsufficientData(f"no fault station: no mapped branch >= 0.5 km with a footprint pixel >= {half_px + 2} "
+                               "px from the grid edge (profile_half_width_km too large for the mapped network?)")
     seg = D.net.segments.set_index("seg_id")
     st["system"] = D.net.components[st.r, st.c].astype(int)
     st["seg_length_km"] = st.seg_id.map(seg.length_km)
@@ -252,7 +260,7 @@ def matched_controls(D: EDAData, st: pd.DataFrame, strata: np.ndarray, k: int, d
     ok[:edge_px], ok[-edge_px:], ok[:, :edge_px], ok[:, -edge_px:] = False, False, False, False
     rr, cc = np.nonzero(ok)
     if not len(rr):
-        raise ValueError(f"no control pixels between {dmin} and {dmax} km from mapped faults")
+        raise InsufficientData(f"no control pixels between {dmin} and {dmax} km from mapped faults")
     key = D.region(rr, cc).astype(np.int64) * 100 + strata[rr, cc]
     reg = D.region(rr, cc)
     by_key = pd.Series(np.arange(len(rr))).groupby(key).apply(lambda s: s.to_numpy()).to_dict()
@@ -314,11 +322,26 @@ def offsets(half_km: float, step_km: float = 0.1) -> np.ndarray:
 
 
 def station_metrics(cube: np.ndarray, S: pd.DataFrame, sigs: list[str], off: np.ndarray, core_km: float = 0.5,
-                    loc_km: float = 5.0) -> pd.DataFrame:
+                    loc_km: float = 5.0, chunk: int = 4000) -> pd.DataFrame:
     """Per (station, signal): |step| and |peak| (core vs flanks), gradient-peak offset (argmax |d/dx| within
-    +-loc_km), flank asymmetry, local contrast (centre vs profile median, in profile IQR units)."""
+    +-loc_km), flank asymmetry, local contrast (centre vs profile median, in profile IQR units).
+
+    Processed in station chunks (results identical: every metric is per station): the gradient and its temporaries
+    of a 30 k x 12 x 201 cube would otherwise peak at several GB."""
+    if len(S) != cube.shape[0] or len(sigs) != cube.shape[1] or len(off) != cube.shape[2]:
+        raise ValueError(f"profile cube {cube.shape} inconsistent with {len(S)} stations x {len(sigs)} signals x "
+                         f"{len(off)} offsets")
+    if len(S) > chunk:
+        return pd.concat([_station_metrics(cube[i:i + chunk], S.iloc[i:i + chunk], sigs, off, core_km, loc_km)
+                          for i in range(0, len(S), chunk)], ignore_index=True)
+    return _station_metrics(cube, S, sigs, off, core_km, loc_km)
+
+
+def _station_metrics(cube, S, sigs, off, core_km, loc_km) -> pd.DataFrame:
     import warnings
 
+    cube = np.asarray(cube, np.float32)
+    off = np.asarray(off, np.float32)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         core, lft, rgt = np.abs(off) <= core_km, off < -core_km, off > core_km
@@ -454,12 +477,37 @@ def scale_row(D: EDAData, S: pd.DataFrame, mod: str, scale: float, g: np.ndarray
             "_det": det, "_loc": loc}
 
 
+def validate_profiles(S: pd.DataFrame, M: pd.DataFrame, ST: pd.DataFrame, cube: np.ndarray, sigs: list[str],
+                      off: np.ndarray, n_fields: int) -> dict:
+    """Consistency of the e04 products before anything is written. Raises InsufficientData (no fault or no control
+    station) or ValueError (an inconsistent product); returns counts for the stage note."""
+    if not S.sample_id.is_unique:
+        raise ValueError(f"duplicate sample_id in stations: {S.sample_id[S.sample_id.duplicated()].head(5).tolist()}")
+    nf, nc = int((S.kind == "fault").sum()), int((S.kind == "control").sum())
+    if not nf or not nc:
+        raise InsufficientData(f"{nf} fault and {nc} control stations: no comparison possible")
+    if cube.shape != (len(S), len(sigs), len(off)):
+        raise ValueError(f"profile cube {cube.shape} != ({len(S)}, {len(sigs)}, {len(off)})")
+    if len(M) != len(S) * len(sigs):
+        raise ValueError(f"fault_profiles rows {len(M)} != stations x signals {len(S) * len(sigs)}")
+    if len(ST) != len(S) * n_fields:
+        raise ValueError(f"station_structure rows {len(ST)} != stations x fields {len(S) * n_fields}")
+    bad_rc = int(((S.r < 0) | (S.c < 0)).sum())
+    if bad_rc:
+        raise ValueError(f"{bad_rc} stations with negative row / column")
+    if not np.isfinite(cube).any():
+        raise InsufficientData("the profile cube has no finite sample")
+    return {"n_fault": nf, "n_control": nc, "n_systems": int(S[S.kind == "fault"].system.nunique()),
+            "finite_share": float(np.isfinite(cube).mean())}
+
+
 def lineaments(D: EDAData, crests: dict, min_km: float = 1.0) -> tuple[pd.DataFrame, np.ndarray]:
     """Label-free lineament inventory from the union of independent-family crests (1 km scale): components with
     their supporting families, orientation, length, mapped status (by distance to mapped traces, for analysis only)."""
     from skimage.morphology import skeletonize
 
     from gems_bench.reset.atlas import components
+    from gems_eda.morphology import pca_axis
 
     union = np.zeros(D.grid.shape, bool)
     near = {}
@@ -474,9 +522,7 @@ def lineaments(D: EDAData, crests: dict, min_km: float = 1.0) -> tuple[pd.DataFr
         lab[rr, cc] = i
         e, n = D.grid.rc_to_km(rr, cc)
         if len(rr) >= 3:
-            w, v = np.linalg.eigh(np.cov(np.vstack([e, n])))
-            az = float(np.degrees(np.arctan2(v[0, 1], v[1, 1])) % 180)
-            lin = float(1 - w[0] / w[1]) if w[1] > 0 else np.nan
+            az, lin = pca_axis(e, n)                     # same axial / tolerance rules as the fault network
         else:
             az, lin = np.nan, np.nan
         d = D.net.distance_km[rr, cc]

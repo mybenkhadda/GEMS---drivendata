@@ -1,27 +1,34 @@
-"""Idempotent patch of notebooks/colab/GEMS_EXHAUSTIVE_GEOLOGICAL_EDA.ipynb for EDA code rev gde.1-r2.
+"""Idempotent, per-target repair of notebooks/colab/GEMS_EXHAUSTIVE_GEOLOGICAL_EDA.ipynb (keeps every saved output).
 
-    git pull                                              # get the Colab-saved notebook (outputs) first
-    python scripts/eda/patch_gems_eda_notebook.py --check # report what would change
-    python scripts/eda/patch_gems_eda_notebook.py         # write in place (every existing output is kept)
+    python scripts/eda/patch_gems_eda_notebook.py --check   # report each target: OK / WOULD_FIX / MISSING_ANCHOR
+    python scripts/eda/patch_gems_eda_notebook.py           # apply (atomic write); re-running is a no-op
 
-Why a script: the committed notebook carries Colab outputs and cells added in Colab, so it is edited cell by cell
-(located by content, never by position) instead of being rewritten. Changes:
-* config cell: ``EXPECT['code_rev']`` gde.1-r1 -> gde.1-r2 (nothing else in CONFIG is touched: mode, resolution,
-  caching, Drive sync and frozen-model switches keep their saved values);
-* new cell after the environment cell: ``diag()`` helper (stage status, missing contracted outputs, upstream stages,
-  root error, figure failures, recovery hint, from ``E.health()``);
-* stage cells: a trailing ``diag([...])`` call for the stages they run;
-* review cell: the widget only when ``review_readiness(E)`` says the atlas of THIS run is reviewable;
-* new health-check section after the synthesis cell.
+gde.1-r3 notebook already contains these cells (edited in source); this script repairs a copy that diverged (e.g. a
+Colab-saved notebook from an older revision). Every target is checked independently - an existing cell never stops
+the others (r2's early return on the health cell is gone):
+* config cell: ``EXPECT['code_rev']`` = the checkout's ``gems_eda/discovery/__init__.py`` EDA_CODE_REV (the single
+  revision contract; no hard-coded rev here), nothing else in CONFIG is touched;
+* title markdown: "(code rev ...)" updated;
+* production cells after the bootstrap cell, each identified by its first-line marker, inserted when absent:
+  2b revision contract + diag, 3-4 preflight, 5 run, 6 health, 7 recovery, step-by-step heading.
+Existing cells are never replaced or reordered, and outputs are never modified.
 """
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
-NB = Path(__file__).resolve().parents[2] / "notebooks" / "colab" / "GEMS_EXHAUSTIVE_GEOLOGICAL_EDA.ipynb"
-MARK = "gde-health"
+REPO = Path(__file__).resolve().parents[2]
+NB = REPO / "notebooks" / "colab" / "GEMS_EXHAUSTIVE_GEOLOGICAL_EDA.ipynb"
+
+
+def code_rev() -> str:
+    m = re.search(r'EDA_CODE_REV = "([^"]+)"', (REPO / "gems_eda/discovery/__init__.py").read_text(encoding="utf-8"))
+    if not m:
+        raise SystemExit("EDA_CODE_REV not found in gems_eda/discovery/__init__.py")
+    return m.group(1)
 
 
 def _src(text: str) -> list[str]:
@@ -29,17 +36,17 @@ def _src(text: str) -> list[str]:
     return [ln + "\n" for ln in lines[:-1]] + [lines[-1]]
 
 
-def code(cid: str, text: str) -> dict:
-    return {"cell_type": "code", "execution_count": None, "id": cid, "metadata": {"id": cid}, "outputs": [],
-            "source": _src(text)}
+def _cell(kind: str, cid: str, text: str) -> dict:
+    c = {"cell_type": kind, "id": cid, "metadata": {"id": cid}, "source": _src(text)}
+    if kind == "code":
+        c.update(execution_count=None, outputs=[])
+    return c
 
 
-def md(cid: str, text: str) -> dict:
-    return {"cell_type": "markdown", "id": cid, "metadata": {"id": cid}, "source": _src(text)}
+VERIFY = """
+# 2b. Revision contract + diagnostics helper (cheap). Raises on a stale install / EXPECT mismatch.
+print(GR_EDA.verify_checkout(CODE, EXPECT, HEAD))
 
-
-DIAG = code("gde-diag-fn", """
-# Stage diagnostics (cheap: reads manifests and checks the output contract; recomputes nothing)
 def diag(stages=None, all_rows=False):
     H = E.health(stages)
     bad = H if all_rows else H[H.recovery != '']
@@ -51,96 +58,119 @@ def diag(stages=None, all_rows=False):
             v = getattr(r, k)
             if isinstance(v, str) and v:
                 print(f'    {k}: {v}')
-        print(f'    manifest: {OUT}/manifests/stages/{r.stage}.json | figure failures: {OUT}/manifests/figure_failures/{r.stage}.json')
+        print(f'    manifest: {OUT}/manifests/stages/{r.stage}.json | history: {OUT}/manifests/history/stage_events.jsonl')
         print(f'    recovery: {r.recovery}')
     return H
-""")
-
-REVIEW = """
-from gems_bench.reset.atlas import review_readiness, review_widget
-RD = review_readiness(E)                 # atlas stage of THIS run COMPLETE / REUSED + index, columns, rows, panels
-print('atlas review:', 'READY' if RD['ready'] else 'SKIPPED', '|', RD['stage'], '=', RD['status'], '|', RD['reason'])
-if RD['ready']:
-    W = review_widget(E)                 # re-checks the same conditions itself
-    if W is not None: display(W)
-# Alternative: fill atlas/review_template.csv (copy it on Drive) and run E.import_reviews('<path to the filled copy>')
-# One review in code: E.record_review({'candidate_id': '...', 'interpretation': 'POSSIBLE_FAULT', 'confidence': 'MEDIUM',
-#                                      'review_mode': 'EVIDENCE_ONLY', 'reviewer': 'name', 'evidence_sources': 'magnetic;gravity',
-#                                      'supporting_evidence': '...', 'alternative_explanation': '...', 'data_license': 'n/a'})
 """
-
-HEALTH_MD = md("gde-health-md", """
-### Health check (optional, cheap)
-
-One row per stage: status in this session, last manifest status, missing / invalid contracted outputs, upstream
-stages that are not valid, root error, figure failures and the recovery step. A stage is COMPLETE only when every
-contracted output exists and validates; figures alone never make a stage complete.
-""")
-
-HEALTH = code(MARK, """
+PREFLIGHT = """
+# 3 + 4. Preflight (metadata, manifests, cached-product validation; no EDA computation) + readiness summary.
+#        Saved: audit/preflight_*.csv, audit/preflight_report.json, reports/PREFLIGHT_READINESS.md
+P = E.preflight()
+pd.set_option('display.max_colwidth', 160)
+display(P.summary())
+display(P.inputs[[c for c in ('input', 'exists', 'ok', 'height', 'width', 'epsg', 'count', 'dtype', 'positive_px', 'note') if c in P.inputs]])
+display(P.geometry)
+display(P.models)
+print('blocking problems:', P.problems or 'none')
+"""
+RUN = """
+# 5. Full pipeline (one call). Order: tests -> inventory -> A..G -> frozen engine (01/03, only with a factory)
+#    -> H forensics -> I atlas -> DEM (optional) -> integrity -> synthesis. Valid caches are reused; a failure is
+#    printed once with its category, file:line, affected output, downstream impact and recovery step.
+P.require_ready()                                 # stops here (before any computation) if preflight found a blocker
+result = E.run()
+"""
+HEALTH = """
+# 6. Final health + artifact validation (cheap; safe to re-run in a later session after the bootstrap)
 H = diag(all_rows=False)
 display(H[['stage', 'status', 'manifest_status', 'missing_or_invalid', 'upstream_not_valid', 'figure_failures', 'recovery']])
-""")
+from gems_eda.discovery import diagnostics as DG
+display(DG.current_errors(E))                     # errors whose stage is still not valid (history excluded)
+show('audit/stage_integrity.csv', ['stage', 'actual_status', 'missing_outputs', 'failure_reason', 'scientific_conclusion_allowed'])
+for r in ('MODELING_DECISION', 'EXECUTIVE_RESEARCH_SUMMARY'):
+    p = OUT / f'reports/{r}.md'
+    if p.exists(): display(Markdown(p.read_text()[:6000]))
+"""
+RECOVERY = """
+# 7. Recovery after an interruption / runtime restart / a pushed fix:
+#    re-run the config cell, the bootstrap cell and cell 2b (pin CONFIG['ref'] to the fixed SHA), then:
+# P = E.preflight(); display(P.summary())         # shows exactly which stages are reused / recomputed
+# E.resume()                                      # same ordered run; valid stages are REUSED_VALID_CACHE
+# Single stage after a fix (its upstream stages must be valid in this session first, e.g. via E.resume()):
+# E.s_geometry(); diag(['e03_geometry'])
+# Current (not historical) errors:
+# from gems_eda.discovery import diagnostics as DG; display(DG.current_errors(E)); display(DG.latest_state(E))
+"""
+STEPS_MD = """
+---
+## Step-by-step stages (optional)
 
-STAGE_DIAG = {"E.s_landscape()": "['e02_landscape', 'e03_geometry']",
-              "E.s_profiles()": "['e04_profiles', 'e05_signatures', 'e06_scales']",
-              "'e07_crossmodal'": "['e07_crossmodal', 'e08_label_bias', 'e09_regional']",
-              "E.s_forensics()": "['01_attach', '03_scenarios', 'e11_forensics']",
-              "E.s_candidates()": "['e12_candidates']"}
+The cells below run the same stages one part at a time, with figures shown inline (their earlier saved outputs are history). Use them for inspection; the production path is the cells above (preflight -> `E.run()` -> health). A stage already valid is REUSED, not recomputed.
+"""
+# (marker = first line, kind, id, text) in notebook order after the bootstrap cell
+PRODUCTION = [("# 2b. Revision contract", "code", "gde-verify", VERIFY),
+              ("# 3 + 4. Preflight", "code", "gde-preflight", PREFLIGHT),
+              ("# 5. Full pipeline", "code", "gde-run", RUN),
+              ("# 6. Final health", "code", "gde-final-health", HEALTH),
+              ("# 7. Recovery", "code", "gde-recovery", RECOVERY),
+              ("## Step-by-step stages (optional)", "markdown", "gde-steps-md", STEPS_MD)]
 
 
 def text(c: dict) -> str:
     return "".join(c.get("source", []))
 
 
-def find(cells: list, needle: str, kind: str = "code") -> int:
-    hits = [i for i, c in enumerate(cells) if c["cell_type"] == kind and needle in text(c)]
-    if len(hits) != 1:
-        raise KeyError(f"expected exactly one {kind} cell containing {needle!r}, found {len(hits)}: the notebook "
-                       "differs from the expected revision (patch nothing; inspect it)")
-    return hits[0]
+def find(cells, needle, kind=None) -> list[int]:
+    return [i for i, c in enumerate(cells) if needle in text(c) and (kind is None or c["cell_type"] == kind)]
 
 
-def patch(nb: dict) -> list[str]:
+def patch(nb: dict, rev: str) -> list[str]:
     cells, log = nb["cells"], []
-    ids = {c.get("id") or c.get("metadata", {}).get("id") for c in cells}
-    if MARK in ids:
-        return ["already patched (health-check cell present): nothing to do"]
-    i = find(cells, "EXPECT = {")
-    s = text(cells[i])
-    if "'code_rev': 'gde.1-r1'" in s:
-        cells[i]["source"] = _src(s.replace("'code_rev': 'gde.1-r1'", "'code_rev': 'gde.1-r2'"))
-        log.append("config cell: EXPECT code_rev gde.1-r2 (CONFIG untouched)")
-    for needle, stages in STAGE_DIAG.items():
-        try:
-            j = find(cells, needle)
-        except KeyError as e:
-            log.append(f"stage diag skipped: {e}")
+    # 1. EXPECT (config cell)
+    hits = find(cells, "EXPECT = {", "code")
+    if len(hits) != 1:
+        log.append(f"MISSING_ANCHOR config cell (found {len(hits)} cells with 'EXPECT = {{')")
+    else:
+        s = text(cells[hits[0]])
+        new = re.sub(r"'code_rev': '[^']*'", f"'code_rev': '{rev}'", s)
+        log.append("OK config EXPECT" if new == s else f"WOULD_FIX config EXPECT -> {rev}")
+        cells[hits[0]]["source"] = _src(new)
+    # 2. title
+    hits = find(cells, "# GEMS exhaustive geological discovery EDA (code rev", "markdown")
+    for i in hits:
+        s = text(cells[i])
+        new = re.sub(r"\(code rev [^)]*\)", f"(code rev {rev})", s)
+        log.append("OK title" if new == s else f"WOULD_FIX title -> {rev}")
+        cells[i]["source"] = _src(new)
+    # 3. production cells
+    b = find(cells, "GR_EDA.ExhaustiveEDA(", "code")
+    if len(b) != 1:
+        log.append(f"MISSING_ANCHOR bootstrap cell (found {len(b)}): production cells not checked")
+        return log
+    at = b[0]
+    for marker, kind, cid, body in PRODUCTION:
+        h = find(cells, marker, kind)
+        if h:
+            at = h[0]
+            log.append(f"OK {cid}")
             continue
-        s = text(cells[j])
-        if "diag(" not in s:
-            cells[j]["source"] = _src(s.rstrip("\n") + f"\ndiag({stages})")
-            log.append(f"stage cell [{needle}]: + diag({stages}) (outputs kept)")
-    j = find(cells, "review_widget(E)")
-    cells[j]["source"] = _src(REVIEW)                    # outputs of the earlier run are kept as history
-    log.append("review cell: gated by review_readiness (outputs kept)")
-    k = find(cells, "GR_EDA.ExhaustiveEDA(")
-    cells[k + 1:k + 1] = [DIAG]
-    log.append("inserted gde-diag-fn after the environment cell")
-    m = find(cells, "E.s_synthesis()")
-    cells[m + 1:m + 1] = [HEALTH_MD, HEALTH]
-    log.append("inserted health-check section after the synthesis cell")
+        cells.insert(at + 1, _cell(kind, cid, body))
+        at += 1
+        log.append(f"WOULD_FIX insert {cid}")
     return log
 
 
 def main() -> int:
     nb = json.loads(NB.read_text(encoding="utf-8"))
-    log = patch(nb)
+    before = json.dumps(nb, sort_keys=True)
+    log = patch(nb, code_rev())
     print("\n".join(log))
-    if "--check" in sys.argv or log[0].startswith("already"):
+    changed = json.dumps(nb, sort_keys=True) != before
+    if "--check" in sys.argv or not changed:
+        print("no change written" + (" (check mode)" if "--check" in sys.argv else " (already up to date)"))
         return 0
     tmp = NB.with_suffix(".ipynb.tmp")
-    tmp.write_text(json.dumps(nb, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(nb, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     tmp.replace(NB)
     print(f"written {NB}")
     return 0

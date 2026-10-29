@@ -1,0 +1,43 @@
+# Reference FULL_EDA configuration of notebooks/colab/GEMS_EXHAUSTIVE_GEOLOGICAL_EDA.ipynb (gems_eda.discovery).
+# The notebook CONFIG cell is authoritative for a run; this file documents the production defaults and can be loaded
+# with gems_eda.discovery.core.load_colab_config(path) (merged over core.DEFAULTS, validated by eda_config).
+repo: mybenkhadda/GEMS---drivendata
+ref: main                      # pin the pushed commit SHA for an immutable run
+drive_root: /content/drive/MyDrive/GEMS_2
+local_root: /content/gems_work
+mode: FULL_EDA                 # QUICK_LOOK | FULL_EDA | RESUME (scientific settings are NOT reduced silently)
+stages:
+  inventory: true
+  global_geology: true
+  fault_geometry: true
+  fault_profiles: true
+  modality_analysis: true
+  spatial_scales: true
+  crossmodal_evidence: true
+  label_bias: true
+  regional_shift: true
+  model_forensics: true        # conditional: needs the frozen engine (factory) -> 01_attach / 03_scenarios
+  unmapped_candidates: true
+  dem_pilot: false             # optional
+  scientific_synthesis: true
+resolution: native
+pixel_size_m: 100
+scales_km: [0.2, 0.5, 1, 2, 5, 10, 20]
+sampling:
+  seed: 2026
+  max_fault_systems: null
+  matched_controls_per_fault: 5
+  profile_half_width_km: 10
+  along_strike_spacing_m: 500
+  n_regional_examples: 48
+  n_model_error_examples: 48
+  control_distance_km: [2.0, 10.0]
+  control_sensitivity_km: [[1.0, 10.0], [5.0, 20.0]]
+figures: {enabled: true, format: [png, svg], dpi: 220, save_plot_data: true}
+statistics: {bootstrap_units: fault_system, n_bootstrap: 500, min_effect: 0.10, min_region_stations: 40}
+models: {load_frozen_B0: true, load_frozen_B1: true, load_frozen_W2: true, train_models: false}
+dem: {enabled: false, cached_only: true, pilot_only: true}
+reuse_cached: true
+save_all_artifacts: true
+sync_to_drive: true
+run_synthetic_tests: true

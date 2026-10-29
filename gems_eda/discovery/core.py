@@ -54,6 +54,14 @@ class EDAConfigError(ValueError):
     pass
 
 
+def load_colab_config(path) -> dict:
+    """configs/eda/colab_full.yaml (or another YAML) as a notebook CONFIG dict (validated by eda_config later)."""
+    import yaml
+
+    with open(path, encoding="utf-8") as fh:
+        return yaml.safe_load(fh)
+
+
 def eda_config(CONFIG: dict | None) -> dict:
     C = CONFIG or {}
     c = {**DEFAULTS, **C}

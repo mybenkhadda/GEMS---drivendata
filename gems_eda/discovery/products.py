@@ -41,13 +41,29 @@ class ProductInvalid(ValueError):
     """A mandatory product violates its schema: the stage must FAIL (never be written as if valid)."""
 
 
+def rule_violations(df: pd.DataFrame, rules: dict) -> dict:
+    """{rule: (n_bad, sample rows)} for violated rules. A rule returns a per-row boolean Series (True = valid) or a
+    single bool."""
+    out = {}
+    for k, ok in rules.items():
+        m = ok(df)
+        if isinstance(m, pd.Series):
+            bad = ~m.fillna(False).astype(bool)
+            if bad.any():
+                out[k] = (int(bad.sum()), df[bad].head(5).to_dict("records"))
+        elif not bool(m):
+            out[k] = (len(df), [])
+    return out
+
+
 def validate(df: pd.DataFrame, columns, rules: dict, name: str) -> None:
     miss = [c for c in columns if c not in df.columns]
     if miss:
         raise ProductInvalid(f"{name}: columns {miss} absent")
-    bad = [k for k, ok in rules.items() if not bool(ok(df))]
-    if bad:
-        raise ProductInvalid(f"{name}: schema rules violated {bad}")
+    v = rule_violations(df, rules)
+    if v:
+        detail = "; ".join(f"{k}: {n} rows, e.g. {s[:2]}" for k, (n, s) in v.items())
+        raise ProductInvalid(f"{name}: schema rules violated {list(v)} ({detail[:1500]})")
 
 
 # =============================================================================== e02: band characterisation
@@ -135,11 +151,11 @@ def limitations(r: dict) -> str:
     return "; ".join(out) or "none identified by these measurements"
 
 
-BAND_RULES = {"unique_band": lambda d: d.band.is_unique,
-              "fractions_in_0_1": lambda d: d.valid_frac_footprint.between(0, 1).all(),
-              "ordered_quantiles": lambda d: ((d.p01 <= d.p50) & (d.p50 <= d.p99) | d.p50.isna()).all(),
-              "non_negative_spread": lambda d: ((d.robust_scale_mad >= 0) | d.robust_scale_mad.isna()).all(),
-              "n_valid_le_footprint": lambda d: (d.n_valid_px <= d.n_footprint_px).all()}
+BAND_RULES = {"unique_band": lambda d: ~d.band.duplicated(keep=False),
+              "fractions_in_0_1": lambda d: d.valid_frac_footprint.between(0, 1),
+              "ordered_quantiles": lambda d: (d.p01 <= d.p50) & (d.p50 <= d.p99) | d.p50.isna(),
+              "non_negative_spread": lambda d: (d.robust_scale_mad >= 0) | d.robust_scale_mad.isna(),
+              "n_valid_le_footprint": lambda d: d.n_valid_px <= d.n_footprint_px}
 
 
 def enrich_band_characterization(E, T: pd.DataFrame) -> pd.DataFrame:
@@ -180,12 +196,14 @@ def write_band_characterization(E, T: pd.DataFrame) -> pd.DataFrame:
 
 
 # =============================================================================== e03: fault geometry
-GEOMETRY_RULES = {"unique_seg_id": lambda d: d.seg_id.is_unique,
-                  "positive_length": lambda d: (d.length_km > 0).all(),
-                  "chord_le_length": lambda d: (d.chord_km <= d.length_km + 1e-6).all(),
-                  "strike_in_0_180": lambda d: (d.strike_deg.between(0, 180, inclusive="left") | d.strike_deg.isna()).all(),
-                  "linearity_in_0_1": lambda d: (d.linearity.between(0, 1) | d.linearity.isna()).all(),
-                  "valid_system_id": lambda d: (d.system_id > 0).all()}
+# strict on purpose: the producer (gems_eda.morphology.pca_axis / axial_deg, GEOMETRY_REV) guarantees the bounds, so
+# any violation here is a real defect, never something to clip in this table
+GEOMETRY_RULES = {"unique_seg_id": lambda d: ~d.seg_id.duplicated(keep=False),
+                  "positive_length": lambda d: d.length_km > 0,
+                  "chord_le_length": lambda d: d.chord_km <= d.length_km + 1e-6,
+                  "strike_in_0_180": lambda d: d.strike_deg.between(0, 180, inclusive="left") | d.strike_deg.isna(),
+                  "linearity_in_0_1": lambda d: d.linearity.between(0, 1) | d.linearity.isna(),
+                  "valid_system_id": lambda d: d.system_id > 0}
 
 
 def fault_geometry(E) -> pd.DataFrame:
@@ -230,6 +248,13 @@ def fault_geometry(E) -> pd.DataFrame:
 
 
 def write_fault_geometry(E, T: pd.DataFrame) -> pd.DataFrame:
+    from gems_eda.morphology import GEOMETRY_REV, REL_TOL
+
     validate(T, GEOMETRY_COLUMNS, GEOMETRY_RULES if len(T) else {}, "tables/fault_geometry.csv")
     E.ws.save_table(T, "tables/fault_geometry.csv")
+    E.ws.save_json({"artifact": "tables/fault_geometry.csv", "geometry_rev": GEOMETRY_REV, "rel_tol": REL_TOL,
+                    "n_branches": int(len(T)), "n_systems": int(T.system_id.nunique()) if len(T) else 0,
+                    "strike_convention": "axial degrees clockwise from north in [0, 180)",
+                    "linearity": "1 - lambda_min / lambda_max of the branch point covariance, in [0, 1]"},
+                   "tables/fault_geometry.provenance.json")
     return T

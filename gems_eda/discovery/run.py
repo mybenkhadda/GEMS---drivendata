@@ -35,6 +35,8 @@ from . import data as DA
 
 REPO = Path(__file__).resolve().parents[2]
 OUT_DIR = "outputs/geological_discovery_eda"
+TEST_FILES = ("tests/test_geological_eda.py", "tests/test_eda_geometry_regression.py",
+              "tests/test_eda_artifact_contracts.py", "tests/test_eda_preflight.py")
 STAGE_SWITCH = {"e01_inventory": "inventory", "e02_landscape": "global_geology", "e03_geometry": "fault_geometry",
                 "e04_profiles": "fault_profiles", "e05_signatures": "modality_analysis", "e06_scales": "spatial_scales",
                 "e07_crossmodal": "crossmodal_evidence", "e08_label_bias": "label_bias",
@@ -47,11 +49,11 @@ class ExhaustiveEDA(FaultDiscoveryReset):
               "e06_scales", "e07_crossmodal", "e08_label_bias", "e09_regional", "01_attach", "03_scenarios",
               "e11_forensics", "e12_candidates", "e13_dem", "e14_integrity", "e15_synthesis")
     DEPENDS = {"00_tests": (), "e01_inventory": ("00_tests",), "e02_landscape": ("e01_inventory",),
-               "e03_geometry": ("e01_inventory",), "e04_profiles": ("e02_landscape", "e03_geometry"),
+               "e03_geometry": ("e01_inventory", "e02_landscape"),"e04_profiles": ("e02_landscape", "e03_geometry"),
                "e05_signatures": ("e04_profiles",), "e06_scales": ("e04_profiles",),
                "e07_crossmodal": ("e04_profiles", "e06_scales"), "e08_label_bias": ("e07_crossmodal",),
                "e09_regional": ("e05_signatures", "e06_scales"), "01_attach": (), "03_scenarios": ("01_attach",),
-               "e11_forensics": ("03_scenarios", "e04_profiles"), "e12_candidates": ("e07_crossmodal",),
+               "e11_forensics": ("03_scenarios", "e04_profiles", "e07_crossmodal"),"e12_candidates": ("e07_crossmodal",),
                "e13_dem": ("e04_profiles",), "e14_integrity": (), "e15_synthesis": ()}
     DECISION_STAGES = ()
     REPORT_STAGES = ("e14_integrity", "e15_synthesis")
@@ -96,7 +98,8 @@ class ExhaustiveEDA(FaultDiscoveryReset):
         "e09_regional": [("tables/regional_robustness.csv", ("held_out_region", "signal", "metric", "effect",
                                                              "supported_same_direction"))],
         "03_scenarios": [("validation/scenarios.csv", ("scenario", "zone"))],
-        "e11_forensics": [("tables/model_failure_taxonomy.csv", ("side", "error_class", "n", "length_km")),
+        "e11_forensics": [("atlas/cache/honest_maps.npz", ("w2", "b0", "b1", "zone_id", "w2_frozen_bits", "shape")),
+                          ("tables/model_failure_taxonomy.csv", ("side", "error_class", "n", "length_km")),
                           ("datasets/model_error_cases.parquet", ("sample_id", "side", "error_class"))],
         "e12_candidates": [("atlas/candidate_catalog.parquet", ("candidate_id",)),
                            ("atlas/atlas_index.csv", ("candidate_id", "category", "review_split")),
@@ -107,8 +110,10 @@ class ExhaustiveEDA(FaultDiscoveryReset):
     }
     # bump a stage's schema version when its producer changes the content of its outputs: only that stage's cache
     # (and, through the dependency chain at run time, nothing else) is invalidated
-    STAGE_SCHEMA = {"e01_inventory": "2", "e02_landscape": "2", "e03_geometry": "2", "e06_scales": "2",
-                    "e07_crossmodal": "2",
+    # r3: e03 / e07 geometry producer geom.2 (axial strike, tolerance-checked linearity); e04 chunked metrics +
+    # pre-save validation. e01 / e02 unchanged since r2: their valid Drive caches stay reusable.
+    STAGE_SCHEMA = {"e01_inventory": "2", "e02_landscape": "2", "e03_geometry": "3", "e04_profiles": "2",
+                    "e06_scales": "2", "e07_crossmodal": "3",
                     "e08_label_bias": "2", "e09_regional": "2", "e11_forensics": "2", "e12_candidates": "2"}
     # mandatory products written BEFORE the figures (core) and after them (post); "module:function"
     CORE = {"e05_signatures": ("parts_cd:effects", None), "e06_scales": ("parts_cd:scale_data", None),
@@ -122,6 +127,7 @@ class ExhaustiveEDA(FaultDiscoveryReset):
                      "e09_regional": ("LRO",), "e11_forensics": ("SEGERR", "FPERR", "OFFICIAL", "TAXONOMY"),
                      "e12_candidates": ("ATLAS", "ATLAS_WRITTEN")}
     ATLAS_STAGE = "e12_candidates"                     # read by gems_bench.reset.atlas.review_readiness
+    GRID_SHAPE = (3730, 3292)                          # (rows, cols) verified by e01 / preflight; NPZ grid checks
 
     def __init__(self, CONFIG: dict, head: str, factory=None):
         self.c = K.eda_config(CONFIG)
@@ -233,6 +239,13 @@ class ExhaustiveEDA(FaultDiscoveryReset):
                 bad.append(f"{rel}: unreadable ({type(e).__name__})")
                 continue
             (bad.append(f"{rel}: arrays {miss} absent") if miss else ok.append(rel))
+        from . import artifacts as AR                    # same domain rules / grid shapes as the preflight
+
+        for rel in list(ok):
+            probs = AR.validate(self.ws, rel, self.GRID_SHAPE)
+            if probs:
+                ok.remove(rel)
+                bad += probs
         return ok, bad
 
     def run_core(self, name: str, which: int) -> None:
@@ -282,7 +295,7 @@ class ExhaustiveEDA(FaultDiscoveryReset):
         def fn():
             T = ST.run_selftests()
             self.ws.save_table(T, "audit/selftests.csv")
-            r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-rfE", "tests/test_geological_eda.py"],
+            r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-rfE", *TEST_FILES],
                                cwd=str(REPO), capture_output=True, text=True)
             out = r.stdout + "\n" + r.stderr
             self.ws.save_text(f"exit code {r.returncode}\n\n{out}", "audit/pytest_output.txt")
@@ -375,17 +388,24 @@ class ExhaustiveEDA(FaultDiscoveryReset):
             M = DA.station_metrics(ps.cube, S, list(sig), off)
             fields = {m: D.band(DA.PRIMARY[m]) for m in ("magnetic", "gravity", "terrain") if D.has(DA.PRIMARY[m])}
             ST = DA.structure_metrics(D, S, fields)
-            alt = []
+            chk = DA.validate_profiles(S, M, ST, ps.cube, list(sig), off, len(fields))   # before anything is saved
+            alt, sens_skipped = [], []
             half_px = int(np.ceil(c["sampling"]["profile_half_width_km"] / D.grid.pixel_km)) + 2
             fs = S[S.kind == "fault"].reset_index(drop=True)
-            for lo, hi in c["sampling"]["control_sensitivity_km"]:
-                A = DA.matched_controls(D, fs, strata, int(c["sampling"]["matched_controls_per_fault"]), lo, hi,
-                                        half_px, np.random.default_rng(self.seed + int(10 * lo)),
-                                        kind=f"control_{lo:g}_{hi:g}km")
+            base_sigs = [k for k in sig if not k.endswith("thdr1km")]
+            for lo, hi in c["sampling"]["control_sensitivity_km"]:          # optional sensitivity product
+                try:
+                    A = DA.matched_controls(D, fs, strata, int(c["sampling"]["matched_controls_per_fault"]), lo, hi,
+                                            half_px, np.random.default_rng(self.seed + int(10 * lo)),
+                                            kind=f"control_{lo:g}_{hi:g}km")
+                except DA.InsufficientData as e:
+                    sens_skipped.append(f"{lo:g}-{hi:g} km: {e}")
+                    continue
                 A["domain"] = dom[A.r, A.c]
                 A.insert(0, "sample_id", np.arange(len(A)) + 10_000_000 * (len(alt) + 1))
-                pa = extract_profiles({k: sig[k] for k in sig if not k.endswith("thdr1km")}, A, off)
-                alt.append(DA.station_metrics(pa.cube, A, [k for k in sig if not k.endswith("thdr1km")], off))
+                pa = extract_profiles({k: sig[k] for k in base_sigs}, A, off)
+                alt.append(DA.station_metrics(pa.cube, A, base_sigs, off))
+                del pa
             self.save_parquet(S, "datasets/matched_controls.parquet")
             self.save_parquet(S[S.kind == "fault"], "datasets/fault_systems.parquet")
             self.save_parquet(M, "datasets/fault_profiles.parquet")
@@ -397,11 +417,13 @@ class ExhaustiveEDA(FaultDiscoveryReset):
             self.ws.save_table(scale, "tables/profile_signal_scaling.csv")
             D.cache.update(S=S, M=M, cube=ps.cube, off=off, sigs=list(sig), ST=ST)
             lv = S[S.kind == "control"].match_level.value_counts().to_dict()
-            return {"note": f"{int((S.kind == 'fault').sum())} fault stations on {S[S.kind == 'fault'].system.nunique()} "
-                            f"systems; controls by match level {lv}"}
+            return {"note": f"{chk['n_fault']} fault stations on {chk['n_systems']} systems, {chk['n_control']} "
+                            f"controls by match level {lv}; finite profile share {chk['finite_share']:.3f}"
+                            + (f"; sensitivity bands skipped {sens_skipped}" if sens_skipped else ""),
+                    "profile_checks": chk, "sensitivity_skipped": sens_skipped}
         return self.stage("e04_profiles", [], body)
 
-    def s_part(self, name: str, module: str, attr: str, extra=None):
+    def s_part(self, name: str, module: str, attr: str, extra=None, parts=None):
         import importlib
 
         def body():
@@ -412,19 +434,37 @@ class ExhaustiveEDA(FaultDiscoveryReset):
             r = self.run_figures(getattr(m, attr))
             self.run_core(name, 1)
             return r
-        return self.stage(name, [], body)
+        return self.stage(name, list(parts or []), body)
 
     def s_forensics(self):
+        eng = self.fps.get("03_scenarios")
+
         def prep():
             from gems_bench.reset.atlas import honest_maps
 
+            # honest_maps reuses atlas/cache/honest_maps.npz whenever it exists: a cache built from another
+            # frozen-engine state (03_scenarios fingerprint) is archived (never deleted) so the maps are rebuilt
+            p, side = self.ws.path("atlas/cache/honest_maps.npz"), "atlas/cache/honest_maps.engine.json"
+            old = (self.ws.read_json(side) or {}).get("scenarios_fingerprint")
+            if p.exists() and old != eng:
+                dst = self.ws.path(f"atlas/cache/history/honest_maps_{(old or 'unknown')[:12]}.npz")
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                p.replace(dst)
+                print(f"[e11] honest-map cache from engine {old} archived -> {dst.name}; rebuilding for {eng}")
             self.D.cache["maps"] = honest_maps(self)
-        return self.s_part("e11_forensics", "parts_hi", "PART_H", prep)
+            self.ws.save_json({"scenarios_fingerprint": eng, "eda_code_rev": EDA_CODE_REV}, side)
+        return self.s_part("e11_forensics", "parts_hi", "PART_H", prep, parts=[{"engine": eng}])
 
     def s_candidates(self):
         def prep():
+            from gems_bench.geomoe.decide import PRODUCED
+
+            # W2-derived categories only from maps produced / validated by e11 IN THIS RUN (never a stale cache)
             p = self.ws.path("atlas/cache/honest_maps.npz")
-            if p.exists() and "maps" not in self.D.cache:
+            if self.status.get("e11_forensics") not in PRODUCED:
+                self.D.cache.pop("maps", None)
+                print("[e12] e11 not valid in this run: W2-derived atlas categories (C, D) recorded as unavailable")
+            elif p.exists() and "maps" not in self.D.cache:
                 from gems_bench.reset.atlas import honest_maps
 
                 self.D.cache["maps"] = honest_maps(self)
@@ -454,8 +494,55 @@ class ExhaustiveEDA(FaultDiscoveryReset):
             return COMPLETE, SY.run(self)
         return self.run_stage("e15_synthesis", [time.time()], fn, force=True)
 
-    # =========================================================================== run
+    # =========================================================================== bookkeeping / entry points
+    CORE_STAGES = ("00_tests", "e01_inventory", "e02_landscape", "e03_geometry", "e04_profiles", "e05_signatures",
+                   "e06_scales", "e07_crossmodal", "e08_label_bias", "e09_regional", "e12_candidates")
+    ENGINE_STAGES = ("01_attach", "03_scenarios", "e11_forensics")
+
+    def record(self, stage: str, st: str, fp, info: dict, seconds: float, prov: dict) -> dict:
+        """Base record (manifest, run.json, Drive push, progress) + EDA code rev in the manifest, append-only history,
+        resolved-error marking, latest stage state and a concise diagnosis of a failure."""
+        from . import diagnostics as DG
+
+        m = super().record(stage, st, fp, {**(info or {}), "eda_code_rev": EDA_CODE_REV}, seconds, prov)
+        try:
+            DG.on_record(self, stage, st, m)
+        except Exception as e:                           # bookkeeping never masks the stage result
+            print(f"      [diagnostics] skipped: {type(e).__name__}: {e}")
+        return m
+
+    def preflight(self, deep: bool = False):
+        """Cheap readiness check (metadata reads, manifests, cached-product validation; no EDA computation)."""
+        from .preflight import Preflight
+
+        return Preflight(self, deep=deep).check()
+
+    def resume(self) -> dict:
+        """Continue after an interruption / a fix: the same ordered run; validated stages are REUSED, the rest run."""
+        return self.run()
+
     def run(self) -> dict:
+        self._run_all()
+        from . import diagnostics as DG
+
+        core = {s: self.status.get(s) for s in self.CORE_STAGES}
+        eng = {s: self.status.get(s) for s in self.ENGINE_STAGES}
+        bad = [s for s, v in core.items() if v not in ("COMPLETE", "REUSED_VALID_CACHE", "SKIPPED_BY_VALID_DECISION")]
+        print("\n=== run summary ===")
+        print(f"code rev {EDA_CODE_REV} | commit {self.head} | mode {self.c['mode']}")
+        print(f"core stages: {'ALL VALID' if not bad else 'NOT VALID: ' + str({s: core[s] for s in bad})}")
+        print(f"frozen-engine stages (conditional): {eng}" + ("" if self.F is not None else
+                                                              " -- no factory: forensics unavailable, not concluded"))
+        print(f"DEM (optional): {self.status.get('e13_dem')}")
+        first = next((s for s in self.STAGES if self.status.get(s) in ("FAILED", "TESTS_FAILED")), None)
+        if first:
+            print(DG.failure_text(self, first, self.manifest(first),
+                                  DG.classify(str(self.manifest(first).get("error") or ""),
+                                              str(self.manifest(first).get("traceback") or ""))))
+        print(f"Figures: {self.ws.path('figures/FIGURE_CATALOG.csv')} | Drive: {self.drive / self.out}")
+        return self.status
+
+    def _run_all(self) -> dict:
         self.s00_tests()
         self.s_inventory()
         self.s_landscape()
@@ -477,7 +564,54 @@ class ExhaustiveEDA(FaultDiscoveryReset):
         self.s_dem()
         self.s_integrity()
         self.s_synthesis()
-        ran = {k: v for k, v in self.status.items() if v != "NOT_RUN"}
-        print(f"\ncode rev {EDA_CODE_REV} | mode {self.c['mode']} | {ran}")
-        print(f"Figures: {self.ws.path('figures/FIGURE_CATALOG.csv')} | Drive: {self.drive / self.out}")
         return self.status
+
+
+def verify_checkout(code_root: str, expect: dict | None = None, head: str | None = None) -> dict:
+    """The one code-revision contract: the imported package IS the checkout (module path under ``code_root``), the
+    imported EDA_CODE_REV equals the checkout's __init__.py, and (when given) equals EXPECT['code_rev'] and HEAD starts
+    with EXPECT['commit']. Raises on any mismatch (a stale install is reported, never hidden)."""
+    import re
+
+    import gems_eda
+
+    from . import EDA_CODE_REV as rev
+
+    mod = Path(gems_eda.__file__).resolve()
+    if Path(code_root).resolve() not in mod.parents:
+        raise RuntimeError(f"stale install: gems_eda imported from {mod}, not from the checkout {code_root}; "
+                           "Runtime -> Restart session and re-run the bootstrap cell")
+    txt = (Path(code_root) / "gems_eda/discovery/__init__.py").read_text(encoding="utf-8")
+    m = re.search(r'EDA_CODE_REV = "([^"]+)"', txt)
+    disk = m.group(1) if m else None
+    if disk != rev:
+        raise RuntimeError(f"imported code rev {rev} != checkout {disk}: Runtime -> Restart session")
+    exp = (expect or {}).get("code_rev")
+    if exp and exp != rev:
+        raise RuntimeError(f"notebook EXPECT['code_rev'] = {exp} but the checkout is {rev}: update EXPECT in the "
+                           f"config cell (or pin CONFIG['ref'] to the commit that has {exp})")
+    com = (expect or {}).get("commit")
+    if com and head and not str(head).startswith(com):
+        raise RuntimeError(f"HEAD {head} does not match EXPECT['commit'] {com}")
+    return {"code_rev": rev, "module": str(mod), "commit": head, "expect": expect}
+
+
+def prepare_eda(CONFIG: dict, head: str, code_root: str | None = None, expect: dict | None = None) -> ExhaustiveEDA:
+    """Notebook entry point: verify the checkout contract, build the frozen-engine factory only when forensics /
+    candidates are enabled, return the ExhaustiveEDA."""
+    from . import EDA_CODE_REV as rev
+
+    if code_root:
+        verify_checkout(code_root, expect, head)
+    st = (CONFIG.get("stages") or {})
+    F = None
+    if st.get("model_forensics", True) or st.get("unmapped_candidates", True):
+        from gems_bench.geomoe import run as GR
+        from gems_bench.leaderboard_focus import factory as FA
+
+        F = FA.Factory({**GR.factory_config({**GR.NB_DEFAULTS, **{k: CONFIG[k] for k in (
+            "repo", "ref", "drive_root", "local_root", "reuse_cached", "sync_to_drive")}})}, head)
+    E = ExhaustiveEDA(CONFIG, head, factory=F)
+    print(f"[eda] code rev {rev} | commit {head} | mode {E.c['mode']} | factory {'yes' if F is not None else 'no'} "
+          f"| outputs {E.drive / E.out}")
+    return E

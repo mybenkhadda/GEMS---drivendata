@@ -98,15 +98,40 @@ def _runner(root: Path):
     E.ws = Workspace(root / "eda")
     E.status = {s: "NOT_RUN" for s in E.STAGES}
     E.fps, E.errors, E.current_stage, E._D = {}, [], None, None
+    E.GRID_SHAPE = (2, 2)                                 # synthetic grid for the NPZ grid-shape checks
+    E.F, E.local = None, root
     return E
+
+
+def valid_band_row() -> dict:
+    from gems_eda.discovery import products as PR
+
+    r = dict.fromkeys(PR.BAND_COLUMNS, 1.0)
+    r.update(band="rtp", modality="magnetic", provenance_class="processed_survey", units="nT", description="",
+             parent_band="", measured_in="test", limitations="none", valid_frac_footprint=1.0, p01=-1.0, p05=-0.5,
+             p25=0.0, p50=0.5, p75=0.7, p95=0.9, p99=1.0, n_valid_px=4, n_footprint_px=4)
+    return r
+
+
+def valid_geometry_row(seg_id: int = 0) -> dict:
+    from gems_eda.discovery import products as PR
+
+    r = dict.fromkeys(PR.GEOMETRY_COLUMNS, 0)
+    r.update(seg_id=seg_id, system_id=1, length_km=2.0, chord_km=1.9, sinuosity=1.05, strike_deg=0.0,
+             linearity=0.99, system_kind="single_trace", region_name="NW", crs="EPSG:32611", x_mid_utm=300000.0,
+             y_mid_utm=4300000.0)
+    return r
 
 
 def _write_e02(E):
     E.save_parquet(pd.DataFrame({"domain": [0, 1]}), "datasets/physical_regions.parquet")
     E.save_npz("rasters/spatial_domains/domains.npz", domain=np.zeros((2, 2), np.int16))
-    cols = ("band", "modality", "provenance_class", "units", "valid_frac_footprint", "p50", "robust_scale_mad",
-            "local_regional_std_ratio", "limitations")
-    E.ws.save_table(pd.DataFrame([dict.fromkeys(cols, 1)]), "tables/band_characterization.csv")
+    E.ws.save_table(pd.DataFrame([valid_band_row()]), "tables/band_characterization.csv")
+
+
+def _write_e03(E):
+    E.save_parquet(pd.DataFrame({"seg_id": [0], "length_km": [2.0]}), "datasets/fault_segments.parquet")
+    E.ws.save_table(pd.DataFrame([valid_geometry_row()]), "tables/fault_geometry.csv")
 
 
 def test_A_band_characterization_contract(tmp_path):
@@ -220,13 +245,7 @@ def test_I_dependency_recovery(tmp_path):
     m = E.stage("e04_profiles", [], lambda: ran.append(1) or {"note": ""})
     assert m["status"] == "BLOCKED_UPSTREAM" and not ran
     assert E.stage("e02_landscape", [], lambda: _write_e02(E) or {"note": ""})["status"] == "COMPLETE"
-
-    def e03():
-        E.save_parquet(pd.DataFrame({"seg_id": [0], "length_km": [1.0]}), "datasets/fault_segments.parquet")
-        cols = dict(E.OUTPUTS["e03_geometry"])["tables/fault_geometry.csv"]
-        E.ws.save_table(pd.DataFrame([dict.fromkeys(cols, 1)]), "tables/fault_geometry.csv")
-        return {"note": ""}
-    assert E.stage("e03_geometry", [], e03)["status"] == "COMPLETE"
+    assert E.stage("e03_geometry", [], lambda: _write_e03(E) or {"note": ""})["status"] == "COMPLETE"
     m = E.stage("e04_profiles", [], lambda: ran.append(1) or {"note": ""})
     assert ran and m["status"] == "FAILED" and "matched_controls.parquet: missing" in m["error"]   # it RAN
 
@@ -336,7 +355,8 @@ def test_every_contracted_output_has_a_producer():
     from gems_eda.discovery.run import ExhaustiveEDA
 
     src = "".join(p.read_text(encoding="utf-8") for p in (REPO / "gems_eda/discovery").glob("*.py")) + \
-        (REPO / "gems_bench/geomoe/run.py").read_text(encoding="utf-8")
+        (REPO / "gems_bench/geomoe/run.py").read_text(encoding="utf-8") + \
+        (REPO / "gems_bench/reset/atlas.py").read_text(encoding="utf-8")
     eda = [s for s in ExhaustiveEDA.STAGES if s.startswith("e") or s == "00_tests"]
     miss = [rel for s in eda for rel, _ in ExhaustiveEDA.OUTPUTS.get(s, []) if f'"{rel}"' not in src]
     assert not miss, f"contracted outputs without a writer: {miss}"
@@ -354,5 +374,48 @@ def test_notebook_structure():
     for c in code:
         ast.parse("\n".join(ln for ln in c.splitlines() if not ln.lstrip().startswith(("!", "%"))))
     allc = "\n".join(code)
-    assert "'train_models': False" in allc
+    assert "'train_models': False" in allc and "'mode': 'FULL_EDA'" in allc
     assert "E.s00_tests()" in allc and "review_widget(E)" in allc and "E.s_synthesis()" in allc
+
+
+def test_notebook_revision_contract_and_production_path():
+    """Notebook EXPECT == package rev (gde.1-r1 vs r2 mismatch in Colab) and the production cells are in order."""
+    import re
+
+    from gems_eda.discovery import EDA_CODE_REV
+
+    allc = "\n".join(_code_cells())
+    assert re.search(r"EXPECT = \{'code_rev': '([^']+)'", allc).group(1) == EDA_CODE_REV
+    marks = ["GR_EDA.ExhaustiveEDA(", "# 2b. Revision contract", "# 3 + 4. Preflight", "# 5. Full pipeline",
+             "# 6. Final health", "# 7. Recovery", "E.s00_tests()"]
+    pos = [allc.index(m) for m in marks]
+    assert pos == sorted(pos), dict(zip(marks, pos))
+
+
+def test_notebook_patcher_idempotent_and_keeps_outputs():
+    """The patcher repairs every target independently, never touches outputs, and is a no-op on the repo notebook."""
+    import copy
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("patcher", REPO / "scripts/eda/patch_gems_eda_notebook.py")
+    P = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(P)
+    nb = json.loads(NB.read_text(encoding="utf-8"))
+    outs = [copy.deepcopy(c.get("outputs")) for c in nb["cells"]]
+    log = P.patch(nb, P.code_rev())
+    assert not [x for x in log if x.startswith(("WOULD_FIX", "MISSING_ANCHOR"))], log
+    assert [c.get("outputs") for c in nb["cells"]] == outs
+    # a diverged copy (old rev, production cells removed, an old health cell present) is repaired, outputs kept
+    old = json.loads(NB.read_text(encoding="utf-8"))
+    for c in old["cells"]:
+        if "EXPECT = {" in "".join(c["source"]):
+            c["source"] = ["".join(c["source"]).replace(P.code_rev(), "gde.1-r1")]
+    old["cells"] = [c for c in old["cells"] if not any(m in "".join(c["source"]) for m, *_ in P.PRODUCTION)]
+    old["cells"].append({"cell_type": "code", "id": "gde-health", "metadata": {}, "outputs": [{"x": 1}],
+                         "execution_count": 1, "source": ["H = diag()"]})
+    outs = {c.get("id"): copy.deepcopy(c.get("outputs")) for c in old["cells"]}
+    log = P.patch(old, P.code_rev())
+    assert sum(x.startswith("WOULD_FIX insert") for x in log) == len(P.PRODUCTION) and "WOULD_FIX config EXPECT" \
+        in " ".join(log)
+    assert all(c.get("outputs") == outs[c.get("id")] for c in old["cells"] if c.get("id") in outs)
+    assert not [x for x in P.patch(old, P.code_rev()) if x.startswith("WOULD_FIX")]           # second pass no-op

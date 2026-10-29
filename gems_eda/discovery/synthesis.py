@@ -303,6 +303,15 @@ def run(E) -> dict:
                    "hypothesis is a candidate experiment, not a result.\n\n" + (md_table(H) if len(H) else "(none)") + "\n",
                    "reports/FEATURE_ENGINEERING_HYPOTHESES.md")
     dec = decision(E)
+    # a recommendation is FINAL only when every core scientific stage of this run is valid; otherwise it is
+    # PROVISIONAL and names the stages it could not use (a failed upstream never yields a clean-looking decision)
+    core = getattr(E, "CORE_STAGES", ())
+    notvalid = {s: E.status.get(s) for s in core if E.status.get(s) not in
+                ("COMPLETE", "REUSED_VALID_CACHE", "SKIPPED_BY_VALID_DECISION")}
+    dec["decision_status"] = "PROVISIONAL" if notvalid else "FINAL"
+    dec["stages_not_valid"] = notvalid
+    if notvalid:
+        dec["rules"] = [f"PROVISIONAL: core stages not valid in this run {notvalid}"] + dec["rules"]
     E.ws.save_json(dec, "reports/modeling_decision.json")
     E.ws.save_text(decision_md(E, dec), "reports/MODELING_DECISION.md")
     D = dashboards(E, C)

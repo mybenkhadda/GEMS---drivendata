@@ -19,7 +19,7 @@ import pandas as pd
 from scipy import ndimage
 
 from .io import Grid
-from .morphology import FaultNetwork, region_ids
+from .morphology import FaultNetwork, axial_deg, region_ids
 from .stats import auc_score, percentile_in
 
 
@@ -90,8 +90,8 @@ def sample_fault_stations(net: FaultNetwork, grid: Grid, valid: np.ndarray, spac
             ne, nn = tn, -te                                  # ground normal (east, north), unit length
             rows.append({"seg_id": int(sid), "r": int(r), "c": int(c),
                          "dr": -nn / grid.pixel_km_y, "dc": ne / grid.pixel_km_x,   # pixels per km
-                         "strike": float(np.degrees(np.arctan2(te, tn)) % 180)})
-    st = pd.DataFrame(rows)
+                         "strike": axial_deg(np.degrees(np.arctan2(te, tn)))})
+    st = pd.DataFrame(rows, columns=["seg_id", "r", "c", "dr", "dc", "strike"])   # typed even when empty
     if len(st) > max_stations:
         st = st.sample(max_stations, random_state=int(rng.integers(1 << 31))).sort_values(["seg_id", "r"])
     st = st.reset_index(drop=True)

@@ -175,20 +175,58 @@ def trace_skeleton(skel: np.ndarray, spur_px: float = 3.0) -> SkeletonGraph:
     return SkeletonGraph(paths, seg_nodes, nodes)
 
 
+GEOMETRY_REV = "geom.2"     # geom.2: axial strike in [0, 180) and tolerance-checked PCA linearity (pca_axis)
+REL_TOL = 1e-9              # relative tolerance for machine-precision boundary effects (eigenvalues, linearity)
+
+
+class GeometryPrecisionError(ValueError):
+    """A geometric quantity outside its valid range by more than machine precision (a real defect, never clipped)."""
+
+
+def axial_deg(theta_deg) -> np.ndarray | float:
+    """Axial angle (clockwise from north) in [0, 180): 180 and float results of ``x % 180`` that round to 180
+    (e.g. ``-1e-14 % 180``) map to 0, the same line."""
+    a = np.mod(np.asarray(theta_deg, np.float64), 180.0)
+    a = np.where(a >= 180.0 - 1e-9, 0.0, a)
+    return float(a) if np.ndim(a) == 0 else a
+
+
+def pca_axis(e: np.ndarray, n: np.ndarray, rel_tol: float = REL_TOL) -> tuple[float, float]:
+    """(axial strike deg in [0, 180), linearity in [0, 1]) of points (east km, north km) from the 2 x 2 covariance.
+
+    linearity = 1 - lambda_min / lambda_max. ``eigh`` can return lambda_min slightly < 0 (or a ratio a few ulps
+    outside [0, 1]) for collinear points: deviations up to ``rel_tol * lambda_max`` are corrected to the bound;
+    larger ones raise ``GeometryPrecisionError``. A degenerate covariance (all points identical) gives NaN, NaN."""
+    e, n = np.asarray(e, np.float64), np.asarray(n, np.float64)
+    cov = np.cov(np.vstack([e, n]))
+    w, v = np.linalg.eigh(cov)
+    lam_max = float(w[1])
+    if not np.isfinite(lam_max) or lam_max <= 0:
+        return np.nan, np.nan
+    tol = rel_tol * lam_max
+    lam_min = float(w[0])
+    if lam_min < -tol:
+        raise GeometryPrecisionError(f"covariance eigenvalue {lam_min:.3e} < 0 beyond tolerance ({tol:.3e})")
+    lam_min = max(lam_min, 0.0)
+    lin = 1.0 - lam_min / lam_max
+    if lin > 1.0 + rel_tol or lin < -rel_tol:
+        raise GeometryPrecisionError(f"linearity {lin!r} outside [0, 1] beyond tolerance {rel_tol}")
+    lin = min(max(lin, 0.0), 1.0)
+    strike = axial_deg(np.degrees(np.arctan2(v[0, 1], v[1, 1])))
+    return float(strike), float(lin)
+
+
 def path_geometry(path: np.ndarray, grid: Grid, step_km: float | None = None) -> dict:
-    """Length, chord, sinuosity, PCA strike, linearity and curvature of a pixel path."""
+    """Length, chord, sinuosity, PCA strike (axial, [0, 180)), linearity ([0, 1]) and curvature of a pixel path."""
     e, n = grid.rc_to_km(path[:, 0], path[:, 1])
     de, dn = np.diff(e), np.diff(n)
     length = float(np.hypot(de, dn).sum())
     chord = float(np.hypot(e[-1] - e[0], n[-1] - n[0]))
     out = {"length_km": length, "chord_km": chord, "sinuosity": length / chord if chord > 0 else np.nan}
     if len(path) >= 3:
-        cov = np.cov(np.vstack([e, n]))
-        w, v = np.linalg.eigh(cov)
-        out["azimuth"] = float(np.degrees(np.arctan2(v[0, 1], v[1, 1])) % 180)
-        out["linearity"] = float(1 - w[0] / w[1]) if w[1] > 0 else np.nan
+        out["azimuth"], out["linearity"] = pca_axis(e, n)
     else:
-        out["azimuth"] = float(np.degrees(np.arctan2(e[-1] - e[0], n[-1] - n[0])) % 180)
+        out["azimuth"] = axial_deg(np.degrees(np.arctan2(e[-1] - e[0], n[-1] - n[0])))
         out["linearity"] = 1.0
     step = step_km or 3 * grid.pixel_km
     if length > 4 * step and len(path) >= 5:
