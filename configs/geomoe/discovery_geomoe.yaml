@@ -1,0 +1,102 @@
+# GEMS discovery-first GeoMoE (docs/geomoe/DISCOVERY_GEOMOE.md, gems_bench/geomoe/). Code-authoring-first: every
+# number is produced in Colab. Frozen B0 / B1 / W2 artifacts are read-only inputs (attached through the submission
+# factory); everything is written under outputs/discovery_geomoe. Every threshold below is predeclared: nothing is
+# tuned on a held-out zone, a held-out label, or a public leaderboard score.
+version: dgm.1
+output_dir: outputs/discovery_geomoe
+
+# ------------------------------------------------------------------------------------------------ validation (Exp. A)
+scenarios:
+  V1: {task: disc_official, label: "entire withheld fault systems (existing discovery splits)"}
+  V2: {task: geo, label: "fault-network completion (real mapped sub-sections withheld inside each geo fold)"}
+  V3: {task: geo, label: "buffered geographic generalisation (existing geo folds)"}
+primary: V1                                          # the cell (rep, frac) of the export is chosen on this scenario
+v2:
+  seed: 2026
+  classes: [tip_extension, branch, short_splay, subsection]   # real mapped pixels only; no lateral shift (it would
+                                                     #   fabricate known geometry)
+  sample_frac: 0.25                                  # share of eligible features withheld per class
+  max_events_per_class: 400
+  tip_km: [0.5, 1.0, 2.0]                            # removed length at a trace tip (disk radius)
+  subsection_km: [0.5, 1.0]                          # removed continuous interior section (disk radius)
+  min_trace_km: 3.0                                  # tips / subsections only on traces at least this long
+  short_km: 2.0                                      # short splays: whole components shorter than this
+  branch_max_km: 3.0                                 # branches attached to a junction, shorter than this
+distance_bands_km: [1.0, 5.0]                        # near <= 1 km < mid <= 5 km < far (distance to permitted known)
+short_fault_km: 2.0                                  # short-fault recall: truth systems shorter than this
+train_buffer_km: 2.0                                 # training candidates near the held-out evaluation zone dropped
+
+# ------------------------------------------------------------------------------------------------ candidates (Exp. B)
+candidates:
+  pool_rep: skeleton_1px                             # low-threshold 1-px lines of every source map
+  pool_frac: 0.05                                    # share of the eligible domain per source (generous: weak and
+                                                     #   short structures are kept)
+  max_segment_km: 3.0                                # long curves split into interpretable pieces
+  min_segment_px: 2
+  dedup: {tol_px: 2, min_share: 0.6, max_angle_deg: 20}
+  tol_px: 3                                          # 300 m: the metric's distance tolerance
+  covered_share: 0.5                                 # a system is covered when >= this share of its scored pixels
+                                                     #   lies within tol_px of a candidate (= system_recovered_frac)
+  tip_lengths_km: [1.0, 2.0]
+  tip_tail_px: 5
+  oracle_budgets: [0.005, 0.01, 0.015, 0.03, 0.05]   # DIAGNOSTIC ONLY: truth-ordered selection inside the pool
+  # Generation-vs-ranking gate (predeclared; read in stage 06 before any gate is trained)
+  gate: {min_pool_coverage: 0.6, min_ranking_gap: 0.2, min_unique_systems: 3, min_unique_share: 0.05}
+
+# ------------------------------------------------------------------------------------------------ experts (Exp. C)
+experts:
+  E1_learned: [cnn_b0, cnn_b1, w2]
+  E2_potential: [mag_hgrad, grav_hgrad, mg_cross, pf_persistence]
+  E3_structural: [g02c, g02a, g01_persistence]
+  E4_terrain_network: [network, dem]
+pf_multiscale_sigma_px: 3.0                          # second scale of the potential-field gradients (first = W2's 1 px)
+network_scale_km: 2.5                                # network evidence = max(0, tip_along_cos) * exp(-tip_dist / s)
+dem:
+  mode: cached_only                                  # cached_only = the existing M7 100 m mosaic if on Drive; off
+  bands: [scarp_density, microrelief_rms, slope_break_mean]
+  min_coverage: 0.5
+normalization: {knots: 101}                          # cross-fitted ECDF (quantile knots) on training-zone candidates
+
+# ------------------------------------------------------------------------------------------------ fusion (Exp. D)
+evaluation:
+  reps: [skeleton_1px, crest_1px]                    # predeclared rasterisation policies (identical for all models)
+  area_fracs: [0.005, 0.01, 0.015, 0.03, 0.05]
+  block_px: 50                                       # 5 km spatial blocks (paired bootstrap)
+  n_boot: 500
+static:
+  grid_step: 0.25                                    # simplex grid of expert weights (35 points for 4 experts)
+  pu_unlabeled_weight: 0.3                           # unlabelled candidates = down-weighted negatives (PU)
+  positive_share: 0.5                                # positive candidate: >= this share within 300 m of training truth
+rules:                                               # Model C hypotheses (each one ablated)
+  factor: 2.0
+  R1_terrain_scarp: {dem_q: 0.8}
+  R2_structural_displacement: {pf_q: 0.7, g02a_q: 0.7}
+  R3_tip_continuation: {tip_km: 1.0, tip_cos: 0.7}
+  R4_magnetic_edge_only: {mag_q: 0.8, grav_q_max: 0.5, g02c_q_max: 0.5}
+  R5_short_multisource: {short_km: 2.0, min_agree: 2, agree_q: 0.8}
+learned:
+  l2: 0.01
+  kl_to_static: 0.05                                 # shrinks the gate toward the static fusion weights (anti-collapse)
+  max_iter: 300
+  collapse: {mean_max_weight: 0.9, dominant_share: 0.9}
+  min_train_candidates: 500
+  min_train_positives: 50
+
+# ------------------------------------------------------------------------------------------------ selection
+selection:
+  min_gain_vs_w2: 0.005                              # paired pooled DTI gain over the W2 pixel baseline
+  min_scenarios_improved: 2                          # of V1 / V2 / V3
+  max_scenario_drop: 0.01                            # no scenario may lose more than this vs W2
+  max_worst_zone_drop: 0.01
+  min_moe_gain_vs_static: 0.01                       # the learned gate must beat static fusion by this ...
+  min_p_positive: 0.8                                #   ... with a bootstrap P(delta > 0) at least this ...
+  moe_min_scenarios: 2                               #   ... in at least this many scenarios
+  rule_min_gain_vs_static: 0.005
+
+# ------------------------------------------------------------------------------------------------ deployment
+deployment:
+  export_construction: zone_stitched                 # the validated construction (geo zone k <- model fitted
+                                                     #   without zone k); fold_average and footprint_rank are
+                                                     #   simulated and reported only
+  parity_min_spearman: 0.999
+  dti_tol: 0.003
