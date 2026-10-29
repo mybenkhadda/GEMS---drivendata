@@ -199,6 +199,12 @@ def affected_file(msg: str) -> str | None:
 
 
 class DiscoveryGeoMoE:
+    # stage tables as class attributes: a subclass (gems_bench.reset) reuses the same machinery with its own stages
+    STAGES, OUTPUTS, LABELS = STAGES, OUTPUTS, LABELS
+    DEPENDS, DECISION_STAGES = DE.DEPENDS, DE.DECISION_STAGES
+    REPORT_STAGES = ("13_reports", "14_integrity")
+    STAGE_IN = ("manifests", "audit", "validation", "candidates", "experts", "gating", "submissions")
+
     def __init__(self, CONFIG: dict, head: str, factory=None):
         from ..artifacts.sync import DriveSync
         from ..leaderboard_focus.session import Workspace
@@ -211,7 +217,7 @@ class DiscoveryGeoMoE:
         self.sync = DriveSync(self.local, self.drive) if self.nb["sync_to_drive"] else None
         self.ws = Workspace(self.local / self.out, self.sync, self.local, save_figures=bool(self.nb["save_png"]),
                             save_parquet=True)
-        self.status: dict[str, str] = {s: "NOT_RUN" for s in STAGES}
+        self.status: dict[str, str] = {s: "NOT_RUN" for s in self.STAGES}
         self.fps: dict[str, str] = {}
         self.errors: list[dict] = []
         self.fg = self.bst = self.p6 = self.ctx = self.m7 = self.sh = None
@@ -219,8 +225,7 @@ class DiscoveryGeoMoE:
         self._dem = self._pf2 = None
         self._zm: dict = {}
         if self.sync is not None:                          # earlier small outputs only (never predictions / tifs)
-            subs = [f"{self.out}/{s}" for s in ("manifests", "audit", "validation", "candidates", "experts",
-                                                "gating", "submissions") if (self.drive / self.out / s).exists()]
+            subs = [f"{self.out}/{s}" for s in self.STAGE_IN if (self.drive / self.out / s).exists()]
             if subs:
                 self.sync.stage_in(subs)
 
@@ -281,8 +286,8 @@ class DiscoveryGeoMoE:
         return ok, bad
 
     def upstream_ok(self, stage: str) -> tuple[str | None, list[str]]:
-        st, bad = DE.dependency_status(stage, self.status, bool(self.nb["strict_dependency_checks"]))
-        return st, bad
+        return DE.dependency_status(stage, self.status, bool(self.nb["strict_dependency_checks"]), self.DEPENDS,
+                                    self.DECISION_STAGES)
 
     def run_stage(self, stage: str, parts: list, fn, *, force: bool = False) -> dict:
         """Dependency check -> validated cache -> isolated run. ``fn() -> (status, info)``."""
@@ -296,7 +301,7 @@ class DiscoveryGeoMoE:
         fp = self.fp(stage, *parts)
         self.fps[stage] = fp
         m = self.manifest(stage)
-        specs = OUTPUTS.get(stage, [])
+        specs = self.OUTPUTS.get(stage, [])
         if not force and self.nb["reuse_cached"] and m.get("fingerprint") == fp and m.get("status") in (*PRODUCED,
                                                                                                          SKIPPED_OK):
             ok, probs = self.check_outputs(specs)
@@ -324,7 +329,8 @@ class DiscoveryGeoMoE:
     def record(self, stage: str, st: str, fp, info: dict, seconds: float, prov: dict) -> dict:
         m = {"stage": stage, "status": st, "fingerprint": fp, "code_rev": GEOMOE_CODE_REV, "version": GEOMOE_VERSION,
              "commit": self.head, "code": prov, "seconds": seconds,
-             "required_outputs": [r for r, _ in OUTPUTS.get(stage, [])], "depends": list(DE.DEPENDS.get(stage, ())),
+             "required_outputs": [r for r, _ in self.OUTPUTS.get(stage, [])],
+             "depends": list(self.DEPENDS.get(stage, ())),
              "written": time.strftime("%Y-%m-%dT%H:%M:%S"), **info}
         self.ws.save_json(m, f"manifests/stages/{stage}.json")
         self.status[stage] = st
@@ -338,7 +344,7 @@ class DiscoveryGeoMoE:
         return m
 
     def progress(self, stage: str, st: str, note: str = "") -> None:
-        lab = f"[{stage[:3].rstrip('_')}] {LABELS.get(stage, stage)} "
+        lab = f"[{stage[:3].rstrip('_')}] {self.LABELS.get(stage, stage)} "
         print(f"{lab}{'.' * max(2, 32 - len(lab))} {st}" + (f" | {str(note)[:220]}" if note else ""))
 
     def ok(self, *stages) -> bool:
@@ -1558,17 +1564,17 @@ class DiscoveryGeoMoE:
             return st if st != "NOT_RUN" else (self.manifest(s).get("status") or "NOT_RUN")
 
         rows = []
-        for s in STAGES:
-            if s in ("13_reports", "14_integrity"):
+        for s in self.STAGES:
+            if s in self.REPORT_STAGES:
                 continue
             st = eff(s)
             m = self.manifest(s)
-            specs = OUTPUTS.get(s, [])
+            specs = self.OUTPUTS.get(s, [])
             ok, bad = self.check_outputs(specs)
-            deps = DE.DEPENDS.get(s, ())
+            deps = self.DEPENDS.get(s, ())
             up_ok = all(eff(d) in VALID for d in deps)
             allowed = st in (*PRODUCED, SKIPPED_OK) and up_ok and not (st in PRODUCED and bad)
-            rows.append({"stage": s, "label": LABELS.get(s), "required_dependencies": ";".join(deps),
+            rows.append({"stage": s, "label": self.LABELS.get(s), "required_dependencies": ";".join(deps),
                          "actual_status": st, "required_outputs": ";".join(r for r, _ in specs),
                          "missing_outputs": ";".join(bad), "valid_outputs": ";".join(ok),
                          "failure_reason": m.get("error") or m.get("reason") or "",

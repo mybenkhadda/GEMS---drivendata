@@ -39,13 +39,17 @@ def _f(x, default=np.nan) -> float:
     return v if np.isfinite(v) else default
 
 
-def dependency_status(stage: str, statuses: dict, strict: bool = True) -> tuple[str | None, list[str]]:
+def dependency_status(stage: str, statuses: dict, strict: bool = True, depends: dict | None = None,
+                      decision_stages=None) -> tuple[str | None, list[str]]:
     """(status to record instead of running, invalid upstream stages). ``None`` = the stage may run.
-    A stage whose upstream is invalid is BLOCKED_UPSTREAM (compute) or NOT_EVALUATED (decision)."""
-    bad = [s for s in DEPENDS.get(stage, ()) if statuses.get(s) not in VALID]
+    A stage whose upstream is invalid is BLOCKED_UPSTREAM (compute) or NOT_EVALUATED (decision). ``depends`` /
+    ``decision_stages`` default to this experiment's tables (another runner passes its own)."""
+    deps = DEPENDS if depends is None else depends
+    dec = DECISION_STAGES if decision_stages is None else decision_stages
+    bad = [s for s in deps.get(stage, ()) if statuses.get(s) not in VALID]
     if not bad or not strict:
         return None, bad
-    return (NOT_EVALUATED if stage in DECISION_STAGES else BLOCKED_UPSTREAM), bad
+    return (NOT_EVALUATED if stage in dec else BLOCKED_UPSTREAM), bad
 
 
 # =============================================================================== coverage gate (stage 06)
