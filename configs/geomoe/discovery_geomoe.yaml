@@ -5,6 +5,11 @@
 version: dgm.1
 output_dir: outputs/discovery_geomoe
 
+# Frozen submitted W2 policy (Model A_submitted_W2). Read at run time from the submission factory's evaluated
+# champion row (selection/champion_candidates.csv, candidate a_w2_rep_frac); this block is used ONLY when that table
+# is absent, and the run records which source it used.
+frozen_w2: {rep: skeleton_1px, frac: 0.01, blend: 1.0, grid_candidate: "boost_a:w2", deploy: stack}
+
 # ------------------------------------------------------------------------------------------------ validation (Exp. A)
 scenarios:
   V1: {task: disc_official, label: "entire withheld fault systems (existing discovery splits)"}
@@ -39,7 +44,7 @@ candidates:
                                                      #   lies within tol_px of a candidate (= system_recovered_frac)
   tip_lengths_km: [1.0, 2.0]
   tip_tail_px: 5
-  oracle_budgets: [0.005, 0.01, 0.015, 0.03, 0.05]   # DIAGNOSTIC ONLY: truth-ordered selection inside the pool
+  oracle_budgets: [0.005, 0.01, 0.015, 0.03, 0.05]   # (documentation) the oracle uses evaluation.area_fracs
   # Generation-vs-ranking gate (predeclared; read in stage 06 before any gate is trained)
   gate: {min_pool_coverage: 0.6, min_ranking_gap: 0.2, min_unique_systems: 3, min_unique_share: 0.05}
 
@@ -48,7 +53,7 @@ experts:
   E1_learned: [cnn_b0, cnn_b1, w2]
   E2_potential: [mag_hgrad, grav_hgrad, mg_cross, pf_persistence]
   E3_structural: [g02c, g02a, g01_persistence]
-  E4_terrain_network: [network, dem]
+  E4_terrain_network: [network, dem]                 # network_w2ctx = context-fairness ablation only (B_ctxW2)
 pf_multiscale_sigma_px: 3.0                          # second scale of the potential-field gradients (first = W2's 1 px)
 network_scale_km: 2.5                                # network evidence = max(0, tip_along_cos) * exp(-tip_dist / s)
 dem:
@@ -74,6 +79,7 @@ rules:                                               # Model C hypotheses (each 
   R3_tip_continuation: {tip_km: 1.0, tip_cos: 0.7}
   R4_magnetic_edge_only: {mag_q: 0.8, grav_q_max: 0.5, g02c_q_max: 0.5}
   R5_short_multisource: {short_km: 2.0, min_agree: 2, agree_q: 0.8}
+  R6_mag_grav_agreement: {agree_min: 0.8, pf_q: 0.6}
 learned:
   l2: 0.01
   kl_to_static: 0.05                                 # shrinks the gate toward the static fusion weights (anti-collapse)
@@ -84,7 +90,10 @@ learned:
 
 # ------------------------------------------------------------------------------------------------ selection
 selection:
-  min_gain_vs_w2: 0.005                              # paired pooled DTI gain over the W2 pixel baseline
+  # Fixed policy: one (rep, frac) rule for every scenario; the outer unit's cell is chosen on development units whose
+  # evaluation zone overlaps it by at most this share (else the within-scenario nested rule, flagged)
+  policy_max_overlap: 0.05
+  min_gain_vs_w2: 0.005                              # fixed-policy DTI gain over the FROZEN submitted W2
   min_scenarios_improved: 2                          # of V1 / V2 / V3
   max_scenario_drop: 0.01                            # no scenario may lose more than this vs W2
   max_worst_zone_drop: 0.01

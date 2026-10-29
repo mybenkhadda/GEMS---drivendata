@@ -125,10 +125,10 @@ def segment_table(lab: np.ndarray, layers: dict, pools: dict, tol_px: float, eli
         prop.append(s)
     by = T[[f"on_{s}" for s in prop]].to_numpy() >= 0.5 if prop else np.zeros((n, 0), bool)
     T["proposed_by"] = [";".join(p for p, b in zip(prop, row) if b) for row in by]
-    T["n_proposers"] = by.sum(1)
+    T["n_proposers"] = by.sum(axis=1)
     fams = {f: [i for i, p in enumerate(prop) if SOURCE_FAMILY.get(p) == f] for f in sorted(set(SOURCE_FAMILY.values()))}
     for f, ix in fams.items():
-        T[f"prop_{f}"] = by[:, ix].any(1) if ix else False
+        T[f"prop_{f}"] = by[:, ix].any(axis=1) if ix else False
     T["eligible_share"] = near_share(lab, eligible, 0)
     if truth is not None:
         T["y_near_truth"] = near_share(lab, truth, tol_px)
@@ -182,14 +182,38 @@ def system_coverage(px: pd.DataFrame, masks: dict, tol_px: float, share: float) 
     """Per (system, pool): share of the system's scored pixels within ``tol_px`` of the pool, covered flag."""
     rows = []
     if not len(px):
-        return pd.DataFrame(columns=["system_id", "pool", "near_share", "covered"])
+        return pd.DataFrame(columns=["system_id", "pool", "near_share", "covered", "n_px"])
     for name, m in masks.items():
-        m = np.asarray(m, bool)
-        near = (ndimage.distance_transform_edt(~m)[px.r, px.c] <= tol_px) if m.any() else np.zeros(len(px), bool)
-        g = pd.DataFrame({"s": px.system_id.to_numpy(), "n": near}).groupby("s").n.mean()
-        rows.append(pd.DataFrame({"system_id": g.index.to_numpy(), "pool": name, "near_share": g.to_numpy(),
-                                  "covered": g.to_numpy() >= float(share)}))
+        near = near_pixels(px, m, tol_px)
+        g = pd.DataFrame({"s": px.system_id.to_numpy(), "n": near}).groupby("s").n.agg(["mean", "size"])
+        rows.append(pd.DataFrame({"system_id": g.index.to_numpy(), "pool": name, "near_share": g["mean"].to_numpy(),
+                                  "covered": g["mean"].to_numpy() >= float(share), "n_px": g["size"].to_numpy()}))
     return pd.concat(rows, ignore_index=True)
+
+
+def near_pixels(px: pd.DataFrame, mask: np.ndarray, tol_px: float) -> np.ndarray:
+    m = np.asarray(mask, bool)
+    if not m.any() or not len(px):
+        return np.zeros(len(px), bool)
+    return ndimage.distance_transform_edt(~m)[px.r.to_numpy(), px.c.to_numpy()] <= tol_px
+
+
+def band_coverage(px: pd.DataFrame, masks: dict, tol_px: float, edges) -> pd.DataFrame:
+    """GEOMETRIC coverage of truth pixels (length) per pool and distance band to the permitted known faults. Being
+    within 300 m is NOT the official TP support (linear kernel); see the kernel-weighted oracle for that."""
+    from .scenarios import BANDS, band_of
+
+    if not len(px):
+        return pd.DataFrame(columns=["pool", "band", "truth_px", "covered_px", "covered_share"])
+    b = band_of(px.known_dist_km.to_numpy(float), edges)
+    rows = []
+    for name, m in masks.items():
+        near = near_pixels(px, m, tol_px)
+        for i, nm in enumerate(BANDS):
+            k = b == i
+            rows.append({"pool": name, "band": nm, "truth_px": int(k.sum()), "covered_px": int((near & k).sum()),
+                         "covered_share": float((near & k).sum() / max(int(k.sum()), 1))})
+    return pd.DataFrame(rows)
 
 
 def system_attributes(px: pd.DataFrame, events: pd.DataFrame | None = None) -> pd.DataFrame:
@@ -212,16 +236,21 @@ def system_attributes(px: pd.DataFrame, events: pd.DataFrame | None = None) -> p
 
 def unique_coverage(C: pd.DataFrame, families: list[str]) -> pd.DataFrame:
     """Per system: covered by which families, uniquely covered by one family (pools named ``fam:<family>``)."""
-    F = C[C.pool.str.startswith("fam:")].pivot_table(index="system_id", columns="pool", values="covered",
-                                                     aggfunc="max").fillna(False).astype(bool)
-    for f in families:
-        F[f"fam:{f}"] = F.get(f"fam:{f}", False)
     cols = [f"fam:{f}" for f in families]
-    out = pd.DataFrame({"system_id": F.index.to_numpy(), "n_families": F[cols].sum(1).to_numpy()})
+    h = C[C.pool.astype(str).str.startswith("fam:")]
+    if not len(h):
+        return pd.DataFrame(columns=["system_id", "n_families"] + [f"{k}_{f}" for f in families
+                                                                    for k in ("covered", "unique")])
+    F = (h.assign(covered=h.covered.astype(bool).astype(int))
+         .pivot_table(index="system_id", columns="pool", values="covered", aggfunc="max", fill_value=0))
+    F = F.reindex(columns=cols, fill_value=0).astype(bool)
+    out = pd.DataFrame({"system_id": F.index.to_numpy(), "n_families": F[cols].sum(axis=1).to_numpy()})
     for f in families:
-        out[f"covered_{f}"] = F[f"fam:{f}"].to_numpy()
+        own = F[f"fam:{f}"].to_numpy(bool)
         others = [c for c in cols if c != f"fam:{f}"]
-        out[f"unique_{f}"] = F[f"fam:{f}"].to_numpy() & ~F[others].any(1).to_numpy()
+        other = F[others].to_numpy(bool).any(axis=1) if others else np.zeros(len(F), bool)
+        out[f"covered_{f}"] = own
+        out[f"unique_{f}"] = own & ~other
     return out
 
 
@@ -248,10 +277,48 @@ def score_order(lab: np.ndarray, score: np.ndarray) -> np.ndarray:
 
 
 # =============================================================================== Colab side
+INVENTORY_ALIASES = {                  # brief vocabulary -> repository columns (NaN when the source is absent)
+    "length_km": "length_km", "straightness": "straightness", "continuity": "connectivity",
+    "source_membership": "proposed_by", "cnn_b0_score": "mean_cnn_b0", "cnn_b1_score": "mean_cnn_b1",
+    "w2_score": "mean_w2", "magnetic_score": "mean_mag_hgrad", "gravity_score": "mean_grav_hgrad",
+    "mag_grav_agreement": "mean_mg_orient_agree", "multiscale_persistence": "mean_pf_persistence",
+    "g02_continuity": "mean_g02c", "g02_displacement": "mean_g02a", "g02_truncation": "mean_g02_truncation",
+    "known_fault_distance": "mean_known_dist_km", "known_tip_distance": "min_tip_dist_km",
+    "tip_alignment": "mean_tip_along_cos", "terrain_availability": "mean_dem_observed", "terrain_evidence": "mean_dem"}
+
+
+def inventory_view(T: pd.DataFrame) -> pd.DataFrame:
+    """The persisted candidate inventory: ids, geometry reference, provenance and the brief's named columns
+    (``g02_truncation`` has no raster key in the G02 run: recorded as NaN = UNAVAILABLE, never zero)."""
+    out = pd.DataFrame({"candidate_id": T.unit.astype(str) + "#" + T.label.astype(str), "scenario": T.scenario,
+                        "zone": T.zone, "unit": T.unit, "label": T.label,
+                        "orientation_deg": np.degrees(T.theta.to_numpy(float)) % 180.0,
+                        "row_full": T.row_full, "col_full": T.col_full, "n_px": T.n_px,
+                        "geometry": "candidates/candidate_geometries.gpkg (candidate_id) | label raster "
+                                    "candidates/units/<fp>/<unit>.npz"})
+    for k, c in INVENTORY_ALIASES.items():
+        out[k] = T[c] if c in T else np.nan
+    for c in [c for c in T.columns if c.startswith(("on_", "prop_"))] + ["n_proposers", "eligible_share"]:
+        if c in T:
+            out[c] = T[c]
+    return out
+
+
+def unpack_pools(z) -> dict:
+    shape = tuple(int(x) for x in z["shape"])
+    n = int(np.prod(shape))
+    return {k[5:]: np.unpackbits(z[k])[:n].reshape(shape).astype(bool) for k in z.files if k.startswith("pool_")}
+
+
+def pack_pools(pools: dict) -> dict:
+    return {f"pool_{k}": np.packbits(np.asarray(v, bool)) for k, v in pools.items()}
+
+
 def build_unit(G, su, L: dict) -> dict:
-    """Pools, inventory, segment table and coverage rows of one scenario unit (``L`` = experts.unit_layers)."""
+    """Pools, inventory and segment table of one scenario unit (``L`` = experts.unit_layers). Label-free except the
+    evaluation-side ``y_near_truth`` column. Coverage is a separate step (``unit_coverage``) so a coverage failure
+    never discards the expensive inventory."""
     from ..gems3 import representation as R
-    from .experts import FAMILIES
 
     cc = G.cfg["candidates"]
     u, b = su.unit, su.base
@@ -282,27 +349,44 @@ def build_unit(G, su, L: dict) -> dict:
     T = segment_table(lab, layers, pools, float(cc["tol_px"]), el, truth, (u.sl[0].start, u.sl[1].start),
                       float(cc["dedup"]["tol_px"]))
     T = T.assign(scenario=su.scenario, zone=su.zone, unit=su.key)
-    # coverage (diagnostic, held-out truth)
-    px = truth_pixels(u, su.sysmap, L.get("known_dist_km"))
+    return {"lab": lab, "T": T, "dedup": D.assign(unit=su.key) if len(D) else D, "prov": pd.DataFrame(prov),
+            "pools": pools, "pool_px": {s: int(m.sum()) for s, m in pools.items()}, "eligible_px": int(el.sum())}
+
+
+def coverage_masks(pools: dict, lab: np.ndarray) -> dict:
+    from .experts import FAMILIES
+
     masks = {f"src:{s}": m for s, m in pools.items()}
     for f in FAMILIES:
         fm = [m for s, m in pools.items() if SOURCE_FAMILY.get(s) == f]
-        masks[f"fam:{f}"] = np.logical_or.reduce(fm) if fm else np.zeros(el.shape, bool)
+        masks[f"fam:{f}"] = np.logical_or.reduce(fm) if fm else np.zeros(lab.shape, bool)
     masks["inventory"] = lab > 0
     masks["label_free"] = masks["fam:E2_potential"] | masks["fam:E3_structural"]
-    C = system_coverage(px, masks, float(cc["tol_px"]), float(cc["covered_share"])).assign(
-        scenario=su.scenario, zone=su.zone, unit=su.key)
-    A = system_attributes(px, su.events if su.scenario == "V2" else None).assign(scenario=su.scenario, zone=su.zone,
-                                                                                unit=su.key)
-    U = unique_coverage(C, list(FAMILIES)).assign(scenario=su.scenario, zone=su.zone, unit=su.key)
-    return {"lab": lab, "T": T, "dedup": D.assign(unit=su.key) if len(D) else D, "prov": pd.DataFrame(prov),
-            "coverage": C, "attrs": A, "unique": U, "px": px, "pool_px": {s: int(m.sum()) for s, m in pools.items()},
-            "eligible_px": int(el.sum())}
+    return masks
+
+
+def unit_coverage(G, su, lab: np.ndarray, T: pd.DataFrame, pools: dict, known_dist_km: np.ndarray) -> dict:
+    """DIAGNOSTIC (held-out truth): system / length / distance-band coverage, attributes, unique families and the
+    kernel-weighted oracle of one unit, from the saved inventory and pools (no layer is recomputed)."""
+    from .experts import FAMILIES
+
+    cc = G.cfg["candidates"]
+    tag = {"scenario": su.scenario, "zone": su.zone, "unit": su.key}
+    px = truth_pixels(su.unit, su.sysmap, known_dist_km)
+    masks = coverage_masks(pools, lab)
+    C = system_coverage(px, masks, float(cc["tol_px"]), float(cc["covered_share"])).assign(**tag)
+    A = system_attributes(px, su.events if su.scenario == "V2" else None).assign(**tag)
+    U = unique_coverage(C, list(FAMILIES)).assign(**tag)
+    Bd = band_coverage(px, {k: v for k, v in masks.items() if not k.startswith("src:")}, float(cc["tol_px"]),
+                       G.cfg["distance_bands_km"]).assign(**tag)
+    O = oracle_curve(G, su, lab, T)
+    return {"coverage": C, "attrs": A, "unique": U, "bands": Bd, "oracle": O}
 
 
 def oracle_curve(G, su, lab: np.ndarray, T: pd.DataFrame) -> pd.DataFrame:
-    """Recall / official DTI vs area inside the inventory: ``oracle`` (truth-ordered, DIAGNOSTIC) and ``w2_order``
-    (segments by their mean W2 rank: label-free) under the same budgets and eligible domain."""
+    """OFFICIAL-KERNEL-WEIGHTED curves inside the inventory, scored with the official components (linear 300 m
+    kernel, pixel-exact known mask) under the evaluation area budgets: ``oracle`` (segments ordered by held-out truth
+    proximity: an upper-bound DIAGNOSTIC, never a selection input) and ``w2_order`` (by mean W2 rank: label-free)."""
     from ..p6.boost import fill_budget
 
     cc = G.cfg["candidates"]
@@ -317,7 +401,7 @@ def oracle_curve(G, su, lab: np.ndarray, T: pd.DataFrame) -> pd.DataFrame:
     rows = []
     n_el = max(int(el.sum()), 1)
     for name, o in orders.items():
-        for f in cc["oracle_budgets"]:
+        for f in G.cfg["evaluation"]["area_fracs"]:                  # the SAME final area constraints
             q = fill_budget(lab, o, int(np.floor(float(f) * n_el))) & el
             r = G.score(u, q.astype(np.float32))
             rows.append({**r, "scenario": su.scenario, "unit": su.key, "order": name, "frac": float(f),

@@ -51,12 +51,29 @@ def write_index(G, rows: list[dict], note: str) -> None:
 
 
 def cell_of(G, model: str) -> tuple[str, float]:
-    S = G.ws.load_table("gating/model_summary.csv")
-    r = S[(S.scenario == G.cfg["primary"]) & (S.model == model)]
-    if not len(r):
-        raise RuntimeError(f"{model}: no {G.cfg['primary']} summary row (all-zone cell unknown)")
-    p = json.loads(r.params_all.iloc[0])
-    return str(p["rep"]), float(p["frac"])
+    """The model's deployable cell: the fixed-policy rule applied to ALL development units (the same rule whose
+    held-out application produced the evaluated numbers; gating/deployable_policies.json)."""
+    d = (G.ws.read_json("gating/deployable_policies.json") or {}).get(model)
+    if not d:
+        raise RuntimeError(f"{model}: no deployable policy in gating/deployable_policies.json")
+    return str(d["rep"]), float(d["frac"])
+
+
+def source_completeness(G, model: str) -> tuple[bool, str]:
+    """Every V3 zone has candidates scored by the model and the same expert availability (no zone silently lost
+    a family the model was evaluated with)."""
+    A = G.ws.load_table("experts/source_availability.csv")
+    S = pd.read_parquet(G.ws.path(f"gating/scores_{model}.parquet"))
+    v3 = [su.key for su in G.units if su.scenario == "V3"]
+    scored = {k: int(S[(S.unit == k)].score.notna().sum()) for k in v3}
+    if not len(A):
+        return False, "experts/source_availability.csv absent"
+    a = A[(A.scenario == "V3") & (A.member == "*")].pivot_table(index="zone", columns="expert",
+                                                               values="available_share")
+    uneven = [c for c in a.columns if (a[c] >= 0.5).nunique() > 1]
+    ok = all(v > 0 for v in scored.values())
+    return ok, f"scored candidates per V3 zone {scored}; families with zone-dependent availability {uneven} " \
+               "(handled by the consistent-availability rule)"
 
 
 def run(G, sel: dict) -> tuple[str, dict]:
@@ -73,17 +90,22 @@ def run(G, sel: dict) -> tuple[str, dict]:
 
     ex = G.nb["export"]
     picked, role = sel.get("selected"), "SELECTED"
+    if not sel.get("measured"):
+        note = (f"No new submission: selection status {sel.get('status')} - no measured comparison exists "
+                f"({'; '.join(sel.get('reasons') or [])}). This is NOT evidence for W2.")
+        write_index(G, [{"file": None, "status": "NOT_SELECTED", "role": "none", "model": None}], note)
+        return "SKIPPED_BY_VALID_DECISION", {"reason": note[:300]}
     if picked in (None, "RETAIN_W2"):
         if not ex.get("exploratory"):
-            note = ("No new submission: the predeclared selection rule retained W2 "
+            note = ("No new submission: the predeclared selection rule retained W2 on measured fixed-policy numbers "
                     f"({'; '.join(sel.get('reasons') or [])}). The reference file stays the submission factory's "
                     "w2_champion GeoTIFF.")
-            write_index(G, [{"file": None, "status": NO_NEW, "role": "none", "model": "RETAIN_W2"}], note)
-            return "SKIPPED", {"note": note[:200]}
+            write_index(G, [{"file": None, "status": "NOT_SELECTED", "role": "none", "model": "RETAIN_W2"}], note)
+            return "SKIPPED_BY_VALID_DECISION", {"reason": note[:300]}
         picked, role = deploy_model(G), "EXPLORATORY"
         if picked is None:
             write_index(G, [{"file": None, "status": NO_NEW, "role": "none", "model": None}], "no fused model")
-            return "SKIPPED", {"note": "exploratory export asked but no fused model exists"}
+            return "SKIPPED_BY_VALID_DECISION", {"reason": "exploratory export asked but no fused model exists"}
     gates = []
     T = STT.run_selftests()
     G.ws.save_table(T, "audit/selftests.csv")
@@ -98,6 +120,8 @@ def run(G, sel: dict) -> tuple[str, dict]:
                          dd.get("zone_stitched_self_consistent")))
     if role == "SELECTED":
         gates.append(chk("gate", "model selected by the predeclared rule", sel.get("status") == "SELECTED"))
+    sc_ok, sc_detail = source_completeness(G, picked)
+    gates.append(chk("gate", "candidate source completeness on every V3 zone", sc_ok, sc_detail))
     blocked = [g for g in gates if g["hard"] and not g["ok"]]
     G.ws.save_table(pd.DataFrame(gates), "submissions/export_gates.csv")
     if blocked:
@@ -164,8 +188,9 @@ def run(G, sel: dict) -> tuple[str, dict]:
     w2 = G.bst.w2_inputs()
     rec = EP.build_recipe(
         candidate=f"geomoe_{picked}", kind="zone_stitched_geomoe",
-        policy={"selection_id": f"geomoe|{picked}|{G.cfg['primary']}|all_zones", "space": "rep+frac",
-                "objective": G.cfg["primary"], "rep": rep, "frac": frac, "blend": 1.0, "grid_candidate": picked,
+        policy={"selection_id": f"geomoe|{picked}|fixed_policy|all_units", "space": "rep+frac",
+                "objective": "mean over scenarios of pooled DTI (fixed policy)", "rep": rep, "frac": frac,
+                "blend": 1.0, "grid_candidate": picked,
                 "grid_blend": 1.0},
         model={"kind": f"geomoe_{picked}", "features": feats, "refit": False, "maps": "V3 cross-fitted candidate "
                "scores (gating/scores_<model>.parquet)", "note": "zone k scored by the model fitted without zone k"},

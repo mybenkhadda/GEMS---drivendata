@@ -31,7 +31,7 @@ SOURCE_FAMILY = {"cnn_b0": "E1_learned", "cnn_b1": "E1_learned", "w2": "E1_learn
 POOL_SOURCES = ("w2", "fusion", "cnn_b0", "cnn_b1", "g02c", "g02a", "g01_persistence", "mag_hgrad", "grav_hgrad",
                 "mg_cross", "pf_persistence", "dem", "network")
 DESCRIPTOR_LAYERS = ("cnn_disagree", "mg_orient_agree", "known_dist_km", "known_density", "tip_dist_km",
-                     "tip_along_cos", "dem_observed")
+                     "tip_along_cos", "dem_observed", "network_w2ctx")
 MIN_FINITE_SHARE = 0.5                  # a member layer counts on a segment when >= this share of it is finite
 
 
@@ -193,9 +193,14 @@ def unit_layers(G, su) -> tuple[dict, dict]:
         prov["known"] = "stack.permitted_known (W2 convention)"
     for k, v in kn.items():
         L[k] = np.where(ev, v, np.nan).astype(np.float32)
+    s = float(G.cfg["network_scale_km"])
     if "tip_dist_km" in L and "tip_along_cos" in L:
-        L["network"] = np.where(ev, network_evidence(L["tip_dist_km"], L["tip_along_cos"],
-                                                     float(G.cfg["network_scale_km"])), np.nan)
+        L["network"] = np.where(ev, network_evidence(L["tip_dist_km"], L["tip_along_cos"], s), np.nan)
+    # context-fairness ablation: the network evidence W2 itself could see (W2's permitted known map; for V2 it
+    # excludes the retained fold-k faults, for V1 / V3 it equals ``network``)
+    if "tip_dist_km" in raw and "tip_along_cos" in raw:
+        L["network_w2ctx"] = np.where(ev, network_evidence(raw["tip_dist_km"], raw["tip_along_cos"], s), np.nan)
+        prov["network_w2ctx"] = "W2 permitted-known context (p6.stack.permitted_known of the base unit)"
     dem = G.dem_layers(b)
     if dem is not None:
         L["dem"], L["dem_observed"] = dem["dem"], dem["observed"]

@@ -1,145 +1,115 @@
-# GEMS discovery-first GeoMoE (dgm.1-r1)
+# GEMS discovery-first GeoMoE (dgm.2-r1)
 
-One Colab experiment that asks why W2 (public DTI 0.0942) does not find new faults, whether independent geological
-evidence recovers systems the learned maps miss, and whether a geology-conditioned gate beats a fixed fusion of the
-same evidence, then writes a GeoTIFF only when a predeclared rule selects a model.
+Repairs the dgm.1-r1 Colab run (commit 7dab78f: stage 04 FAILED, everything after it failed or was misreported) and
+makes the comparison scientifically fair. **Authored, never executed: no number below is a result.**
 
-* Notebook: `notebooks/colab/GEMS_DISCOVERY_GEOMOE.ipynb` (CPU, High-RAM)
+* Notebook: `notebooks/colab/GEMS_DISCOVERY_GEOMOE.ipynb` (same file; CPU, High-RAM)
 * Code: `gems_bench/geomoe/` (`run.DiscoveryGeoMoE`); config `configs/geomoe/discovery_geomoe.yaml`
-* Tests: `tests/test_discovery_geomoe.py` + runtime `gems_bench/geomoe/selftest.py`
+* Tests: `tests/test_discovery_geomoe.py` + runtime `gems_bench/geomoe/selftest.py` (both run in stage [00])
 * Outputs: `MyDrive/GEMS_2/outputs/discovery_geomoe/`
 
-**Status: authored, never executed.** No number in this document is a result.
+## 1. What dgm.1-r1 got wrong, and the fix
 
-## 1. Reuse (nothing rebuilt)
+| defect (Colab evidence) | fix |
+|---|---|
+| `candidates.unique_coverage`: `F[others].any(1)` TypeError (pandas positional axis) | explicit `axis=1` on numpy arrays; same for `sum(1)` / `mean(1)`; empty-input path; regression test `test_regression_unique_coverage_colab_typeerror` + self-test `unique_coverage_regression` |
+| pytest failed but the notebook continued | stage [00] runs self-tests + pytest; nonzero exit or failed critical self-test = `TESTS_FAILED`, failing ids printed, `audit/pytest_output.txt`; [04]+ blocked |
+| downstream stages ran on missing inputs (`KeyError: 'scenario'`, missing npz) | `decide.DEPENDS` checked before every stage: `BLOCKED_UPSTREAM` (compute) / `NOT_EVALUATED` (decision); required outputs validated (exists, readable, columns) after a run and before any reuse |
+| [06] reported `INCONCLUSIVE, geology_unique=false` without coverage | per-scenario verdicts `GENERATION_LIMITED / RANKING_LIMITED / MIXED / NOT_DOMINANT / NOT_EVALUATED`; no majority vote (`MIXED` + `disagreement`); `geology_unique = None` unless an independent family was evaluated; [06] FAILS when nothing was measured |
+| "W2 retained" after a failed comparison | `select_model` returns `NO_MEASURED_COMPARISON` unless the reference and a fused model were evaluated on every scenario; export then writes no file and says "not evidence for W2" |
+| one failure lost a whole unit | a unit saves its inventory (labels, pools, segments, provenance) before coverage; each part validated (unit fingerprint, array shapes, columns) and only invalid parts recomputed |
+| scenario-optimised W2 shown as the baseline | `A_submitted_W2`: the factory's evaluated champion cell (rep, frac, blend, grid candidate, deploy kind) frozen for V1 / V2 / V3; scenario-selected W2 kept only as a diagnostic |
 
-| component | available | executed before | reused here as | limitation | action |
-|---|---|---|---|---|---|
-| Submission factory (`leaderboard_focus/factory.py`) | yes | yes (fold-stitched files pass read-back) | frozen-engine loader (`selftest`, `preflight`, `attach`); `readback_checks`, `verdict` | its own diagnostics are refreshed in its root | attach only, no factory candidate exported |
-| B0 / B1 honest maps (`gems3.official.unit_score`) | yes | yes | E1 sources | OOF on geo folds, discovery maps on disc splits only | none |
-| W2 held-out maps (`stack/maps/*.npy`) | yes | yes | E1 source, Model A_pixel | full-region refit failed parity (P6.1 X1) | zone-stitched only |
-| W2 unit features (`p6.stack.unit_raw` via `Boost.raw`) | yes | yes | CNN ranks, potential fields, permitted known geometry, G02 layers | one PF scale | second scale added (label-free) |
-| G01 / G02 rasters (`g02_23686a63cb`) | partial | yes (FAST_RESEARCH) | E3 sources | zone 2 / split 2 rasters were missing | missing units -> E3 UNAVAILABLE there (never zero, never backfilled) |
-| M7 DEM mosaic (100 m from 1 m tiles) | unknown | pilot | E4 `dem` layer | pilot coverage | `cached_only`: staged if on Drive, never downloaded |
-| M7 protocol (`score_row`, `block_components`, `paired_block_bootstrap`, `eligible`, `protocol_key`) | yes | yes | every score and bootstrap | - | none |
-| P6.1 X3 segment tools (`dedup_inventory`, `label_geometry`) | yes | yes | candidate inventory | skeleton approximations | none |
-| P6.1 X2 definitions | yes | yes | reconciled in stage 05 | other pool / budget than M7 | same-definition table |
-| `gems3.metric_opt.nested_select` | yes | yes | nested (rep, frac) per scenario | - | none |
-| `p6.final_submission` + `export_parity` | yes | yes | stitch, write, validate, recipe, plan audit | zone-stitched | writer root redirected to this experiment |
+## 2. Methodology changes
 
-## 2. Validation design (Experiment A)
+* **Reference**: `A_submitted_W2` is built with the factory's evaluation construction (`final_submission.zone_score`,
+  per-zone champion fusion) at the frozen cell; `audit/baseline_policy_parity.csv` compares each map with
+  `Boost.binary` (Jaccard) and the frozen boost-A grid components, and records the W2 map sha256 and recipe id.
+* **Fixed policy** (model selection): every model uses ONE rule for every scenario; the outer unit's (rep, frac) is
+  chosen on development units whose evaluation zone overlaps it by <= 5 % (`selection.policy_max_overlap`; V2 / V3 of
+  the same fold never qualify), by the mean over scenarios of the pooled DTI. When no unit qualifies the within-scenario
+  nested rule is used and flagged `DEV_OVERLAP_FALLBACK` (`validation/policy_development_units.csv`). The deployable
+  cell = the same rule on all units (`gating/deployable_policies.json`). Per-scenario nested numbers =
+  `gating/model_summary_scenario_selected.csv` (diagnostic only).
+* **V2 fairness**: `network_w2ctx` = network evidence from W2's own permitted-known context; `B_ctxW2` scores E4 with it
+  and drops tips-only candidates, so `B - B_ctxW2` isolates the benefit of the extra retained context. W2 cannot be
+  re-run with the V2 context (no persisted model): stated, not hidden.
+* **V2 subtypes**: `validation/v2_by_subtype.csv` (events, truth length, inventory / family coverage, recovered share,
+  gain vs the reference, official TP / FP / FN and DTI with the other withheld classes masked) and
+  `validation/v2_coverage_by_subtype.csv` (geometric, available after [05]).
+* **Leakage audit**: explicit tests only (`PASS` / `FAIL` / `UNVERIFIED`): known context vs truth pixels, real-pixel V2
+  truth, CNN provenance tags of the loaded maps, known-distance > 0 on truth, G02 raster identity, training zones of every
+  normalisation / fit, no truth column in gate features. CNN training-label exclusion is `UNVERIFIED` (frozen
+  experiments).
+* **G02**: `backfill_missing_g02=True` computes only the missing unit rasters with the attached run's frozen config
+  (`Boost.backfill`: refused on input drift, existing rasters never rewritten), then pushes them. Otherwise missing.
+  Consistent availability: E3 is dropped for a whole scenario when a zone lacks it; `B_E3_avail` (E3 where available)
+  is a non-promotable ablation.
+* **Coverage**: geometric (systems, length, family, unique beyond E1 / W2, subtype, distance band) and
+  **kernel-weighted oracle** (`candidates/kernel_weighted_oracle.csv`: official components under the evaluation area
+  fractions, diagnostic only). 300 m geometric coverage is not official TP support.
+* **Reconciliation**: `audit/candidate_bottleneck_reconciliation.csv` (label-free vs learned vs unified pool: system
+  and length coverage, ranking- vs generation-limited share of W2's missed length).
+* **Rules**: R6 magnetic / gravity agreement added; each rule ablated. Selection unchanged in spirit: B must beat the
+  frozen W2 on >= 2 scenarios without a drop; C / D must beat B by a paired margin; a collapsed gate is never promoted.
+  `gating/effect_decomposition.csv` separates pool, fusion, routing, learning, network (V2), geography (V3).
 
-| scenario | units | truth | known context / exclusion | sources |
-|---|---|---|---|---|
-| V1 withheld systems | `disc_official` splits | withheld systems | retained faults (pixel-exact, official convention) | split discovery CNN maps, W2 held-out |
-| V2 network completion | each geo fold k (whole fold = evaluation zone) | real mapped fold-k pixels withheld as tips (0.5-2 km), junction branches (<= 3 km), short splays (< 2 km), interior sub-sections | faults outside fold k + retained fold-k faults; retained fold-k faults masked pixel-exactly | fold-k OOF CNN, W2 held-out (no model saw any fold-k label) |
-| V3 geographic | geo folds | every mapped fault of fold k | faults outside fold k | fold-k OOF CNN, W2 held-out |
+## 3. Stage order and dependencies
 
-V2 never invents geometry (no lateral shift); the withheld pixels reach no input (leakage checks, stage 03). Every
-model, gate weight, normaliser and (rep, frac) cell of held-out zone z is fitted on the other zones of the SAME
-scenario, minus candidates within 2 km of zone z (`train_buffer_km`). Training, inner (training-zone) and outer
-(held-out) numbers are separate columns (`insample_dti`, `dti_dev`, `dti_heldout`); oracle rows carry
-`role = oracle` and are refused by every selection (`evaluate.guard_oracle`). V1 / V2 / V3 stay separate; the
-decision counts scenarios (no weighted pseudo-DTI).
+`[00] tests -> [01] attach -> [02] audit (+backfill) -> [03] scenarios -> [04] candidates -> [05] oracle ->
+[06] decision` (= FAST_DIAGNOSTIC), then `[07] experts -> [08] static -> [09] rules -> [10] learned -> [10b] compare
+-> [11] deployment -> [12] export`, always `[14] integrity -> [13] reports`.
 
-Distance bands (near <= 1 km, mid <= 5 km, far) split TP / FN by truth pixel and FP by predicted pixel; the bands sum
-to the official components (`scenarios.banded_components`).
+## 4. Colab run order
 
-## 3. Candidates and the coverage ceiling (Experiment B)
+1. Commit and push; open the notebook from GitHub; CPU, High-RAM.
+2. CONFIG: `mode='FAST_DIAGNOSTIC'`; pin `ref` / `EXPECT['commit']`. Run all cells.
+3. Read the printed coverage verdict, `reports/EXECUTION_STATUS.md`, `audit/stage_integrity.csv`.
+4. If [00]-[06] are COMPLETE: set `mode='FULL'`, run all cells again (finished stages print `REUSED_VALID_CACHE`).
+5. Optional: `backfill_missing_g02=True` once (CPU time per unit was measured at 0.15-0.5 h in P6), then rerun.
 
-Per unit: every available source layer -> 1-px `skeleton_1px` lines at 5 % of the eligible domain (low threshold);
-straight tip continuations of the permitted known traces; dedup across sources (spatial + orientation, crossings and
-short lines always kept); long branches cut to <= 3 km; provenance (`proposed_by`, `on_<source>`, `prop_<family>`).
+## 5. Outputs to inspect
 
-Coverage: a system is covered by a pool when >= 50 % of its scored pixels lie within 300 m of it (the system recovery
-rule of `m7.protocol.system_hits`). Tables: per pool / family, unique-family systems, missed systems (no pool),
-coverage by subtype (V2 class) and length bin, and two curves inside the inventory under the same budgets: `oracle`
-(truth-ordered, diagnostic) and `w2_order` (label-free). Gate (stage 06): GENERATION if the inventory covers < 60 % of
-systems; RANKING if it covers >= 60 % and W2's deployed cell recovers >= 20 points less; NEITHER_DOMINANT otherwise.
-The learned gate trains only on RANKING / NEITHER_DOMINANT (or when forced in CONFIG, which is recorded).
+`audit/` stage_integrity, pytest_output.txt, selftests, label_leakage_audit, baseline_policy_parity,
+candidate_bottleneck_reconciliation, metric_equivalence, g02_backfill.json · `validation/` frozen_w2_baseline,
+frozen_w2_summary, v2_events, v2_by_subtype, v2_coverage_by_subtype, per_zone_metrics, near_known_metrics,
+per_fault_type_metrics, policy_development_units · `candidates/` candidate_inventory.parquet, source_provenance,
+oracle_coverage, oracle_curves, kernel_weighted_oracle, coverage_by_distance, unique_systems, missed_systems,
+coverage_by_fault_type, coverage_decision.json · `experts/` expert_features.parquet, expert_scores.parquet,
+source_availability, source_normalization.json · `gating/` model_summary, model_summary_scenario_selected,
+static_fusion_results, rule_gate_results, learned_gate_results, paired_comparison, effect_decomposition,
+feature_importance, gating_weights.parquet, selection.json, deployable_policies.json, deployment_* ·
+`predictions/heldout|full_region/` · `submissions/` · `figures/` baseline_comparison, oracle_vs_actual,
+unique_geology_recovery, v2_fault_subtypes, expert_complementarity, gating_comparison, geographic_robustness (+ data
+CSVs, MISSING.txt) · `reports/` EXECUTION_STATUS, SCIENTIFIC_FINDINGS, MODEL_COMPARISON, LEADERBOARD_RECOMMENDATION,
+NEXT_ACTION · `manifests/` run.json, runtime_errors.json, stages/*.json.
 
-M7 vs X2: M7 measured LABEL-FREE crest coverage (~12.5 %); X2 attributed 82.9 % of missed LENGTH to ranking against a
-pool of the LEARNED maps at up to 5 % area. Stage 05 re-measures `label_free`, `fam:E1_learned`, `inventory` and W2's
-deployed recovery under one definition (`audit/protocol_comparison_measured.csv`).
+Reload examples (Colab, after cells 1-2):
 
-## 4. Experts, fusion and gating (Experiments C, D)
+```python
+pd.read_csv(OUT / 'audit/stage_integrity.csv')
+json.loads((OUT / 'candidates/coverage_decision.json').read_text())
+pd.read_parquet(OUT / 'candidates/candidate_inventory.parquet')
+G.s14_integrity(); G.s13_reports()          # rebuild integrity + reports from persisted tables
+```
 
-Experts: E1 learned (B0, B1, W2), E2 potential field (mag / grav gradients, cross-modal strike agreement, two-scale
-persistence), E3 structural (G02-C, G02-A, G01 persistence), E4 terrain / network (tip continuation x along-strike
-cosine, cached DEM). Expert score = mean of the available member layers along the candidate; normalised by an ECDF
-fitted on the training zones only. Missing = UNAVAILABLE: weights renormalise over the available experts; DEM absence
-is `dem_observed = 0`, never evidence against a fault.
+## 6. Runtime-unverified risks
 
-Models (same pool, same raster policies, same budget, same scorer):
-* A_pixel frozen W2 pixel map (reference); A_seg W2 mean on the unified pool;
-* B static fusion: simplex grid (step 0.25) chosen by length-weighted PU average precision on training candidates;
-* C rule gate: B's weights modified by R1 terrain scarp, R2 structural displacement, R3 tip continuation, R4
-  magnetic-edge-only down-weighting, R5 short multi-source preservation; C_all + one ablation per rule;
-* D learned gate: softmax(V z + b) routing over available experts, logistic link, L2 + KL toward B's weights, L-BFGS
-  with analytic gradient; collapse diagnostic (mean max weight and dominant share >= 0.9 -> not promotable).
+* Nothing ran locally: every test, self-test and engine call is unverified until Colab.
+* `Boost.binary` vs `EV.policy_q` parity is expected exact for V1 / V3; a FAIL blocks selection.
+* Discovery-split evaluation zones may overlap every geo fold and each other; then V1 uses the flagged fallback rule.
+* G02 backfill cost and its refusal on input drift; DEM stays absent unless the cached mosaic is on Drive.
+* Memory of stage 04 on full crops (one unit at a time, pools stored as packed bits).
+* The frozen policy is read from the factory's `F.C` table; if the factory attach changes that table the configured
+  fallback (`frozen_w2`) is used and recorded.
 
-PU targets: positive = >= 50 % of the candidate within 300 m of its training zone's scored truth; everything else
-unlabelled with weight 0.3, never a confirmed negative.
-
-Selection (`decide.select_model`): hard checks (no leakage, metric equivalence with the frozen boost-A grid, fair
-budgets, W2 baseline present) -> the simplest model that beats A_pixel by >= 0.005 in >= 2 of 3 scenarios without a
-scenario drop > 0.01 or worst-zone drop > 0.01 -> C_all replaces B only with a paired gain >= 0.005, D only with
->= 0.01 and bootstrap P(delta > 0) >= 0.8 in >= 2 scenarios and no collapse. Otherwise RETAIN_W2.
-
-## 5. Deployment and export
-
-Stage 11 compares on V3, at the same per-zone cells: `zone_stitched` (re-derived, must match the stage scores),
-`fold_average` (one model per other zone, averaged) and `footprint_rank` (layers ranked over the stitched footprint:
-the full-region refit transformation, on honest maps). Export uses `zone_stitched` only, and only when it is
-self-consistent. Stage 12 rebuilds geo zone k from the V3 candidates and the model fitted without zone k, with ONE
-all-zone cell (the model's in-sample choice on V1), writes through `p6.final_submission.write_file` under
-`outputs/discovery_geomoe/submissions/`, validates (`final_submission.validate`, `audit_export`, plan audit), reads
-the file back (`factory.readback_checks`) and records sha256. READY_FOR_UPLOAD only when every hard check passed on
-the read-back file. RETAIN_W2 -> no file (`NO_NEW_SUBMISSION`), unless `export.exploratory` (labelled EXPLORATORY).
-
-## 6. How to run
-
-1. Commit and push; open the notebook in Colab from GitHub; Runtime CPU, High-RAM.
-2. Edit only the CONFIG cell (pin `ref` / `EXPECT['commit']` to the pushed SHA).
-3. Run all cells top to bottom (or `RUN_ALL()` after cell 2). Cell 3 runs the self-tests and pytest.
-4. After a disconnect: restart, run cells 1-2, then the stage cells again (`SKIP_CACHED`, units `reused`).
-
-Longest stage: [04] (per unit: W2 unit features, 13 pools, dedup, coverage). [08]-[10] evaluate every model on
-2 reps x 5 fracs x 9 units; [11] rebuilds footprint-ranked layers once.
-
-## 7. Outputs (Drive `outputs/discovery_geomoe/`)
-
-`audit/` component_inventory, source_compatibility, label_leakage_audit, protocol_comparison(+_measured),
-metric_equivalence, selftests, pytest_output · `validation/` scenarios, folds, v2_events, per_zone_metrics,
-near_known_metrics, per_fault_type_metrics, system_recovery.parquet · `candidates/` candidate_inventory.parquet,
-candidate_geometries.gpkg (optional), candidate_source_agreement, source_overlap, source_provenance, oracle_coverage,
-oracle_curves (= oracle_curve), unique_systems, missed_systems, coverage_by_fault_type, coverage_decision.json,
-units/<fp>/ (per-unit labels + parts) · `experts/` expert_features.parquet, expert_scores.parquet,
-source_normalization.json, source_availability, pf_scale2.npz · `gating/` grid_*, scores_*.parquet,
-static_fusion_results, rule_gate_results, rule_firing_rates, learned_gate_results, feature_importance,
-gating_weights.parquet, model_summary, paired_comparison, selection.json, model_registry.json, deployment_* ·
-`predictions/heldout/` chosen held-out maps (packed bits) · `predictions/full_region/` exported score + binary ·
-`submissions/` *.tif + sidecars, submission_manifest.{csv,json}, checksums.txt, README_UPLOAD.md, export_gates ·
-`figures/` 7 PNGs + `<name>_data.csv`, MISSING.txt · `reports/` DISCOVERY_DIAGNOSIS, GEOMOE_BENCHMARK,
-SCIENTIFIC_DECISION, NEXT_ACTION · `manifests/` run.json, runtime_errors.json, stages/<stage>.json.
-
-## 8. Unverified until Colab runs
-
-* Every test and self-test (written, never run); every API call against the live engine (`Boost.raw`, `w2_map`,
-  `m7.elig`, `G02Experiment` rasters, DEM mosaic bands).
-* Metric equivalence of A_pixel vs the frozen boost-A grid (expected exact; a FAIL blocks selection).
-* Runtime / memory of stage 04 and 11 on full crops; candidate counts per unit.
-* Whether V1 eval zones overlap so much that the 2 km buffer starves training (recorded as `n_buffer_dropped`;
-  models fall back to static / uniform weights, recorded).
-* `OFFICIAL_EXCLUDE_SUPPORTS_TP` remains the repository's reading of the organiser statement.
-
-## 9. Fresh-session handoff
+## 7. Fresh-session handoff
 
 ```
-GEMS discovery GeoMoE dgm.1-r1: authored 2026-10-29, NOTHING executed. Notebook
-notebooks/colab/GEMS_DISCOVERY_GEOMOE.ipynb drives gems_bench/geomoe/run.DiscoveryGeoMoE through the submission
-factory's frozen engine. Before claiming anything read, on Drive outputs/discovery_geomoe/: manifests/run.json,
-manifests/stages/*.json, audit/selftests.csv, audit/metric_equivalence.csv, candidates/coverage_decision.json,
-gating/selection.json, submissions/submission_manifest.json, reports/SCIENTIFIC_DECISION.md, reports/NEXT_ACTION.md.
-W2 public 0.0942 is an external reference, never a tuning target. Do not start M9 full neural training.
+GEMS discovery GeoMoE dgm.2-r1 (repair of dgm.1-r1 Colab run 7dab78f): authored 2026-10-29, NOTHING executed.
+Before claiming anything read on Drive outputs/discovery_geomoe/: audit/stage_integrity.csv, reports/EXECUTION_STATUS.md,
+audit/pytest_output.txt, candidates/coverage_decision.json, validation/frozen_w2_baseline.csv,
+audit/baseline_policy_parity.csv, gating/selection.json (status + measured), submissions/submission_manifest.json.
+NOT_EVALUATED / BLOCKED_UPSTREAM / NO_MEASURED_COMPARISON are not results. Reference = A_submitted_W2 (public 0.0942,
+external only). No neural training, no M9.
 ```

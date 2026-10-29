@@ -1,11 +1,13 @@
 """Stage 13 figures: every PNG is drawn from persisted tables and saved with ``<name>_data.csv`` (Workspace.save_fig).
-A figure whose inputs are absent is skipped and named in ``figures/MISSING.txt``; it never fails the run."""
+A figure whose inputs are absent is skipped and named in ``figures/MISSING.txt``; it never fails the run and never
+plots placeholder values."""
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
 FAM = ("E1_learned", "E2_potential", "E3_structural", "E4_terrain_network")
+REF = "A_submitted_W2"
 
 
 def _plt():
@@ -17,40 +19,91 @@ def _plt():
     return plt
 
 
-def candidate_coverage(G):
-    S = G.ws.load_table("candidates/oracle_coverage.csv")
+def _bars(ax, D: pd.DataFrame, x: str, hue: str, y: str):
+    xs, hs = list(dict.fromkeys(D[x])), list(dict.fromkeys(D[hue]))
+    w = 0.8 / max(len(hs), 1)
+    for i, h in enumerate(hs):
+        d = D[D[hue] == h].set_index(x).reindex(xs)
+        ax.bar(np.arange(len(xs)) + i * w, d[y].to_numpy(float), w, label=str(h))
+    ax.set_xticks(np.arange(len(xs)) + 0.4 - w / 2)
+    ax.set_xticklabels(xs)
+    ax.legend(fontsize=7)
+
+
+def baseline_comparison(G):
+    S = G.ws.load_table("gating/model_summary.csv")
+    Sd = G.ws.load_table("gating/model_summary_scenario_selected.csv")
     if not len(S):
         return None
-    cols = [c for c in S if c.startswith("cov_fam:") or c in ("cov_label_free", "cov_inventory",
-                                                                "w2_recovered_share")]
-    D = S.melt(id_vars=["scenario"], value_vars=cols, var_name="pool", value_name="share")
+    keep = [m for m in (REF, "A_W2_policy_reselected", "A_seg", "B", "C_all", "D") if m in set(S.model)]
+    D = S[S.model.isin(keep)][["scenario", "model", "dti", "worst_zone_dti", "protocol"]]
+    if len(Sd):
+        D = pd.concat([D, Sd[Sd.model == "A_W2_scenario_selected_diagnostic"][["scenario", "model", "dti",
+                                                                               "worst_zone_dti"]].assign(
+            protocol="scenario_selected_diagnostic")], ignore_index=True)
     plt = _plt()
-    fig, ax = plt.subplots(figsize=(9, 4))
-    pools = list(dict.fromkeys(D.pool))
-    sc = list(dict.fromkeys(D.scenario))
-    w = 0.8 / max(len(pools), 1)
-    for i, p in enumerate(pools):
-        d = D[D.pool == p].set_index("scenario").reindex(sc)
-        ax.bar(np.arange(len(sc)) + i * w, d.share, w, label=p.replace("cov_", "").replace("fam:", ""))
-    ax.set(xticks=np.arange(len(sc)) + 0.4 - w / 2, xticklabels=sc, ylabel="share of truth systems", ylim=(0, 1),
-           title="Candidate coverage (300 m, >= 50 % of a system) vs W2 deployed recovery")
-    ax.legend(fontsize=7, ncol=2)
+    fig, ax = plt.subplots(figsize=(10, 4))
+    _bars(ax, D, "scenario", "model", "dti")
+    ax.set(ylabel="pooled held-out DTI", title="Frozen submitted W2 vs fixed-policy models (diagnostic W2 hatched "
+                                               "in data only)")
     return fig, D
 
 
-def unique_recovery(G):
-    S = G.ws.load_table("candidates/oracle_coverage.csv")
-    if not len(S):
+def oracle_vs_actual(G):
+    K = G.ws.load_table("candidates/oracle_curves.csv")
+    S = G.ws.load_table("validation/frozen_w2_baseline.csv")
+    if not len(K):
         return None
-    cols = [c for c in S if c.startswith("unique_")] + ["independent_not_E1"]
-    D = S.melt(id_vars=["scenario"], value_vars=[c for c in cols if c in S], var_name="family", value_name="systems")
+    g = K.groupby(["scenario", "order", "frac"])[["tp_w", "fp_w", "fn_w"]].sum().reset_index()
+    g["dti"] = g.tp_w / (g.tp_w + 0.2 * g.fp_w + 0.8 * g.fn_w + 1e-6)
+    D = g.assign(kind=g.order)
+    if len(S):
+        f = S.groupby(["scenario", "frac"])[["tp_w", "fp_w", "fn_w"]].sum().reset_index()
+        f["dti"] = f.tp_w / (f.tp_w + 0.2 * f.fp_w + 0.8 * f.fn_w + 1e-6)
+        D = pd.concat([D, f.assign(kind="frozen_W2_actual")], ignore_index=True)
     plt = _plt()
-    fig, ax = plt.subplots(figsize=(8, 4))
-    for i, (f, d) in enumerate(D.groupby("family", sort=False)):
-        ax.bar(np.arange(d.scenario.nunique()) + i * 0.15, d.systems, 0.15, label=f)
-    ax.set(xticks=np.arange(S.scenario.nunique()) + 0.3, xticklabels=list(S.scenario), ylabel="systems",
-           title="Systems covered by one family only (unique) / by independent geology and no learned source")
-    ax.legend(fontsize=7)
+    scs = list(dict.fromkeys(D.scenario))
+    fig, axs = plt.subplots(1, len(scs), figsize=(4.5 * len(scs), 4), squeeze=False, sharey=True)
+    for ax, sc in zip(axs[0], scs):
+        for k, d in D[D.scenario == sc].groupby("kind"):
+            ax.plot(d.frac, d.dti, "o-" if k != "frozen_W2_actual" else "k*", label=k)
+        ax.set(title=sc, xlabel="area fraction of eligible", ylabel="official DTI")
+    axs[0][0].legend(fontsize=7)
+    fig.suptitle("Kernel-weighted oracle (DIAGNOSTIC, truth-ordered) vs label-free W2 order vs frozen W2 actual")
+    return fig, D
+
+
+def unique_geology_recovery(G):
+    C = G.ws.load_table("candidates/oracle_coverage.csv")
+    if not len(C):
+        return None
+    cols = [c for c in C if c.startswith("unique_")] + [c for c in ("independent_not_E1", "independent_not_W2")
+                                                         if c in C]
+    D = C.melt(id_vars=["scenario"], value_vars=cols, var_name="quantity", value_name="systems")
+    plt = _plt()
+    fig, ax = plt.subplots(figsize=(9, 4))
+    _bars(ax, D, "scenario", "quantity", "systems")
+    ax.set(ylabel="systems", title="Systems covered only by one family / by independent geology and no E1 / no W2")
+    return fig, D
+
+
+def v2_fault_subtypes(G):
+    V = G.ws.load_table("validation/v2_by_subtype.csv")
+    if not len(V):
+        V = G.ws.load_table("validation/v2_coverage_by_subtype.csv")
+        if not len(V):
+            return None
+        D = V.melt(id_vars=["subtype"], value_vars=[c for c in V if c.startswith(("inventory_", "w2_", "coverage_"))],
+                   var_name="quantity", value_name="share")
+        y, title = "share", "V2 subtypes: geometric coverage and frozen W2 recovery (no model comparison yet)"
+    else:
+        D = V[[c for c in ("subtype", "model", "dti", "recovered_share", "tp_w", "fp_w", "fn_w") if c in V]]
+        D = D.rename(columns={"model": "quantity", "dti": "share"})
+        y, title = "share", "V2 subtypes: official DTI under each subtype's own mask, per model"
+    plt = _plt()
+    fig, ax = plt.subplots(figsize=(9, 4))
+    _bars(ax, D, "subtype", "quantity", y)
+    ax.set(title=title)
     return fig, D
 
 
@@ -67,6 +120,8 @@ def expert_complementarity(G):
             A, B = A.astype(bool), B.astype(bool)
             rows.append({"family_a": a, "family_b": b, "jaccard": float((A & B).sum() / max(int((A | B).sum()), 1))})
     D = pd.DataFrame(rows)
+    if not len(D):
+        return None
     M = D.pivot(index="family_a", columns="family_b", values="jaccard").reindex(index=FAM, columns=FAM)
     plt = _plt()
     fig, ax = plt.subplots(figsize=(5.5, 4.5))
@@ -77,123 +132,46 @@ def expert_complementarity(G):
     return fig, D
 
 
-def gate_weights_by_geology(G):
-    W = G.load_parquet("gating/gating_weights.parquet")
-    if len(W):
-        W["known_band"] = pd.cut(W.known_dist_km, [-1, 1, 5, 1e9], labels=["near<=1km", "mid<=5km", "far"])
-        D = W.groupby(["scenario", "known_band"], observed=True)[[f"g_{f}" for f in FAM]].mean().reset_index()
-        title = "Learned gate: mean routing weight by distance to the permitted known faults"
-    else:
-        S = G.ws.load_table("gating/static_weights.csv")
-        if not len(S):
-            return None
-        D = S.rename(columns={f"w_{f}": f"g_{f}" for f in FAM}).assign(known_band="all")
-        D["scenario"] = D.unit.str.split(":").str[0]
-        D = D.groupby(["scenario", "known_band"])[[f"g_{f}" for f in FAM]].mean().reset_index()
-        title = "Static fusion weights (no learned gate was trained)"
+def gating_comparison(G):
+    P = G.ws.load_table("gating/paired_comparison.csv")
+    if not len(P):
+        return None
+    D = P[["scenario", "method", "reference", "delta_dti", "ci_lo", "ci_hi", "p_delta_positive"]].copy()
+    D["pair"] = D.method + " - " + D.reference
     plt = _plt()
-    fig, ax = plt.subplots(figsize=(9, 4))
-    lab = [f"{a}|{b}" for a, b in zip(D.scenario, D.known_band)]
-    bottom = np.zeros(len(D))
-    for f in FAM:
-        ax.bar(lab, D[f"g_{f}"].to_numpy(float), bottom=bottom, label=f)
-        bottom += np.nan_to_num(D[f"g_{f}"].to_numpy(float))
-    ax.set(ylabel="weight", title=title)
-    ax.tick_params(axis="x", rotation=45, labelsize=7)
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    for i, (sc, g) in enumerate(D.groupby("scenario")):
+        x = np.arange(len(g)) + i * 0.25
+        ax.errorbar(x, g.delta_dti, yerr=[g.delta_dti - g.ci_lo, g.ci_hi - g.delta_dti], fmt="o", label=sc)
+    ax.axhline(0, color="k", lw=0.8)
+    ax.set_xticks(np.arange(D.pair.nunique()))
+    ax.set_xticklabels(list(dict.fromkeys(D.pair)), rotation=45, ha="right", fontsize=7)
+    ax.set(ylabel="paired DTI delta (90 % block bootstrap)", title="Fusion / gating vs frozen W2 and vs static fusion")
     ax.legend(fontsize=7)
     return fig, D
 
 
-def discovery_vs_geography(G):
-    S = G.ws.load_table("gating/model_summary.csv")
-    if not len(S):
-        return None
-    D = S.pivot_table(index="model", columns="scenario", values="dti").reset_index()
-    plt = _plt()
-    fig, ax = plt.subplots(figsize=(6, 5))
-    for r in D.itertuples():
-        x = getattr(r, "V3", np.nan)
-        for sc, mk in (("V1", "o"), ("V2", "s")):
-            y = getattr(r, sc, np.nan)
-            ax.scatter(x, y, marker=mk, label=f"{r.model} {sc}")
-            ax.annotate(r.model, (x, y), fontsize=7)
-    lim = [0, max(0.05, float(np.nanmax(D.drop(columns="model").to_numpy(float))) * 1.1)]
-    ax.plot(lim, lim, "k:", lw=0.8)
-    ax.set(xlabel="V3 geographic DTI (nested, pooled)", ylabel="V1 (o) / V2 (s) discovery DTI", xlim=lim, ylim=lim,
-           title="Discovery vs geographic transfer (same cross-fitted protocol)")
-    return fig, D
-
-
-def per_zone_dti(G):
+def geographic_robustness(G):
     P = G.ws.load_table("validation/per_zone_metrics.csv")
     if not len(P):
         return None
-    D = P[["scenario", "model", "zone", "rep", "frac", "dti_heldout"]]
+    D = P[[c for c in ("scenario", "model", "zone", "rep", "frac", "dti_heldout", "dev_rule") if c in P]]
     plt = _plt()
     scs = list(dict.fromkeys(D.scenario))
     fig, axs = plt.subplots(1, len(scs), figsize=(4 * len(scs), 4), sharey=True, squeeze=False)
     for ax, sc in zip(axs[0], scs):
-        d = D[D.scenario == sc]
-        for m, g in d.groupby("model"):
+        for m, g in D[D.scenario == sc].groupby("model"):
             ax.plot(g.zone, g.dti_heldout, "o-", label=m)
         ax.set(title=sc, xlabel="held-out zone", ylabel="DTI")
-    axs[0][-1].legend(fontsize=7)
-    fig.suptitle("Per-zone held-out DTI (nested rep x frac)")
+    axs[0][-1].legend(fontsize=6)
+    fig.suptitle("Per-zone held-out DTI (frozen W2 + fixed-policy models)")
     return fig, D
 
 
-def prediction_case_studies(G, n: int = 4, pad: int = 25):
-    Y = G.load_parquet("validation/system_recovery.parquet")
-    sel = (G.ws.read_json("gating/selection.json") or {}).get("selected")
-    if not len(Y) or G.units is None:
-        return None
-    m = sel if sel not in (None, "RETAIN_W2") else next((x for x in ("D", "C_all", "B") if x in set(Y.model)), None)
-    if m is None:
-        return None
-    a = Y[Y.model == m].set_index(["unit", "system_id"]).recovered
-    b = Y[Y.model == "A_pixel"].set_index(["unit", "system_id"]).recovered
-    j = pd.concat([a.rename("model"), b.rename("w2")], axis=1).dropna()
-    gained = j[(j.model.astype(bool)) & ~(j.w2.astype(bool))].reset_index()
-    lost = j[~(j.model.astype(bool)) & (j.w2.astype(bool))].reset_index()
-    cases = pd.concat([gained.head(n - n // 2).assign(kind=f"recovered by {m}, missed by W2"),
-                       lost.head(n // 2).assign(kind=f"recovered by W2, missed by {m}")], ignore_index=True)
-    if not len(cases):
-        return None
-    plt = _plt()
-    fig, axs = plt.subplots(1, len(cases), figsize=(4 * len(cases), 4), squeeze=False)
-    rows = []
-    for ax, r in zip(axs[0], cases.itertuples()):
-        su = next(s for s in G.units if s.key == r.unit)
-        gr, gc = su.unit.scorer.g_rc
-        ids = su.sysmap[gr, gc]
-        k = ids == int(r.system_id)
-        h, w = su.unit.ev.shape
-        r0, r1 = max(int(gr[k].min()) - pad, 0), min(int(gr[k].max()) + pad, h)
-        c0, c1 = max(int(gc[k].min()) - pad, 0), min(int(gc[k].max()) + pad, w)
-        img = np.ones((r1 - r0, c1 - c0, 3)) * 0.95
-        tr = np.zeros(su.unit.ev.shape, bool)
-        tr[gr[k], gc[k]] = True
-        kn = su.known
-        for arr, col in ((kn, (0.6, 0.6, 0.6)), (tr, (0.0, 0.0, 0.0))):
-            img[arr[r0:r1, c0:c1]] = col
-        for mm, col in (("A_pixel", (0.1, 0.3, 0.9)), (m, (0.9, 0.1, 0.1))):
-            p = G.ws.path(f"predictions/heldout/{su.key.replace(':', '_')}_{mm}.npz")
-            if p.exists():
-                with np.load(p) as z:
-                    q = np.unpackbits(z["q"])[:int(np.prod(z["shape"]))].reshape(z["shape"]).astype(bool)
-                img[q[r0:r1, c0:c1]] = col
-        ax.imshow(img, interpolation="nearest")
-        ax.set(title=f"{r.unit} sys {int(r.system_id)}\n{r.kind}", xticks=[], yticks=[])
-        rows.append({"unit": r.unit, "system_id": int(r.system_id), "kind": r.kind, "row0": r0 + su.unit.sl[0].start,
-                     "col0": c0 + su.unit.sl[1].start, "rows": r1 - r0, "cols": c1 - c0, "model": m})
-    fig.suptitle("black = held-out truth, grey = permitted known, blue = W2, red = model (overlap: red on top)")
-    return fig, pd.DataFrame(rows)
-
-
-FIGURES = {"candidate_coverage": candidate_coverage, "unique_recovery": unique_recovery,
-           "expert_complementarity": expert_complementarity, "gate_weights_by_geology": gate_weights_by_geology,
-           "discovery_vs_geography": discovery_vs_geography, "per_zone_dti": per_zone_dti,
-           "prediction_case_studies": prediction_case_studies}
+FIGURES = {"baseline_comparison": baseline_comparison, "oracle_vs_actual": oracle_vs_actual,
+           "unique_geology_recovery": unique_geology_recovery, "v2_fault_subtypes": v2_fault_subtypes,
+           "expert_complementarity": expert_complementarity, "gating_comparison": gating_comparison,
+           "geographic_robustness": geographic_robustness}
 
 
 def write_all(G) -> list[str]:
@@ -202,11 +180,10 @@ def write_all(G) -> list[str]:
         try:
             out = fn(G)
         except Exception as e:                           # a figure never decides anything
-            out = None
             missing.append(f"{name}: {type(e).__name__}: {e}")
+            continue
         if out is None:
-            if not any(m.startswith(name) for m in missing):
-                missing.append(f"{name}: inputs absent")
+            missing.append(f"{name}: inputs absent")
             continue
         fig, data = out
         G.ws.save_fig(fig, f"figures/{name}.png", data)

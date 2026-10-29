@@ -44,7 +44,7 @@ def deploy_model(G) -> str | None:
     sel = G.ws.read_json("gating/selection.json") or {}
     if sel.get("selected") not in (None, "RETAIN_W2"):
         return sel["selected"]
-    S = G.ws.load_table("gating/model_summary.csv")
+    S = G.ws.load_table("gating/model_summary.csv")                 # fixed-policy numbers
     S = S[(S.scenario == "V3") & S.model.isin(["B", "C_all", "D"])] if len(S) else S
     return str(S.sort_values("dti", ascending=False).model.iloc[0]) if len(S) else None
 
@@ -99,7 +99,7 @@ def run(G) -> tuple[str, dict]:
     dc = G.cfg["deployment"]
     m = deploy_model(G)
     if m is None:
-        return "SKIPPED", {"note": "no fused model was evaluated on V3"}
+        return "SKIPPED_BY_VALID_DECISION", {"reason": "no fused model was evaluated on V3"}
     units = [su for su in G.units if su.scenario == "V3"]
     P = G.ws.load_table("validation/per_zone_metrics.csv")
     P = P[(P.scenario == "V3") & (P.model == m)]
@@ -114,13 +114,14 @@ def run(G) -> tuple[str, dict]:
         lab = G.lab(su)
         v = G.views(su)
         T = v["T"][v["held"]]
-        a = G.fit_score(m, v)
+        a, _ = G.fit_score(m, v)
         st = stored[stored.unit == su.key].set_index("label").score.reindex(T.label.to_numpy()).to_numpy(float)
         others = sorted(int(z) for z in v["train_zones"])
-        fold = [G.fit_score(m, G.views(su, only_zone=j)) for j in others]
-        b = np.nanmean(np.stack(fold), 0) if fold else np.full(len(T), np.nan)
+        fold = [G.fit_score(m, G.views(su, only_zone=j))[0] for j in others]
+        with np.errstate(invalid="ignore"):
+            b = np.nanmean(np.stack(fold), 0) if fold else np.full(len(T), np.nan)
         vf = G.views(su, X=Xf)
-        c = G.fit_score(m, vf)
+        c, _ = G.fit_score(m, vf)
         c = pd.Series(c, index=vf["T"].label.to_numpy()[vf["held"]]).reindex(T.label.to_numpy()).to_numpy(float)
         for name, sc in (("zone_stitched", a), ("fold_average", b), ("footprint_rank", c)):
             sm = EV.score_map(lab, T.label.to_numpy(), sc, T.n_px.to_numpy())

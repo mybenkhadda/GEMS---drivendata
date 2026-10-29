@@ -267,7 +267,8 @@ def t_rule_gate():
     rc = {"factor": 2.0, "R1_terrain_scarp": {"dem_q": 0.8}, "R2_structural_displacement": {"pf_q": 0.7,
           "g02a_q": 0.7}, "R3_tip_continuation": {"tip_km": 1.0, "tip_cos": 0.7},
           "R4_magnetic_edge_only": {"mag_q": 0.8, "grav_q_max": 0.5, "g02c_q_max": 0.5},
-          "R5_short_multisource": {"short_km": 2.0, "min_agree": 2, "agree_q": 0.8}}
+          "R5_short_multisource": {"short_km": 2.0, "min_agree": 2, "agree_q": 0.8},
+          "R6_mag_grav_agreement": {"agree_min": 0.8, "pf_q": 0.6}}
     M = GA.rule_masks(D, rc)
     w = np.full(4, 0.25)
     s0, _ = GA.rule_gate(S, w, M, (), rc)
@@ -279,42 +280,147 @@ def t_rule_gate():
     return "R4 down-weights, R5 preserves; one ablation per rule"
 
 
-def t_selection_falsifiable():
+SEL = {"min_gain_vs_w2": 0.005, "min_scenarios_improved": 2, "max_scenario_drop": 0.01, "max_worst_zone_drop": 0.01,
+       "min_moe_gain_vs_static": 0.01, "min_p_positive": 0.8, "moe_min_scenarios": 2, "rule_min_gain_vs_static": 0.005}
+
+
+def _sel_tables(b=0.22, dd=0.222, ref=0.20):
     rows = []
     for sc in ("V1", "V2", "V3"):
-        rows += [{"scenario": sc, "model": "A_pixel", "dti": 0.20, "worst_zone_dti": 0.15},
-                 {"scenario": sc, "model": "B", "dti": 0.22, "worst_zone_dti": 0.16},
-                 {"scenario": sc, "model": "D", "dti": 0.222, "worst_zone_dti": 0.16}]
-    S = pd.DataFrame(rows)
+        rows += [{"scenario": sc, "model": DE.REFERENCE, "dti": ref, "worst_zone_dti": 0.15},
+                 {"scenario": sc, "model": "B", "dti": b, "worst_zone_dti": 0.16},
+                 {"scenario": sc, "model": "D", "dti": dd, "worst_zone_dti": 0.16}]
     P = pd.DataFrame([{"scenario": sc, "method": m, "reference": r, "p_delta_positive": 0.9, "ci_lo": 0, "ci_hi": 0}
-                      for sc in ("V1", "V2", "V3") for m, r in (("B", "A_pixel"), ("D", "A_pixel"), ("D", "B"))])
-    sel = {"min_gain_vs_w2": 0.005, "min_scenarios_improved": 2, "max_scenario_drop": 0.01,
-           "max_worst_zone_drop": 0.01, "min_moe_gain_vs_static": 0.01, "min_p_positive": 0.8, "moe_min_scenarios": 2,
-           "rule_min_gain_vs_static": 0.005}
-    hard = {"no_leakage": True}
-    a = DE.select_model(S, P, hard, False, sel)
-    assert a["selected"] == "B", a                                 # tiny MoE gain -> simpler model
-    S2 = S.assign(dti=np.where(S.model == "A_pixel", 0.30, S.dti))
-    assert DE.select_model(S2, P, hard, False, sel)["selected"] == DE.RETAIN_W2
-    assert DE.select_model(S, P, {"no_leakage": False}, False, sel)["status"] == "BLOCKED"
-    S3 = S.assign(dti=np.where(S.model == "D", 0.25, S.dti))
-    assert DE.select_model(S3, P, hard, False, sel)["selected"] == "D"
-    assert DE.select_model(S3, P, hard, True, sel)["selected"] == "B"   # collapsed gate never promoted
-    return "tiny MoE gain -> B; W2 better -> RETAIN_W2; leakage -> BLOCKED; collapsed D never promoted"
+                      for sc in ("V1", "V2", "V3") for m, r in (("B", DE.REFERENCE), ("D", DE.REFERENCE), ("D", "B"))])
+    return pd.DataFrame(rows), P
+
+
+def t_selection_falsifiable():
+    S, P = _sel_tables()
+    hard = {"no_leakage_failure": True}
+    a = DE.select_model(S, P, hard, False, SEL)
+    assert a["selected"] == "B" and a["measured"], a                # tiny MoE gain -> simpler model
+    S2, _ = _sel_tables(ref=0.30)
+    r = DE.select_model(S2, P, hard, False, SEL)
+    assert r["selected"] == DE.RETAIN_W2 and r["measured"]          # a MEASURED retention
+    assert DE.select_model(S, P, {"no_leakage_failure": False}, False, SEL)["status"] == DE.BLOCKED
+    S3, _ = _sel_tables(dd=0.25)
+    assert DE.select_model(S3, P, hard, False, SEL)["selected"] == "D"
+    assert DE.select_model(S3, P, hard, True, SEL)["selected"] == "B"   # collapsed gate never promoted
+    return "tiny MoE gain -> B; W2 better -> measured RETAIN_W2; leakage -> BLOCKED; collapsed D never promoted"
+
+
+def t_no_comparison_is_not_a_w2_win():
+    S, P = _sel_tables()
+    r = DE.select_model(S[S.model == DE.REFERENCE], P, {"x": True}, False, SEL)
+    assert r["status"] == DE.NO_MEASUREMENT and not r["measured"], r
+    r2 = DE.select_model(S[S.scenario != "V2"], P, {"x": True}, False, SEL)
+    assert r2["status"] == DE.NO_MEASUREMENT, r2                     # a scenario missing -> no measured comparison
+    r3 = DE.select_model(pd.DataFrame(columns=["scenario", "model", "dti", "worst_zone_dti"]), P, {}, False, SEL)
+    assert r3["status"] == DE.NO_MEASUREMENT
+    return "missing reference / models / scenario -> NO_MEASURED_COMPARISON, never RETAIN_W2"
 
 
 def t_coverage_gate():
     gc = {"min_pool_coverage": 0.6, "min_ranking_gap": 0.2, "min_unique_systems": 3, "min_unique_share": 0.05}
+    ev = {f"evaluated_{f}": True for f in DE.INDEPENDENT}
     S = pd.DataFrame([{"scenario": "V1", "n_systems": 40, "cov_inventory": 0.4, "w2_recovered_share": 0.3,
-                       "independent_not_E1": 1},
-                      {"scenario": "V2", "n_systems": 40, "cov_inventory": 0.5, "w2_recovered_share": 0.3,
-                       "independent_not_E1": 0},
+                       "independent_not_E1": 1, **ev},
+                      {"scenario": "V2", "n_systems": 40, "cov_inventory": 0.5, "w2_recovered_share": 0.1,
+                       "independent_not_E1": 0, **ev},
                       {"scenario": "V3", "n_systems": 40, "cov_inventory": 0.9, "w2_recovered_share": 0.4,
-                       "independent_not_E1": 6}])
-    d = DE.coverage_decision(S, gc, "V1")
-    assert d["overall"] == DE.GENERATION and d["per_scenario"]["V3"]["verdict"] == DE.RANKING
-    assert d["geology_unique"] and not d["learned_gate_allowed"]
-    return "GENERATION majority blocks the learned gate; unique independent coverage detected"
+                       "independent_not_E1": 6, **ev}])
+    d = DE.coverage_decision(S, gc)
+    v = {k: x["verdict"] for k, x in d["per_scenario"].items()}
+    assert v == {"V1": DE.GENERATION, "V2": DE.MIXED, "V3": DE.RANKING}, v
+    assert d["overall"] == DE.MIXED and d["disagreement"], "scenario disagreement hidden"
+    assert d["geology_unique"] is True and d["learned_gate_allowed"]
+    e = DE.coverage_decision(pd.DataFrame(), gc)
+    assert e["overall"] == DE.NOT_EVALUATED and e["geology_unique"] is None and not e["learned_gate_allowed"]
+    n = DE.coverage_decision(S.assign(**{k: False for k in ev}), gc)
+    assert n["geology_unique"] is None and n["geology_status"] == DE.NOT_EVALUATED
+    return "per-scenario verdicts kept (MIXED, no majority vote); unmeasured -> NOT_EVALUATED, geology None"
+
+
+def t_unique_coverage_regression():
+    """The exact input that failed in Colab (pandas: DataFrame.any() positional axis)."""
+    px = pd.DataFrame({"r": [1, 1, 1, 8, 8], "c": [1, 2, 3, 8, 9], "system_id": [1, 1, 1, 2, 2],
+                       "known_dist_km": 0.0})
+    a = np.zeros((10, 10), bool)
+    a[1, 1:4] = True
+    b = np.zeros((10, 10), bool)
+    b[8, 8:10] = True
+    C = CA.system_coverage(px, {"fam:E1_learned": a, "fam:E2_potential": b, "fam:E3_structural": a,
+                                "fam:E4_terrain_network": np.zeros_like(a)}, 0, 0.5)
+    U = CA.unique_coverage(C, list(EX.FAMILIES)).set_index("system_id")
+    assert bool(U.loc[2, "unique_E2_potential"]) and not bool(U.loc[1, "unique_E1_learned"])
+    assert int(U.loc[1, "n_families"]) == 2
+    E = CA.unique_coverage(C[C.pool == "none"], list(EX.FAMILIES))
+    assert not len(E) and "unique_E2_potential" in E
+    return "unique_coverage works with explicit axes (and on an empty pool table)"
+
+
+def t_dependency_enforcement():
+    st = {"00_tests": DE.COMPLETE, "03_scenarios": DE.COMPLETE, "04_candidates": DE.FAILED}
+    assert DE.dependency_status("05_oracle", st) == (DE.BLOCKED_UPSTREAM, ["04_candidates"])
+    st["05_oracle"] = DE.BLOCKED_UPSTREAM
+    assert DE.dependency_status("06_decision", st)[0] == DE.NOT_EVALUATED
+    assert DE.dependency_status("07_experts", st)[0] == DE.BLOCKED_UPSTREAM
+    assert DE.dependency_status("04_candidates", {**st, "00_tests": DE.TESTS_FAILED})[0] == DE.BLOCKED_UPSTREAM
+    assert DE.dependency_status("10_learned", {"06_decision": DE.COMPLETE, "08_static": DE.REUSED})[0] is None
+    assert DE.dependency_status("12_export", {"10b_compare": DE.SKIPPED_OK})[0] is None
+    return "failed upstream -> BLOCKED_UPSTREAM (compute) / NOT_EVALUATED (decision); tests gate stage 04"
+
+
+def t_tests_enforcement():
+    from .run import pytest_failures, tests_verdict
+
+    T = pd.DataFrame([{"test": "a", "critical": True, "status": "PASS"}])
+    out = "FAILED tests/test_discovery_geomoe.py::test_x - TypeError: boom\n1 failed, 30 passed"
+    st, why = tests_verdict(T, 1, out)
+    assert st == DE.TESTS_FAILED and pytest_failures(out) == ["tests/test_discovery_geomoe.py::test_x"], why
+    assert tests_verdict(T, 0, "30 passed")[0] == DE.COMPLETE
+    assert tests_verdict(T, 1, "No module named pytest")[0] == DE.TESTS_FAILED
+    assert tests_verdict(T.assign(status="FAIL"), 0, "")[0] == DE.TESTS_FAILED
+    return "nonzero pytest exit / failed critical self-test -> TESTS_FAILED"
+
+
+def t_fixed_policy_never_uses_outer_truth():
+    rows = []
+    for unit, sc, z, good in (("V1:0", "V1", 0, "a"), ("V1:1", "V1", 1, "a"), ("V3:0", "V3", 0, "b"),
+                              ("V3:1", "V3", 1, "b")):
+        for rep in ("a", "b"):
+            tp = 10.0 if rep == good else 1.0
+            rows.append({"unit": unit, "scenario": sc, "zone": z, "model": "B", "rep": rep, "frac": 0.01,
+                         "tp_w": tp, "fp_w": 5.0, "fn_w": 10.0 - tp, "n_truth": 10})
+    G = pd.DataFrame(rows)
+    dev = {"V1:0": ["V3:0", "V3:1"], "V1:1": ["V3:0", "V3:1"], "V3:0": ["V1:0", "V1:1"], "V3:1": ["V1:0", "V1:1"]}
+    S, P, dep = EV.fixed_policy(G, dev)
+    assert set(P[P.scenario == "V1"].rep) == {"b"} and set(P[P.scenario == "V3"].rep) == {"a"}, P
+    F, Q = EV.frozen_rows(G[G.rep == "a"], "B")
+    assert len(F) == 2 and (Q.rep == "a").all()
+    return "outer cell chosen on development units only (here deliberately the wrong one): no outer-fold tuning"
+
+
+def t_cache_validation(tmp=None):
+    import tempfile
+    from pathlib import Path as _P
+
+    from .run import DiscoveryGeoMoE
+
+    with tempfile.TemporaryDirectory() as d:
+        p = _P(d) / "x.csv"
+        pd.DataFrame({"scenario": ["V1"], "zone": [0]}).to_csv(p, index=False)
+
+        class W:
+            def path(self, rel):
+                return _P(d) / rel
+
+        g = DiscoveryGeoMoE.__new__(DiscoveryGeoMoE)
+        g.ws = W()
+        ok, bad = g.check_outputs([("x.csv", ("scenario", "zone")), ("y.parquet", None), ("x.csv", ("missing",))])
+        assert ok == ["x.csv"] and len(bad) == 2, (ok, bad)
+    return "a cached output is reused only when present, readable and complete"
 
 
 def t_readback_contract():
@@ -350,7 +456,13 @@ TESTS = [("withhold_real_pixels_only", True, t_withhold_real_pixels_only),
          ("raster_and_budget", True, t_raster_and_budget),
          ("rule_gate", False, t_rule_gate),
          ("selection_falsifiable", True, t_selection_falsifiable),
+         ("no_comparison_is_not_a_w2_win", True, t_no_comparison_is_not_a_w2_win),
          ("coverage_gate", True, t_coverage_gate),
+         ("unique_coverage_regression", True, t_unique_coverage_regression),
+         ("dependency_enforcement", True, t_dependency_enforcement),
+         ("tests_enforcement", True, t_tests_enforcement),
+         ("fixed_policy_never_uses_outer_truth", True, t_fixed_policy_never_uses_outer_truth),
+         ("cache_validation", True, t_cache_validation),
          ("readback_contract", True, t_readback_contract)]
 
 

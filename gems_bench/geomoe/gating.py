@@ -27,7 +27,7 @@ import pandas as pd
 from .experts import FAMILIES
 
 RULES = ("R1_terrain_scarp", "R2_structural_displacement", "R3_tip_continuation", "R4_magnetic_edge_only",
-         "R5_short_multisource")
+         "R5_short_multisource", "R6_mag_grav_agreement")
 E_IDX = {f: i for i, f in enumerate(FAMILIES)}
 GATE_DESCRIPTORS = ("mean_cnn_disagree", "mean_mag_hgrad", "mean_grav_hgrad", "mean_mg_orient_agree",
                     "mean_pf_persistence", "mean_g02c", "mean_g02a", "mean_g01_persistence", "length_km",
@@ -129,7 +129,10 @@ def rule_masks(D: pd.DataFrame, rc: dict) -> dict:
              "R4_magnetic_edge_only": (g("q_mean_mag_hgrad") >= rc["R4_magnetic_edge_only"]["mag_q"]) &
              (g("q_mean_grav_hgrad") < rc["R4_magnetic_edge_only"]["grav_q_max"]) &
              (np.nan_to_num(g("q_mean_g02c"), nan=0.0) < rc["R4_magnetic_edge_only"]["g02c_q_max"]),
-             "R5_short_multisource": g("length_km") <= rc["R5_short_multisource"]["short_km"]}
+             "R5_short_multisource": g("length_km") <= rc["R5_short_multisource"]["short_km"],
+             "R6_mag_grav_agreement": (g("mean_mg_orient_agree") >= rc["R6_mag_grav_agreement"]["agree_min"]) &
+             (g("q_mean_mag_hgrad") >= rc["R6_mag_grav_agreement"]["pf_q"]) &
+             (g("q_mean_grav_hgrad") >= rc["R6_mag_grav_agreement"]["pf_q"])}
     return {k: np.asarray(v, bool) for k, v in r.items()}
 
 
@@ -138,9 +141,9 @@ def rule_gate(S: np.ndarray, base_w, masks: dict, active, rc: dict) -> tuple[np.
     f = float(rc["factor"])
     W = np.tile(np.asarray(base_w, float), (S.shape[0], 1))
     up = {"R1_terrain_scarp": "E4_terrain_network", "R2_structural_displacement": "E3_structural",
-          "R3_tip_continuation": "E4_terrain_network"}
+          "R3_tip_continuation": "E4_terrain_network", "R6_mag_grav_agreement": "E2_potential"}
     for r, fam in up.items():
-        if r in active:
+        if r in active and r in masks:
             W[masks[r], E_IDX[fam]] *= f
     if "R4_magnetic_edge_only" in active:
         W[masks["R4_magnetic_edge_only"], E_IDX["E2_potential"]] /= f

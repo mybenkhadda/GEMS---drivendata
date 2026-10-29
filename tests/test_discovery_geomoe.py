@@ -210,7 +210,7 @@ def test_rule_variants_ablate_each_rule_once():
 
 # ------------------------------------------------------------------------------- fair budgets / raster
 def test_every_model_gets_the_same_budget_rule():
-    R = EV.budget_rows(pd.DataFrame({"model": ["A_pixel", "B"], "area_frac_eligible": [0.0100, 0.0100],
+    R = EV.budget_rows(pd.DataFrame({"model": ["A_submitted_W2", "B"], "area_frac_eligible": [0.0100, 0.0100],
                                      "frac": [0.01, 0.01]}), 0.02)
     assert R.budget_ok.all()
 
@@ -277,3 +277,91 @@ def test_deployment_parity_spearman():
 def test_submission_readback_contract():
     pytest.importorskip("rasterio")
     assert STT.run_selftests().set_index("test").status["readback_contract"] == "PASS"
+
+
+# ------------------------------------------------------------------------------- dgm.2 regressions / enforcement
+def test_regression_unique_coverage_colab_typeerror():
+    """dgm.1-r1 Colab: TypeError DataFrame.any() takes 1 positional argument (F[others].any(1))."""
+    px = pd.DataFrame({"r": [1, 1, 1, 8, 8], "c": [1, 2, 3, 8, 9], "system_id": [1, 1, 1, 2, 2],
+                       "known_dist_km": 0.0})
+    a = np.zeros((10, 10), bool)
+    a[1, 1:4] = True
+    b = np.zeros((10, 10), bool)
+    b[8, 8:10] = True
+    C = CA.system_coverage(px, {"fam:E1_learned": a, "fam:E2_potential": b, "fam:E3_structural": a,
+                                "fam:E4_terrain_network": np.zeros_like(a)}, 0, 0.5)
+    U = CA.unique_coverage(C, list(EX.FAMILIES))
+    assert set(U.system_id) == {1, 2} and U.set_index("system_id").loc[2, "unique_E2_potential"]
+    assert {"n_px", "near_share"} <= set(C.columns)
+
+
+def test_band_coverage_sums_to_truth_pixels():
+    px = pd.DataFrame({"r": [1, 2, 3], "c": [1, 1, 1], "system_id": [1, 1, 1], "known_dist_km": [0.5, 3.0, 9.0]})
+    m = np.zeros((5, 5), bool)
+    m[1, 1] = True
+    B = CA.band_coverage(px, {"inventory": m}, 0, [1.0, 5.0])
+    assert B.truth_px.sum() == 3 and B[B.band == "near"].covered_px.iloc[0] == 1
+
+
+def test_inventory_view_exposes_named_columns_and_absent_truncation():
+    T = pd.DataFrame({"unit": ["V1:0"], "label": [1], "scenario": ["V1"], "zone": [0], "theta": [0.0],
+                      "row_full": [1.0], "col_full": [2.0], "n_px": [5], "length_km": [0.56], "straightness": [1.0],
+                      "connectivity": [0], "proposed_by": ["w2"], "mean_w2": [0.9], "on_w2": [1.0]})
+    V = CA.inventory_view(T)
+    assert V.candidate_id.iloc[0] == "V1:0#1" and V.w2_score.iloc[0] == 0.9
+    assert np.isnan(V.g02_truncation.iloc[0]) and "y_near_truth" not in V
+
+
+def test_stage_dependencies_block_and_never_conclude():
+    st = {"00_tests": DE.COMPLETE, "03_scenarios": DE.COMPLETE, "04_candidates": DE.FAILED}
+    for s, want in (("05_oracle", DE.BLOCKED_UPSTREAM), ("07_experts", DE.BLOCKED_UPSTREAM)):
+        assert DE.dependency_status(s, st)[0] == want
+    assert DE.dependency_status("06_decision", {"05_oracle": DE.BLOCKED_UPSTREAM})[0] == DE.NOT_EVALUATED
+    assert DE.dependency_status("11_deployment", {"10b_compare": DE.FAILED})[0] == DE.NOT_EVALUATED
+    assert DE.dependency_status("05_oracle", st, strict=False)[0] is None
+
+
+def test_unmeasured_coverage_is_not_a_negative_geology_result():
+    d = DE.coverage_decision(pd.DataFrame(), {"min_pool_coverage": 0.6, "min_ranking_gap": 0.2,
+                                              "min_unique_systems": 3, "min_unique_share": 0.05})
+    assert d["overall"] == DE.NOT_EVALUATED and d["geology_unique"] is None and not d["learned_gate_allowed"]
+
+
+def test_pytest_failure_is_enforced():
+    T = pd.DataFrame([{"test": "a", "critical": True, "status": "PASS"}])
+    st, why = RN.tests_verdict(T, 1, "FAILED tests/test_discovery_geomoe.py::test_oracle - TypeError")
+    assert st == DE.TESTS_FAILED and any("test_oracle" in w for w in why)
+
+
+def test_new_config_keys_map_onto_old_ones_and_neural_training_refused():
+    c = RN.notebook_config({"mode": "FAST_DIAGNOSTIC", "dem": "off", "export_validated_candidate": False,
+                            "allow_exploratory_export": True})
+    assert c["experts"]["dem"] == "off" and not c["export"]["enabled"] and c["export"]["exploratory"]
+    old = RN.notebook_config({"mode": "FULL", "export": {"exploratory": True}})
+    assert old["export"]["exploratory"] and old["mode"] == "FULL"
+    with pytest.raises(RN.ConfigError):
+        RN.notebook_config({"train_neural_models": True})
+
+
+def test_v2_subtype_components_partition_truth():
+    from gems_bench.gems3.official import Unit
+
+    truth = np.zeros((20, 20), bool)
+    truth[5, 2:8] = True
+    truth[12, 2:8] = True
+    sysmap = np.full(truth.shape, -1, np.int32)
+    sysmap[5, 2:8], sysmap[12, 2:8] = 0, 1
+    ev = np.ones(truth.shape, bool)
+    u = Unit("v2_net", 0, (slice(0, 20), slice(0, 20)), ev, truth, np.zeros_like(truth), False, None)
+    E = pd.DataFrame({"event_id": [0, 1], "class": ["tip_extension", "branch"]})
+    q = truth.astype(np.float32)
+    K = EV.subtype_components(u, q, sysmap, E).set_index("subtype")
+    assert K.loc["branch", "n_truth"] == 6 and K.loc["tip_extension", "n_truth"] == 6
+    assert K.loc["branch", "fp_w"] == 0.0                           # the other class is masked, not a false positive
+
+
+def test_fixed_policy_and_frozen_reference_tables():
+    T = STT.run_selftests().set_index("test").status
+    for t in ("fixed_policy_never_uses_outer_truth", "no_comparison_is_not_a_w2_win", "dependency_enforcement",
+              "tests_enforcement", "cache_validation", "unique_coverage_regression"):
+        assert T[t] == "PASS", t
