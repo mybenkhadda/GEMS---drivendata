@@ -585,6 +585,13 @@ def grad_diff(a, b, sigma=3.0, signed=True):
     return _keep_nan(d if signed else np.abs(d), a, b)
 
 
+def tilt_angle(vertical, horizontal):
+    """Tilt derivative atan(vertical / |horizontal|) in degrees, [-90, 90]: e.g. tilt_angle(tmi_vg, tmi_hg) with the
+    provider's vertical and horizontal gradient bands (unit-free ratio; edges of sources near 0 deg)."""
+    v, h = _f32(vertical), np.abs(_f32(horizontal))
+    return _keep_nan(np.degrees(np.arctan2(v, h)), vertical, horizontal)
+
+
 def contrast(a, b, eps=1e-5):
     """Cross-layer normalised contrast (|a| - |b|) / (|a| + |b| + eps)."""
     return normdiff(f_abs(a), f_abs(b), eps)
@@ -684,6 +691,7 @@ OPS: dict[str, OpSpec] = {
     "grad_ratio": _spec(grad_ratio, ["a", "b"], _halo_sigma("sigma", extra=3), group="geology"),
     "grad_diff": _spec(grad_diff, ["a", "b"], _halo_sigma("sigma", extra=3), group="geology"),
     "contrast": _spec(contrast, ["a", "b"], group="geology"),
+    "tilt_angle": _spec(tilt_angle, ["vertical", "horizontal"], group="geology"),
 }
 
 
