@@ -1,0 +1,133 @@
+# GEMS G05.1 fault-system recovery & intelligent ranking (gems_bench/g05_1, docs/g05_1/).
+# Code-authoring-first: every number is produced in Colab. Frozen W2 / B0 / B1 / G02 artifacts are read-only inputs
+# attached through the submission factory (GeoMoE machinery). Every threshold below is predeclared: nothing is tuned on
+# an outer held-out zone, outer truth, or a public leaderboard score.
+version: g051.1
+output_root: outputs/g05_1_system_recovery          # run dir = <output_root>/<run_id> (deterministic, never reused for
+                                                    #   another configuration)
+
+# ------------------------------------------------------------------------------------------------ historical references
+# Recorded in earlier sessions with DIFFERENT protocols / representations: never compared as if they were this run.
+historical:
+  - {candidate: "W2 top 1%", protocol: "G05 discovery-proxy", dti: 0.282538}
+  - {candidate: "W2 conditional top 1%", protocol: "G05 discovery-proxy", dti: 0.282780}
+  - {candidate: "W2 + CNN 10%, top 1%", protocol: "G05 discovery-proxy", dti: 0.276115}
+  - {candidate: "Graph residual, top 1%", protocol: "G05 discovery-proxy", dti: 0.259019}
+  - {candidate: "Physics-only (best recorded policy)", protocol: "G05 discovery-proxy", dti: 0.052312}
+  - {candidate: "W2 top 1%", protocol: "G05 geographic", dti: 0.130868}
+  - {candidate: "W2 crest 5%", protocol: "G05 geographic", dti: 0.188956}
+  - {candidate: "W2 (P6 audit)", protocol: "P6 discovery, other representation / selection", dti: 0.224640}
+  - {candidate: "W2 submitted file", protocol: "public leaderboard (external reference, never a target)", dti: 0.0942}
+
+# Diagnostic investigation targets from G05 (larger union pool, NOT matched budget): never a training set.
+target_systems: {0: [471, 492, 531], 1: [243, 559], 2: [356, 544, 560]}   # disc_official zone -> system ids
+g05_reference: {union_covered: 46, w2_covered: 38, withheld_systems: 120}
+
+# ------------------------------------------------------------------------------------------------ inputs
+inputs:
+  features_tif: data/raw/geodawn/gems-geodawn-numerical-features.tif
+  faults_tif: data/raw/faults/existing_faults.tif
+  template_tif: data/raw/example_submission.tif
+  g05_root: outputs/g05_reasoning_engine            # optional; run chosen by manifest policy below
+  g05_run_id: null                                  # explicit override; else the policy picks one
+  g05_run_policy: latest_complete_manifest          # latest_complete_manifest | require_override
+  domains_npz: outputs/geological_discovery_eda/rasters/spatial_domains/domains.npz   # optional
+  expected_grid: {height: 3730, width: 3292, epsg: 32611, res_m: 100.0, bands: 19}
+  raw_bands: [mag_anom, rtp, tmi_hg, tmi_vg, iso_grav_anom, iso_grav_anom_hg, iso_grav_anom_vg, det_elev,
+              det_elev_slope, depth_to_base_surf]   # exact identifiers (text before the ' - ' description)
+
+# ------------------------------------------------------------------------------------------------ Stage C recall
+recall:
+  final_budgets: [0.005, 0.01, 0.02]                # deployable final-area budgets (share of eligible pixels)
+  diagnostic_pools: [0.05, 0.10]                    # candidate-recall CEILINGS only (never deployable)
+  rep: skeleton_1px                                 # same rasterisation for every construction (W2 frozen rep)
+  experts:                                          # construction -> member layers (geomoe unit layers)
+    W2: [w2]
+    CNN: [cnn_b0, cnn_b1, fusion]
+    Magnetic: [mag_hgrad]
+    Gravity: [grav_hgrad]
+    Multiscale: [pf_persistence, mg_cross]
+    Wavelet: [g01_persistence]
+    Structural: [g02c, g02a]
+    Network: [network]
+  unions:                                           # equal-budget unions (W2 always included)
+    W2+CNN: [W2, CNN]
+    W2+Magnetic: [W2, Magnetic]
+    W2+Gravity: [W2, Gravity]
+    W2+Multiscale: [W2, Multiscale]
+    W2+G01G02: [W2, Wavelet, Structural]
+    Full: [W2, CNN, Magnetic, Gravity, Multiscale, Wavelet, Structural, Network]
+  union_rule: max_rank                              # max of per-expert eligible ranks (one budget for the union)
+  quota_rule: true                                  # also: each member gets budget / n_members (OR of selections)
+
+# ------------------------------------------------------------------------------------------------ Stage D registry
+registry:
+  ring_km: 1.0                                      # local background ring for score contrast
+  persistence_budgets: [0.005, 0.01, 0.02]          # W2 threshold persistence
+  texture_sigma_px: 5.0
+  orientation_sigma_px: 5.0
+  regional_radius_km: 10.0
+  known_density_radius_km: 5.0
+  survey_axes_deg: [0, 90]                          # artifact indicator: strike within tol of survey axes
+  survey_axis_tol_deg: 2.0
+  short_km: 0.5
+
+# ------------------------------------------------------------------------------------------------ Stage E displacement
+displacement:
+  enabled_fields: [rtp, iso_grav_anom]
+  side_px: [3, 6]                                   # parallel profiles at +- this many px from the trace
+  max_shift_px: 8                                   # bounded along-strike displacement search (0.8 km)
+  min_length_px: 15                                 # shorter segments are UNRESOLVABLE (reported, not forced)
+  smoothing_sigma_px: [0.0, 2.0]                    # scale stability
+  control_offset_px: 12                             # negative control: both profiles on the same side
+  max_segments_per_unit: 4000                       # top W2 + every candidate near a target system
+
+# ------------------------------------------------------------------------------------------------ Stage F graph
+graph:
+  max_gap_km: 2.0
+  max_angle_deg: 25.0
+  branch_km: 0.6
+  branch_angle_deg: [20, 90]
+  scale_km: 1.0                                     # distance weighting exp(-gap / scale)
+  regional_radius_km: 10.0
+
+# ------------------------------------------------------------------------------------------------ Stage G labels / rankers
+labels:
+  positive_share: 0.5                               # >= this share of the segment within 300 m of training truth
+  ambiguous_share: 0.1                              # between ambiguous and positive: excluded from training
+  hard_negative_w2_q: 0.9                           # unlabelled candidate with W2 rank >= this quantile = hard negative
+  hard_negative_weight: 1.0
+  unlabeled_weight: 0.3                             # PU: other unlabelled candidates down-weighted
+rankers:
+  models: [G0, G1, G2, G3, G4]                      # G5 (graph-informed) added when graph features exist
+  seed: 2026
+  lgbm: {n_estimators: 150, learning_rate: 0.05, num_leaves: 7, min_child_samples: 50, subsample: 0.8,
+         colsample_bytree: 0.7, reg_lambda: 10.0}
+  lambda_grid: [0.0, 0.25, 0.5, 1.0]                # correction strength, chosen on INNER zones only
+  pair_group_km: 20.0                               # G2: pairs within 20 km blocks
+  gate: {w2_q_max: 0.7, evidence_q_min: 0.7}        # G3: correct only where W2 is weak and evidence strong
+  strict_fixed_blend: 0.25                          # S1 strict variant: predeclared label-free weight (not tuned)
+
+# ------------------------------------------------------------------------------------------------ Stage I selection
+selection:
+  reps:                                             # gems3.representation syntax (same for every model)
+    top_area: {select: top}
+    skeleton_1px: {select: top, post: [[skeleton, {width_px: 0}]]}
+    crest_1px: {select: crest}
+    soft_corridor: {select: top, post: [[skeleton, {width_px: 0}], [two_level, {halo_px: 1, halo_value: 0.5}]]}
+    soft_confidence: {select: top, post: [[skeleton, {width_px: 0}], [soft_top, {v_min: 0.5}]]}
+    confidence_width: {select: top, post: [[skeleton, {width_px: 0}], [confidence_width, {hi_quantile: 0.7}]]}
+  budgets: [0.005, 0.01, 0.015, 0.02, 0.03, 0.05]
+  partial_segments: true                            # pixel-level W2 tie-break inside a segment
+  budget_tolerance: 0.02
+promotion:                                          # research decision rules (not leaderboard promises)
+  min_disc_gain: 0.005
+  recommend_disc_gain: 0.010
+  max_worst_zone_drop: 0.01
+  max_geo_drop: 0.005
+  min_extra_systems: 1
+  require: [provenance_verified, upstream_honesty_verified, export_parity_verified]
+
+# ------------------------------------------------------------------------------------------------ Stage J ablations
+ablation_families: [D1_ranking_cnn, D2_magnetic, D2_gravity, D2_multiscale, F_graph, D4_known, D5_regional,
+                    D7_uncertainty]
