@@ -1,0 +1,158 @@
+# G06 geological feature store (gems_bench/g06/feature_store.py). Docs: docs/g06/FEATURE_DICTIONARY.md.
+# Everything here enters the run-directory identity (config.data_identity): change it -> a new run directory, the
+# previous store is never overwritten. Band identifiers are EXACT (the part of the GeoTIFF description before " - ");
+# preflight fails closed on a missing, duplicated or undeclared identifier. Units are DECLARED here and must be checked
+# against inventory/band_inventory.csv (description column) after the first preflight.
+version: g06.fs.1
+
+grid: {height: 3730, width: 3292, epsg: 32611, pixel_m: 100.0, n_bands: 19}
+
+sources:            # first existing candidate under local_root, then drive_root, then the repository
+  features: {candidates: [data/raw/geodawn/gems-geodawn-numerical-features.tif, gems-geodawn-numerical-features.tif]}
+  faults: {candidates: [data/raw/faults/existing_faults.tif, data/raw/geodawn/existing_faults.tif, existing_faults.tif]}
+  submission: {candidates: [data/raw/geodawn/example_submission.tif, data/raw/example_submission.tif,
+                            example_submission.tif]}
+
+bands:              # identifier: modality, declared unit, FIXED model-input transform (no fitted normalisation)
+  mag_anom: {modality: magnetic, unit: nT, transform: asinh, scale: 100.0}
+  rtp: {modality: magnetic, unit: nT, transform: asinh, scale: 100.0}
+  tmi: {modality: magnetic, unit: nT, transform: asinh, scale: 100.0}
+  tmi_hg: {modality: magnetic, unit: nT/m, transform: asinh, scale: 1.0}
+  tmi_vg: {modality: magnetic, unit: nT/m, transform: asinh, scale: 1.0}
+  tc: {modality: magnetic, unit: unverified, transform: identity}
+  iso_grav_anom: {modality: gravity, unit: mGal, transform: identity}
+  iso_grav_anom_hg: {modality: gravity, unit: mGal/km, transform: identity}
+  iso_grav_anom_vg: {modality: gravity, unit: mGal/km, transform: identity}
+  iso_grav_anom_slope: {modality: gravity, unit: unverified, transform: identity}
+  det_elev: {modality: terrain, unit: m, transform: identity}
+  det_elev_slope: {modality: terrain, unit: deg, transform: identity}
+  depth_to_base_surf: {modality: basement, unit: m, transform: identity}
+  cond_surf: {modality: conductivity, unit: unverified, transform: slog1p, scale: 1.0}
+  geod_2ndinv: {modality: strain, unit: unverified, transform: identity}
+  geod_shearrate: {modality: strain, unit: unverified, transform: identity}
+  geod_dilaterate: {modality: strain, unit: unverified, transform: identity}
+  deq_n100a15: {modality: seismicity, unit: count, transform: log1p, scale: 1.0}
+  ieq_n100a15: {modality: seismicity, unit: count, transform: log1p, scale: 1.0}
+
+nodata: {abs_max: 1.0e30, footprint_min_share: 0.5}   # footprint = >= 50 % of bands finite (gems_bench.data rule)
+
+tiling:
+  tile_px: 512          # mirrored from the notebook CONFIG
+  halo_px: 64           # MINIMUM halo; the effective halo = max(this, operator support) is recorded in the schema
+  block_px: 256         # GeoTIFF internal tile
+  compress: deflate
+  keep_tile_cache: false
+
+registry: {min_coverage: 0.01}   # a channel finite on < 1 % of the footprint is kept but usable=false
+
+groups:
+  raw: {enabled: true, missing_min_frac: 0.001}
+  magnetic:
+    enabled: true
+    field: rtp
+    scales_m: [100, 300, 700, 1500]
+    ops: [hgm, ocos, osin, lap, hl1, hl2, d2n, d2t, curv, edge]
+  gravity:
+    enabled: true
+    field: iso_grav_anom
+    scales_m: [100, 300, 700, 1500]
+    ops: [hgm, ocos, osin, lap, hl1, hl2, d2n, d2t, curv, edge]
+  multiscale:
+    enabled: true
+    extra_fields: [det_elev, depth_to_base_surf]
+    extra_scales_m: [300, 1500]
+    extra_ops: [hgm, edge]
+    dog: {fields: [rtp, iso_grav_anom], bands_m: [[100, 300], [300, 700], [700, 1500]], integration_m: [300, 700, 700]}
+  texture:
+    enabled: true
+    sources: [rtp, iso_grav_anom, det_elev]
+    windows: [3, 7, 15, 31]
+    stats: [std, range]
+    mean_windows: [31]
+    quantile_windows: [7]
+    quantiles: [0.1, 0.5, 0.9]
+    entropy_windows: [7, 15, 31]
+    entropy_levels: 16
+    edge_fields: [rtp, iso_grav_anom]
+    edge_windows: [7, 15, 31]
+    orientation_windows: [15]
+    orientation_bins: 4
+    min_support: 0.3
+  structural:
+    enabled: true
+    fields: [rtp, iso_grav_anom, det_elev]
+    scales_m: [300, 700, 1500]
+    integration_factor: 1.5
+    max_integration_m: 1500
+    continuity_fields: [rtp, iso_grav_anom]
+    continuity_steps: 4
+    cross_modal_pairs: [[rtp, iso_grav_anom], [rtp, det_elev], [iso_grav_anom, det_elev]]
+    discontinuity_fields: [rtp, iso_grav_anom, det_elev, depth_to_base_surf]
+    discontinuity_scale_m: 300
+  context:
+    enabled: true
+    regional_sigma_m: 1500
+    texture_fields: [rtp, iso_grav_anom]
+    roughness_field: det_elev
+    roughness_sigma_m: 700
+    seismicity: [deq_n100a15, ieq_n100a15]
+    seismicity_sigma_m: 700
+    strain: [geod_2ndinv, geod_shearrate, geod_dilaterate]
+    basement: depth_to_base_surf
+  magnetic_spectral: {enabled: true, field: rtp, smooth_m: 100, upward_km: [1.0, 3.0]}
+  gravity_spectral: {enabled: true, field: iso_grav_anom, smooth_m: 100, upward_km: [1.0, 3.0]}
+  context_global:
+    enabled: true
+    dist_cap_km: 20.0
+    domains:
+      enabled: true
+      k: 6
+      sample: 200000
+      seed: 2026
+      features: [ctx_rtp_regtex, ctx_iso_grav_anom_regtex, ctx_det_elev_rough, ctx_depth_to_base_surf_reg,
+                 ctx_geod_shearrate_asinh, ctx_seis_log]
+
+known_context:      # per-unit permitted known-fault context (never stored globally; never a pixel-model input)
+  cap_km: 20.0
+  density_radius_km: 2.0
+  tip_max_km: 5.0
+  orientation_sigma_m: 300
+  network_radius_km: 5.0
+
+reuse:              # existing derived features are inventoried; G06 recomputes its own definitions (provenance)
+  g01_g02: inventory_only        # historically incomplete in zone 2: never zero-filled, never backfilled here
+  g05_feature_tif: inventory_only
+
+atlas:
+  downsample: 8
+  per_group: 12
+  max_correlation_features: 60
+  mag_grav_panels: [rtp, tmi_hg, iso_grav_anom, iso_grav_anom_hg]
+  profile_features: [phys_rtp, phys_iso_grav_anom, mag_rtp_hgm_s300, grav_iso_grav_anom_hgm_s300,
+                     mag_rtp_persist, grav_iso_grav_anom_persist, struct_rtp_coh_s300, struct_rtp_ridge_s300,
+                     struct_x_rtp__iso_grav_anom_agreew_s300, tex_rtp_std_w7, mag_rtp_tilt, ctx_rtp_regtex]
+
+inventory:
+  artifacts:
+    - {id: geodawn_raster, pattern: data/raw/geodawn/gems-geodawn-numerical-features.tif, role: source, required: true}
+    - {id: existing_faults, pattern: data/raw/faults/existing_faults.tif, role: labels, required: true,
+       note: "also accepted under data/raw/geodawn/"}
+    - {id: submission_template, pattern: "data/raw/**/example_submission.tif", role: template, required: true}
+    - {id: geographic_folds, pattern: outputs/benchmark/folds/geo_k3_b20km_buf13km_s2026/fold_map.tif,
+       role: V3 folds, required: true}
+    - {id: discovery_splits, pattern: outputs/benchmark/folds/discovery_d3_link1km_s2026/discovery_map.tif,
+       role: V1 splits, required: true}
+    - {id: p6_w2_maps, pattern: "outputs/p6_fast_track/stack/maps/*.npy", role: W2 held-out maps, required: true}
+    - {id: m9_cnn_outputs, pattern: "outputs/m9_geofault_production/manifests/*", role: CNN B0 / B1 honest maps,
+       required: false, note: "read through the frozen engine (gems3.official.unit_score)"}
+    - {id: g01_wavelet, pattern: "outputs/m9_geofault_production/research/G01_wavelet_geology/*", role: G01 features,
+       required: false, backfill: "configs/m9/g01_wavelet_geology.yaml in its own notebook (GPU-free, hours); not launched by G06"}
+    - {id: g02_structural, pattern: "outputs/m9_geofault_production/research/G02_structural_geology/g02_*",
+       role: G02 features, required: false,
+       backfill: "GeoMoE CONFIG backfill_missing_g02=True computes only missing units; not launched by G06"}
+    - {id: g05_outputs, pattern: "outputs/g05_reasoning_engine/*", role: G05 feature GeoTIFF, required: false}
+    - {id: g05_1_registry, pattern: "outputs/g05_1_system_recovery/*/registry/fault_hypothesis_registry.parquet",
+       role: G05.1 candidate inventory, required: false}
+    - {id: geomoe_inventory, pattern: outputs/discovery_geomoe/candidates/candidate_inventory.parquet,
+       role: GeoMoE candidate inventory, required: false}
+    - {id: g05_2_outputs, pattern: "outputs/g05_2*/*", role: G05.2 research outputs, required: false}

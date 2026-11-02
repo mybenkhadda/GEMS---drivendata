@@ -1,0 +1,172 @@
+# G06 benchmarks (datasets, models, validation, evaluation). Docs: docs/g06/TRAINING_PROTOCOL.md and
+# VALIDATION_PROTOCOL.md. Every value is predeclared: nothing is tuned on an outer held-out zone, outer truth or a
+# leaderboard score. Changing a section invalidates only the stages that read it (config.stage_config).
+version: g06.bm.1
+
+validation:
+  scenarios: [V1, V3, V2]               # V1 primary, V3 secondary, V2 diagnostic (predicted by the V3 fold models)
+  v1_training_region: all_visible       # all_visible | outside_eval_zone (stricter, less data)
+  v1_eval_buffer_km: 2.0
+  segment_buffer_km: 5.0                # training candidates near the held-out zone are dropped
+  nested_pixel_experiments: [G06-P5]    # inner fits V1:j|k / V3:j|k for strict segment / meta inputs
+  nested_scenarios: [V1, V3]
+
+inner_cv: {n_folds: 3, block_km: 20.0, buffer_km: 2.0}
+
+supervision:
+  ignore_km: 0.3                        # halo of a visible fault: position uncertainty -> IGNORE
+  likely_background_km: 3.0
+  unlabeled_weight: 0.3                 # PU weight
+  likely_background_weight: 1.0
+  hard_negative_weight: 1.5
+  hard_negative_min_km: 1.0
+  unlabeled_confidence: 0.5
+  likely_background_confidence: 0.9
+  system_weight: sqrt                   # equal | sqrt | length (per visible system)
+  target_dist_cap_km: 5.0
+  orientation: {sigma_m: 300, min_coherence: 0.5}
+  segment: {tol_px: 3, positive_share: 0.5, negative_share: 0.1}
+  connection:
+    max_gap_km: 2.0
+    gap_positive_share: 0.5
+    gap_features: [mag_rtp_hgm_s300, grav_iso_grav_anom_hgm_s300, struct_rtp_coh_s300, mag_rtp_persist]
+
+sampling:
+  block_km: 20.0
+  label_spacing_px: 3                   # at most one positive per 300 m cell
+  per_system_cap: 2000
+  label_max: 120000
+  background_total: 300000
+  background_min_per_block: 20
+  evidence_feature: mag_rtp_hgm_s300    # label-free hard-negative stratum
+  evidence_quantile: 0.95
+  evidence_total: 60000
+  region_km: 60.0
+  region_balance_alpha: 0.5
+  neg_to_pos: 1.0
+
+models:
+  random_forest: {n_estimators: 200, max_depth: 14, min_samples_leaf: 20, max_features: sqrt, max_samples: 0.5,
+                  n_jobs: -1}
+  lightgbm: {n_estimators: 800, learning_rate: 0.05, num_leaves: 31, max_depth: -1, min_child_samples: 100,
+             subsample: 0.8, subsample_freq: 1, colsample_bytree: 0.6, reg_lambda: 5.0, n_jobs: -1,
+             early_stopping_rounds: 50}
+  xgboost: {n_estimators: 800, learning_rate: 0.05, max_depth: 6, min_child_weight: 5, subsample: 0.8,
+            colsample_bytree: 0.6, reg_lambda: 5.0, tree_method: hist, n_jobs: -1, early_stopping_rounds: 50}
+  segment_lightgbm: {n_estimators: 400, learning_rate: 0.03, num_leaves: 15, min_child_samples: 40, subsample: 0.8,
+                     subsample_freq: 1, colsample_bytree: 0.7, reg_lambda: 10.0}
+  segment_random_forest: {n_estimators: 300, max_depth: 10, min_samples_leaf: 10, max_features: sqrt, n_jobs: -1}
+  segment_catboost: {iterations: 600, depth: 5, learning_rate: 0.03, l2_leaf_reg: 10}
+  segment_ranker: {n_estimators: 300, learning_rate: 0.03, num_leaves: 15, min_child_samples: 40, reg_lambda: 10.0}
+
+pixel_experiments:            # Track A: geology only (no W2 / CNN / known-fault column can enter)
+  G06-P0: {families: [raw], model: random_forest}
+  G06-P1: {families: [raw], model: lightgbm}
+  G06-P2: {families: [raw, physics], model: lightgbm}
+  G06-P3: {families: [raw, physics, texture], model: lightgbm}
+  G06-P4: {families: [raw, physics, structure], model: lightgbm}
+  G06-P5: {families: [raw, physics, texture, structure, context], model: lightgbm}
+  G06-P5X: {families: [raw, physics, texture, structure, context], model: xgboost}
+
+segment_candidates:           # label-free pools; strict S1 needs pools subset of {physics, g06}
+  pools:
+    w2: {frac: 0.02}
+    cnn: {frac: 0.02}
+    physics: {feature: mag_rtp_hgm_s300, frac: 0.02}
+  track_b_evidence: true
+  max_len_px: 60
+  min_px: 5
+  dedup_tol_px: 2
+  dedup_min_share: 0.6
+  dedup_max_angle_deg: 20
+  geology_features: [raw_rtp, raw_iso_grav_anom, raw_det_elev_slope, raw_depth_to_base_surf,
+                     mag_rtp_hgm_s100, mag_rtp_hgm_s300, mag_rtp_hgm_s700, mag_rtp_persist, mag_rtp_curv_s300,
+                     grav_iso_grav_anom_hgm_s300, grav_iso_grav_anom_hgm_s700, grav_iso_grav_anom_persist,
+                     mag_rtp_tilt, mag_rtp_tiltzero, grav_iso_grav_anom_tiltzero,
+                     struct_rtp_coh_s300, struct_rtp_ridge_s300, struct_rtp_valley_s300, struct_rtp_along_s300,
+                     struct_rtp_trunc_s300, struct_iso_grav_anom_coh_s300, struct_iso_grav_anom_along_s300,
+                     struct_x_rtp__iso_grav_anom_agreew_s300, struct_disc_count_s300,
+                     tex_rtp_std_w7, tex_rtp_ent_w15, tex_rtp_edged_w15, ctx_rtp_regtex, ctx_domain]
+  std_features: [mag_rtp_hgm_s300, grav_iso_grav_anom_hgm_s300]
+  orientation_pairs:
+    rtp: [struct_rtp_ocos_s300, struct_rtp_osin_s300]
+    grav: [struct_iso_grav_anom_ocos_s300, struct_iso_grav_anom_osin_s300]
+    elev: [struct_det_elev_ocos_s300, struct_det_elev_osin_s300]
+  jump_fields: [phys_rtp, phys_iso_grav_anom]
+  jump_offset_px: 3
+
+segment_experiments:
+  G06-S1: {track: S1, model: lightgbm, scenarios: [V1, V3]}
+  G06-S1C: {track: S1, model: catboost, optional: true, scenarios: [V1, V3]}
+  G06-S1R: {track: S1, model: ranker, optional: true, scenarios: [V1, V3]}
+  G06-S2: {track: S2, model: lightgbm, scenarios: [V1, V3]}
+
+segment_map:                  # segment-assisted maps keep the pixel ranking
+  lambda: 0.5
+  g06_experiment: G06-P5      # G06 pixel evidence column + S1 pixel base (nested for training units)
+  fallback_feature: mag_rtp_hgm_s300
+
+patch:
+  experiment: G06-U1
+  index: {patch_px: 128, stride_px: 128, min_footprint: 0.5}
+  patch_px: 128
+  channels: [raw_rtp, raw_iso_grav_anom, raw_det_elev, raw_det_elev_slope, raw_depth_to_base_surf,
+             mag_rtp_hgm_s100, mag_rtp_hgm_s300, mag_rtp_persist, grav_iso_grav_anom_hgm_s300,
+             grav_iso_grav_anom_persist, struct_rtp_coh_s300, struct_rtp_ocos_s300, struct_rtp_osin_s300,
+             struct_rtp_ridge_s300, struct_x_rtp__iso_grav_anom_agreew_s300, mag_rtp_tilt]
+  fits: ["V1:0", "V1:1", "V1:2"]
+  base_channels: 16
+  depth: 3
+  epochs: 30
+  steps_per_epoch: 100
+  batch: 16
+  lr: 0.001
+  weight_decay: 0.0001
+  patience: 5
+  pos_patch_share: 0.5
+  positive_weight: 5.0
+  unlabeled_weight: 0.3
+  dilate_px: 1
+  min_region_share: 0.7
+  scaler_sample: 200000
+  overlap: 0.5
+
+meta:
+  g06_experiment: G06-P5
+  inputs: [w2, cnn_b0, cnn_b1, g06_pixel]
+  models: [w2, rank_average, residual_lgbm, moe]
+  rank_average_weights: {w2: 0.5, g06_pixel: 0.5}      # predeclared, no fit -> STRICT_LABEL_FREE
+  scenarios: [V1, V3]
+  use_domain: true
+  residual_lgbm: {n_estimators: 200, learning_rate: 0.03, num_leaves: 15, min_child_samples: 200, subsample: 0.8,
+                  subsample_freq: 1, colsample_bytree: 0.8, reg_lambda: 20.0}
+  moe: {C: 0.1, tau: 5000}
+  rows: {pos_cap_per_unit: 20000, neg_per_unit: 80000, neg_buffer_px: 5, negative_weight: 1.0,
+         exclude_buffer_km: 5.0}
+
+evaluation:
+  reps:
+    top: {select: top, post: []}
+    skeleton1: {select: top, post: [[skeleton, {width_px: 1}]]}
+  fracs: [0.005, 0.01, 0.02]
+  primary: {rep: top, frac: 0.01}       # FIXED comparison policy for every model
+  system_recovered_support: 0.5
+  system_recovered_frac: 0.5
+  pr_auc_max_px: 2000000
+  calibration_bins: 10
+
+promotion:
+  min_gain_v1: 0.005
+  recommend_gain_v1: 0.010
+  max_zone_drop: 0.01
+  min_v3_delta: -0.005
+  min_net_systems: 1
+
+inference: {experiments: [G06-P5]}
+export: {model: null}                   # null = the best PROMOTE_CANDIDATE (needs a full-region raster)
+
+historical:                             # other protocols / representation rules: references only
+  G05_V1_discovery_top1pct_W2: 0.282538
+  G05_V1_discovery_skeleton_nominal1pct_W2: 0.242156
+  G05_V3_geography_top1pct_W2: 0.130868
+  public_leaderboard_W2: 0.0942
