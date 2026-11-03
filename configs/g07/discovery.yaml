@@ -1,0 +1,254 @@
+# G07 high-resolution multiscale fault discovery (gems_bench/g07). Docs: docs/g07/.
+# Every threshold is predeclared; nothing is tuned on outer held-out truth or a leaderboard score.
+version: g07.cfg.1
+
+inputs:
+  sources:
+    features: {candidates: [data/raw/geodawn/gems-geodawn-numerical-features.tif, gems-geodawn-numerical-features.tif]}
+    faults: {candidates: [data/raw/faults/existing_faults.tif, data/raw/geodawn/existing_faults.tif, existing_faults.tif]}
+    submission: {candidates: [data/raw/geodawn/example_submission.tif, data/raw/example_submission.tif,
+                              example_submission.tif]}
+
+g06:                                  # REUSED feature store (never rebuilt here)
+  run_dir: null                       # null = newest COMPLETE store under search_root (or CONFIG['g06_run_dir'])
+  search_root: outputs/g06_geological_feature_store
+  stage_local: true                   # copy features/ from Drive to local disk once (fast window reads)
+
+w2:
+  p6_dir: outputs/p6_fast_track       # stack/maps/<task>_<zone>.npy (held-out), stack/maps/full_score.tif (full region)
+
+dem:
+  catalog:
+    url_lists: [data/raw/dem_1m/tnm_urls.json, data/raw/tnm_items.json, data/raw/dem_1m/tnm_items.json]
+    local_dirs: [data/raw/dem_1m]
+    inspect_remote_headers: false     # true: read CRS / resolution of catalog-only tiles over HTTP (headers only)
+    max_remote_headers: 20
+  existing_products: ["data/processed/dem_1m_100m/*.tif", "outputs/m7_discovery_first/dem/features/*.tif"]
+  vertical_unit_override: null       # e.g. metre - ONLY after checking the source metadata (USGS 3DEP 1 m: NAVD88 m)
+  research_use_ok: true               # USGS 3DEP is public domain
+  competition_eligibility_verified: false   # set true only after confirming the competition's external-data rules
+  max_accepted_res_m: 3.0             # coarser sources are LOCAL_INVALID: a 100 m band is never a "high-res DEM"
+  overlap_policy: latest
+  work_res_m: 2.0                     # fine tier: 1 m tiles block-averaged x2 (set 1.0 for native 1 m)
+  scales_m: [4, 10, 30]               # fine tier (work resolution)
+  coarse_res_m: 10.0                  # coarse tier: one merged 10 m DEM (seamless across tiles)
+  coarse_scales_m: [60, 150, 300]
+  unet_scales_m: [20, 50]             # surface patches (unet res_m)
+  integration_factor: 2.0
+  hillshade_azimuths: [315, 45, 135, 225]
+  sun_altitude_deg: 45
+  relief_windows_m: [30, 150]
+  openness_radius_m: 60
+  openness_dirs: 8
+  scarp_slope_deg: 12.0
+  scarp_coherence: 0.55
+  scarp_step_m: [0.5, 30.0]
+  lineament_min_m: 0.05
+  lineament_coherence: 0.5
+  min_coverage: 0.5                   # a 100 m cell counts as DEM-covered at >= 50 % valid DEM
+  require_go: true                    # DEM_FEATURES needs a GO from DEM_FEASIBILITY
+  agreement_scale_m: 300
+  download: {enabled: false, max_tiles: 10, max_gib: 6.0, min_valid_frac: 0.05}
+  coverage: {}
+
+feasibility:
+  max_tiles: 12                       # pilot: label-free choice (largest eligible V1-zone area)
+  near_px: 1
+  background_km: 2.0
+  fp_frac: 0.01
+  dem_score_features: [dem_scarp_s10, dem_lin_s10, dem_hs_range, dem_curvprof_s10, dem_dircoh_fine]
+  recall_fracs: [0.01, 0.02]
+  case_quotas: {w2_missed: 10, w2_recovered: 8, w2_false_positive: 8}
+  case_box_cells: 40
+  max_cases: 30
+  case_res_m: 2.0
+  case_panels: [dem_hs315, dem_hs_range, dem_slope_s10, dem_scarp_s10, dem_lin_s10, dem_curvprof_s10,
+                dem_aniso_s30, dem_scarp_s150]
+  go_if:
+    min_eligible_share: 0.05
+    min_systems: 5
+    min_auc: 0.60
+    min_incremental_systems: 2
+    max_rho_with_coverage: 0.5
+
+validation:
+  scenarios: [V1, V3, V2]
+  v1_training_region: all_visible
+  v1_eval_buffer_km: 2.0
+  segment_buffer_km: 5.0
+  nested: true                        # nested fits V1:j|k / V3:j|k for the experiments listed as nested
+  nested_scenarios: [V1, V3]
+
+inner_cv: {n_folds: 3, block_km: 20.0, buffer_km: 2.0}
+
+labels:
+  supervision:
+    ignore_km: 0.3
+    likely_background_km: 3.0
+    unlabeled_weight: 0.3
+    likely_background_weight: 1.0
+    hard_negative_weight: 1.5
+    hard_negative_min_km: 1.0
+    system_weight: sqrt
+    target_dist_cap_km: 5.0
+    unlabeled_confidence: 0.5
+    likely_background_confidence: 0.9
+    positive_weight: 5.0
+  improved: {unlabeled_min_weight: 0.1, hard_negative_weight: 2.0, hard_negative_min_km: 1.0, neg_to_pos: 1.0}
+  proximity_lambda_km: 0.3
+  candidate: {tol_px: 3, positive_share: 0.5, negative_share: 0.1}
+
+datasets:
+  subsurface_sampling:
+    block_km: 20.0
+    label_spacing_px: 2
+    per_system_cap: 3000
+    label_max: 200000
+    background_total: 400000
+    background_min_per_block: 20
+    evidence_feature: mag_rtp_hgm_s300
+    evidence_quantile: 0.95
+    evidence_total: 100000
+    region_km: 60.0
+    region_balance_alpha: 1.0
+    neg_to_pos: 1.0
+  surface_sampling:
+    block_km: 10.0
+    label_spacing_px: 1
+    per_system_cap: 3000
+    label_max: 150000
+    background_total: 200000
+    background_min_per_block: 10
+    evidence_feature: dem_scarp_s10
+    evidence_quantile: 0.95
+    evidence_total: 50000
+    region_km: 30.0
+    region_balance_alpha: 1.0
+    neg_to_pos: 1.0
+  surface_patches: true
+
+models:
+  lightgbm: {n_estimators: 800, learning_rate: 0.05, num_leaves: 31, min_child_samples: 100, subsample: 0.8,
+             subsample_freq: 1, colsample_bytree: 0.6, reg_lambda: 5.0, n_jobs: -1, early_stopping_rounds: 50}
+  lightgbm_regression: {n_estimators: 800, learning_rate: 0.05, num_leaves: 31, min_child_samples: 100,
+                        subsample: 0.8, subsample_freq: 1, colsample_bytree: 0.6, reg_lambda: 5.0, n_jobs: -1,
+                        early_stopping_rounds: 50}
+  random_forest: {n_estimators: 200, max_depth: 14, min_samples_leaf: 20, max_features: sqrt, max_samples: 0.5,
+                  n_jobs: -1}
+  candidate_lightgbm: {n_estimators: 400, learning_rate: 0.03, num_leaves: 15, min_child_samples: 30, subsample: 0.8,
+                       subsample_freq: 1, colsample_bytree: 0.7, reg_lambda: 10.0}
+  candidate_catboost: {iterations: 600, depth: 5, learning_rate: 0.03, l2_leaf_reg: 10}
+  candidate_ranker: {n_estimators: 300, learning_rate: 0.03, num_leaves: 15, min_child_samples: 30, reg_lambda: 10.0}
+
+subsurface:                           # System B (G06 store; geology only)
+  experiments:
+    G07-B0: {families: [raw, physics, structure], weight: weight_g06}
+    G07-B1: {families: [raw, physics, structure], weight: weight_improved}
+    G07-B2: {families: [raw, physics, structure], weight: weight_improved, target: proximity,
+             params: lightgbm_regression}
+  nested_experiments: [G07-B1]
+
+surface:                              # System A (DEM-covered cells)
+  experiments:
+    G07-A1: {model: lightgbm, prefixes: [dem_slope, dem_curv, dem_tpi, dem_rough, dem_ridge, dem_valley, dem_aniso,
+                                         dem_hs, dem_relief, dem_open]}
+    G07-A2: {model: lightgbm, prefixes: [dem_, x_dem_]}
+    G07-A1RF: {model: random_forest, prefixes: [dem_slope, dem_curv, dem_tpi, dem_rough, dem_ridge, dem_valley,
+                                                dem_aniso, dem_hs, dem_relief, dem_open]}
+  nested_experiments: [G07-A2]
+  unet:
+    res_m: 10.0
+    patch_cells: 24                   # 2.4 km patches = 240 px at 10 m
+    channels: [dem_hs315, dem_hs45, dem_hs_range, dem_slope_s20, dem_curvprof_s20, dem_curvplan_s20, dem_tpi_s50,
+               dem_rough_s20, dem_relief_w150, dem_scarp_s20, dem_lin_s20, dem_aniso_s20, dem_openpos]
+    min_patch_coverage: 0.8
+    fits: ["V1:0", "V1:1", "V1:2"]
+    base_channels: 16
+    depth: 3
+    epochs: 30
+    steps_per_epoch: 60
+    batch: 8
+    lr: 0.001
+    weight_decay: 0.0001
+    patience: 5
+    pos_patch_share: 0.5
+    positive_weight: 5.0
+    unlabeled_weight: 0.3
+    dice_weight: 0.5
+    orient_weight: 0.2
+    min_region_share: 0.7
+
+candidates:
+  pools:
+    w2: {frac: 0.03}
+    cnn: {frac: 0.02}
+    surface: {frac: 0.02}
+    surface_label_free: {feature: dem_scarp_s10, frac: 0.02}
+    subsurface: {frac: 0.02}
+    magnetic: {feature: mag_rtp_hgm_s300, frac: 0.015}
+    gravity: {feature: grav_iso_grav_anom_hgm_s300, frac: 0.015}
+    structural: {feature: struct_rtp_coh_s300, frac: 0.015}
+    persistence: {feature: mag_rtp_persist, frac: 0.015}
+  model_maps: {surface: G07-A2, subsurface: G07-B1}
+  max_len_px: 60
+  min_px: 5
+  dedup_tol_px: 2
+  dedup_min_share: 0.6
+  dedup_max_angle_deg: 20
+  geology_features: [raw_rtp, raw_iso_grav_anom, raw_det_elev_slope, raw_depth_to_base_surf, mag_rtp_hgm_s300,
+                     mag_rtp_persist, grav_iso_grav_anom_hgm_s300, grav_iso_grav_anom_persist, mag_rtp_tilt,
+                     struct_rtp_coh_s300, struct_rtp_along_s300, struct_rtp_trunc_s300,
+                     struct_x_rtp__iso_grav_anom_agreew_s300, struct_disc_count_s300, tex_rtp_std_w7, ctx_domain,
+                     dem_scarp_s10, dem_scarp_max_s10, dem_lin_s10, dem_hs_range, dem_curvprof_s10, dem_aniso_s30,
+                     dem_scarp_persist_fine, dem_dircoh_fine, dem_scarp_s150, dem_trunc_s30, dem_valleyline_fine,
+                     x_dem_rtp_agree, x_dem_iso_grav_anom_agree, dem_coverage]
+  std_features: [mag_rtp_hgm_s300, dem_scarp_s10]
+  orientation_pairs:
+    rtp: [struct_rtp_ocos_s300, struct_rtp_osin_s300]
+    grav: [struct_iso_grav_anom_ocos_s300, struct_iso_grav_anom_osin_s300]
+  jump_fields: [phys_rtp, phys_iso_grav_anom]
+  jump_offset_px: 3
+  augmentation: {enabled: true, per_system: 4, max_shift_px: 4, max_rot_deg: 15, n_negatives: 200}
+
+known_context: {cap_km: 20.0, density_radius_km: 2.0, tip_max_km: 5.0, orientation_sigma_m: 300,
+                network_radius_km: 5.0}
+
+ranker:
+  experiments:
+    G07-D1: {model: lightgbm, w2_aware: false, nested: true}       # geology / DEM only (strict-capable)
+    G07-D1W: {model: lightgbm, w2_aware: true, nested: true}       # W2-aware (SCREENING_ONLY)
+  require_strict: false
+  lambda: 0.5
+
+representation:
+  primary_frac: 0.01
+  tie_break: secondary_then_hash
+  policies:
+    top: {select: top, post: []}
+    skeleton1: {select: top, post: [[skeleton, {width_px: 1}]]}
+  portfolio: {w2_base_share: 0.85, kappa: 0.25, min_utility: 0.0}
+  corridor: {halo_value: 0.5, v_min: 0.4}
+
+evaluation:
+  fracs: [0.005, 0.01, 0.02]
+  system_recovered_support: 0.5
+  system_recovered_frac: 0.5
+
+meta_rows: {neg_per_unit: 50000, pos_cap_per_unit: 20000, neg_buffer_px: 5}
+
+promotion:
+  min_gain_v1: 0.005
+  recommend_gain_v1: 0.010
+  max_zone_drop: 0.01
+  min_v3_delta: -0.005
+  min_net_systems: 1
+  require_recall_gain: false
+
+inference: {}
+export: {}
+
+historical:                           # other protocols: references only, never comparable or tuning targets
+  W2_V1_discovery_proxy_top1pct: 0.282538
+  W2_V3_geographic_proxy_top1pct: 0.130868
+  public_leaderboard_W2: 0.0942
+  leaderboard_target_not_a_result: 0.40

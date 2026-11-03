@@ -55,10 +55,11 @@ def segment_feature_columns(T: pd.DataFrame, track: str, families=None) -> list[
 def class_weights(T: pd.DataFrame, y: np.ndarray) -> np.ndarray:
     """Length x label confidence, then positives and negatives balanced to equal totals."""
     w = np.maximum(T.seg_length_km.to_numpy(float), 0.05) * np.maximum(T.label_conf.to_numpy(float), 0.1)
+    half = 0.5 * w.sum()                       # fixed before rescaling (g07.1: classes now end exactly equal)
     for v in (0, 1):
         m = y == v
         if m.any():
-            w[m] *= 0.5 * w.sum() / max(w[m].sum(), 1e-12)
+            w[m] *= half / max(w[m].sum(), 1e-12)
     return w.astype(np.float32)
 
 
