@@ -46,12 +46,44 @@ def test_nodata_hole_creates_no_scarp():
     z[30:40, 30:40] = np.nan
     f = F.dem_multiscale_features(z, 2.0, CFG, "fine")
     ring = np.zeros(z.shape, bool)
-    ring[26:44, 26:44] = True
+    ring[15:55, 15:55] = True
     ring[30:40, 30:40] = False
     s = f["dem_slope_s4"][ring]
+    assert np.isfinite(s).any()
     assert np.nanmax(s) < 10.0              # a zero fill would create a ~50 deg cliff at the gap edge; masking: none
     assert np.nanmax(f["dem_scarpmask_s4"][ring]) == 0
     assert np.isnan(f["dem_slope_s4"][35, 35])
+
+
+def test_tile_edge_invents_no_lineament():
+    """A data edge through a tilted plane: inside the guard no value, beyond it no response runs along the edge. Rows and
+    columns near the array border are skipped: there the halo plays this role in the real pipeline."""
+    r, c = np.indices((80, 80), dtype=np.float64)
+    z = 0.1 * c * 2.0 + 0.05 * r * 2.0                                      # ~6 deg: below the scarp slope threshold
+    z[:, 50:] = np.nan
+    f = F.dem_multiscale_features(z, 2.0, CFG, "fine")
+    for s in (4, 10):
+        guard = int(np.ceil(4.0 * s / 2.0))
+        assert np.isnan(f[f"dem_slope_s{s}"][:, 50 - guard:50]).all()       # inside the guard: no value at all
+        last = 50 - guard - 2                                               # first columns past the derivative reach
+        beyond = f[f"dem_curvprof_s{s}"][21:59, 21:last]
+        assert np.isfinite(beyond).all()
+        assert np.max(beyond) < 1e-6                                        # the plane has no curvature, up to the guard
+        assert np.max(f[f"dem_scarpmask_s{s}"][21:59, 21:last]) == 0
+        assert np.max(f[f"dem_lin_s{s}"][21:59, 21:last]) == 0
+
+
+def test_without_a_gap_no_guard_applies():
+    f = F.dem_multiscale_features(plane(0.1), 2.0, CFG, "fine")
+    assert np.isfinite(f["dem_slope_s10"][5:-5, 5:-5]).all()
+    assert np.isfinite(f["dem_relief_w10"]).all()
+
+
+def test_guard_can_be_disabled_for_comparison():
+    z = plane(0.1)
+    z[:, 50:] = np.nan
+    off = F.dem_multiscale_features(z, 2.0, {**CFG, "edge_guard_sigma": 0}, "fine")
+    assert np.isfinite(off["dem_slope_s10"][:, 49]).any()               # the value the guard removes by default
 
 
 def test_fault_scarp_detected_with_axial_orientation():

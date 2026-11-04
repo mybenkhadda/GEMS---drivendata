@@ -24,11 +24,11 @@ from ..g06.inventory import EngineUnavailable, attach_engine  # noqa: F401  (re-
 from .contracts import GridSpec
 
 
-def discover_dem_sources(dem_cfg: dict, roots) -> tuple[pd.DataFrame, list]:
-    """Catalog + local DEM files with header checks (``dem_io.open_dem_catalog``) and existing DEM products."""
+def discover_dem_sources(dem_cfg: dict, roots, grid: GridSpec | None = None, footprint=None) -> tuple[pd.DataFrame, list]:
+    """Catalog + local DEM files with strict classification (``dem_io.open_dem_catalog``) and existing DEM products."""
     from .dem_io import open_dem_catalog
 
-    T, sources = open_dem_catalog(dem_cfg, roots)
+    T, sources = open_dem_catalog(dem_cfg, roots, grid, footprint)
     prods = []
     for r in roots:
         for rel in (dem_cfg.get("existing_products") or []):

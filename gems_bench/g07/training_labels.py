@@ -10,7 +10,8 @@ Builds on ``g06.supervision`` (POSITIVE / IGNORE / UNLABELED / LIKELY_BACKGROUND
 * ``build_fault_system_groups`` system id of every visible fault pixel + coarse spatial groups
 * ``perturbed_candidates``      controlled geometric perturbations (lateral shift, rotation, truncation) of TRAINING
                                 truth traces -> many graded positive / near-miss candidates for the candidate ranker.
-                                Only the truth of a TRAINING unit is perturbed; a held-out unit's truth is never used.
+* ``synthetic_training_candidates`` the per-fit entry point: geometry = a training unit's truth AND the fit's visible
+                                labels, asserted disjoint from the fit's hidden faults.
 """
 from __future__ import annotations
 
@@ -69,6 +70,50 @@ def build_fault_system_groups(visible: np.ndarray, system_map: np.ndarray, block
     sm = np.where(np.asarray(visible, bool), np.asarray(system_map), -1).astype(np.int32)
     sizes = pd.Series(sm[sm >= 0]).value_counts()
     return {"system_map": sm, "system_px": sizes, "blocks": block_ids(np.shape(visible), block_km)}
+
+
+def assert_no_heldout_geometry(geometry: np.ndarray, held_out: np.ndarray, fit_id: str, what: str) -> None:
+    """Fail closed when a training geometry touches a fault hidden from this fit."""
+    from ..g06.contracts import LeakageError
+
+    n = int((np.asarray(geometry, bool) & np.asarray(held_out, bool)).sum())
+    if n:
+        raise LeakageError(f"{fit_id}: {n} px of the {what} geometry are held out from this fit")
+
+
+def synthetic_training_geometry(vis, vu) -> dict:
+    """What one training visibility may use for synthetic candidates in the window of training unit ``vu``: its truth
+    restricted to ``vis.visible``, the visible known context and the system ids they contain. Held-out faults of the
+    fit are absent by construction, and this is asserted."""
+    visible, hidden = np.asarray(vis.visible, bool)[vu.sl], np.asarray(vis.hidden, bool)[vu.sl]
+    truth = np.asarray(vu.eval_truth(), bool) & visible
+    known = np.asarray(vu.known, bool) & visible
+    assert_no_heldout_geometry(truth | known, hidden, vis.fit_id, f"{vu.key} training")
+    sysmap = np.where(truth, np.asarray(vu.sysmap), -1).astype(np.int32)
+    return {"truth": truth, "known": known, "sysmap": sysmap, "systems": [int(x) for x in np.unique(sysmap[sysmap >= 0])]}
+
+
+def synthetic_training_candidates(vis, vu, aug: dict, seed: int) -> dict:
+    """Synthetic candidates of training unit ``vu`` for one fit: perturbations of training-visible geometry (graded
+    positives / near misses) and random segments far from it (negatives; a hidden fault nearby is never avoided,
+    avoiding it would use held-out truth). {"geometry", "syn_pos": (labels, table), "syn_neg": labels}."""
+    g = synthetic_training_geometry(vis, vu)
+    rng = np.random.default_rng(int(seed))
+    slab, ST = perturbed_candidates(g["truth"], g["sysmap"], rng, int(aug.get("per_system", 4)),
+                                    float(aug.get("max_shift_px", 4)), float(aug.get("max_rot_deg", 15)))
+    nlab = random_negative_candidates(vu.unit.scored_mask(), g["truth"] | g["known"], rng,
+                                      int(aug.get("n_negatives", 200)))
+    return {"geometry": g, "syn_pos": (slab, ST), "syn_neg": nlab}
+
+
+def candidate_provenance(scenario: str, outer: int, inner: int, fit_id: str, method: str, mapped: bool, systems,
+                         upstream: dict | None) -> dict:
+    """The provenance columns of a candidate record (``meta`` family: never a model feature)."""
+    import json
+
+    return {"source_scenario": scenario, "outer_fold": int(outer), "inner_fold": int(inner),
+            "training_visibility": fit_id, "generation_method": method, "uses_mapped_geometry": bool(mapped),
+            "training_systems": json.dumps([int(x) for x in systems]), "upstream_provenance": json.dumps(upstream or {})}
 
 
 def _skeleton_traces(truth: np.ndarray, sysmap: np.ndarray, min_px: int = 5) -> list:

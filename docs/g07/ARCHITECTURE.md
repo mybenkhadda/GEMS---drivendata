@@ -26,9 +26,24 @@
 | `pipeline` | `G07Pipeline` | `preflight`, `inspect_dem`, `assess_dem_feasibility`, `prepare_dem_features`, `prepare_training_data`, `benchmark_surface_models`, `benchmark_subsurface_models`, `generate_candidates`, `train_candidate_ranker`, `evaluate`, `reconstruct_full_region`, `build_report`, `run` |
 
 Interface adjustments (documented; the notebook uses these): `G07Pipeline(config, run_flags, repository_commit,
-factory=None, progress=print)`; extra stage methods `run_tests`, `dem_inventory`, `dem_coverage`, `restore_g06`,
-`train_surface_unet_stage`, `full_inference`, `export_submission`; `inspect_dem` = inventory + coverage;
+factory=None, progress=print)`; extra stage methods `run_tests`, `gpu_preflight`, `dem_inventory`, `dem_coverage`,
+`restore_g06`, `train_surface_unet_stage`, `full_inference`, `export_submission`; `inspect_dem` = inventory + coverage;
 `reconstruct_full_region` = full inference + export.
+
+Added in `g07.1-r2`:
+
+| module | API |
+|---|---|
+| `pipeline` | `require_stage`, `execution_summary`, `dem_gate`, `StageError` |
+| `config` | `training_mode`, `dem_identity` |
+| `contracts` | `dem_source_issues`, source status constants |
+| `dem_io` | `source_validation_summary`, `neighbour_sources`, `coverage_100m_from_dem`, `seam_audit`, `vertical_unit_from_wkt`, `vertical_unit_from_sidecar` |
+| `dem_features` | `apply_edge_guard`, `coarse_part`, `merge_coarse_parts`, `stage_tile_local` |
+| `evaluation` | `training_gate`, `evaluation_status`, `recovered_system_keys` |
+| `models_surface` | `validate_gpu_runtime`, `resolve_device`, `GPURuntimeError`, `select_surface_patches`, `prepare_targets`, `save_surface_unet`, `load_surface_unet` |
+| `datasets` | `validate_surface_patch_artifacts`, `surface_patch_readiness` |
+| `training_labels` | `synthetic_training_geometry`, `synthetic_training_candidates`, `assert_no_heldout_geometry`, `candidate_provenance` |
+| `crossfit` | `validate_model_registry`, `summarize_experiments`, `check_prediction`, `fit_prediction_units`, `assert_synthetic_isolation` |
 
 ## Reused GEMS components
 
@@ -46,8 +61,19 @@ Nothing of G06 is rebuilt; one G06 fix: `models_segment.class_weights` now balan
 
 ## Stages
 
-See the `pipeline.py` docstring. Caching: stage fingerprint = version + stage + config section + upstream
-fingerprints + source hash of the stage's modules; DEM per-tile products are keyed by the DEM-processing fingerprint
-and tile id / size (pilot and full builds share them); models / predictions are fingerprint-keyed; successful outputs
-replaced by another fingerprint move to `history/`. `BLOCKED_INPUT` (missing DEM, licence, no GO) never blocks the
-geology path.
+See the `pipeline.py` docstring. Order: tests, preflight, gpu_preflight, DEM inventory / coverage / feasibility / features,
+G06 restore, datasets, **U-Net (CUDA)**, subsurface, surface classical, candidates, ranker, evaluate, full region,
+export, report.
+
+Caching: stage fingerprint = version + stage + config section + upstream fingerprints + source hash of the stage's
+modules. `config.dem_identity` keeps gating, licensing, catalog paths, tile sizes and budgets out of DEM identities, so
+changing the training mode never recomputes a tile. DEM per-tile products are keyed by the DEM-processing fingerprint and
+tile id / size (pilot and full builds share them) and pushed to Drive as they finish; models / predictions are
+fingerprint-keyed; successful outputs replaced by another fingerprint move to `history/`.
+
+Statuses: stage methods record a status and never raise; `require_stage` is the strict check. `PARTIAL` = saved but
+incomplete: never reused as COMPLETE, a rerun resumes, consumers check what they need. Nested fits are only trained when
+candidates are requested. Figures and other auxiliary products never fail a stage (`manifests/auxiliary_errors.json`).
+
+Devices: only the U-Net uses CUDA (`use_gpu` without CUDA raises); LightGBM and Random Forest run on CPU, recorded per fit
+in the registry `device` column.

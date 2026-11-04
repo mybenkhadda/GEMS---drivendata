@@ -15,7 +15,7 @@ recall). Heavy dependencies are imported lazily. Nothing here uploads a submissi
 from __future__ import annotations
 
 G07_VERSION = "g07.1"
-G07_CODE_REV = "g07.1-r1"
+G07_CODE_REV = "g07.1-r2"
 
 __all__ = ["G07_VERSION", "G07_CODE_REV", "load_config", "validate_config", "compute_run_id", "G07Pipeline"]
 

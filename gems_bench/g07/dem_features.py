@@ -21,6 +21,9 @@ by ``dem_multiscale_features``. Scales finer than 1.5 x the work resolution are 
 """
 from __future__ import annotations
 
+import re
+import shutil
+import time
 from pathlib import Path
 
 import numpy as np
@@ -241,7 +244,39 @@ def dem_multiscale_features(z: np.ndarray, res: float, cfg: dict, tier: str = "f
     for k in list(out):
         if not k.endswith("__w"):
             out[k] = np.where(valid, np.asarray(out[k], np.float32), np.nan)
-    return out
+    return apply_edge_guard(out, valid, res, cfg, sc)
+
+
+def apply_edge_guard(feats: dict, valid: np.ndarray, res: float, cfg: dict, scales: list) -> dict:
+    """NaN where a feature's operator reaches missing data. Normalised convolution keeps a value there, but one-sided
+    support bends the smoothed surface (slope error ~11 % at 2 sigma from the edge, ~0.05 % at 4), so slope / curvature /
+    scarp / lineament responses would run along every data edge, at the 10 km tile spacing: an artificial lineament.
+    Guard = ``edge_guard_sigma`` (4 = the Gaussian truncation) x the feature's smoothing scale, x 3 for structure-tensor
+    products (integration over 2 s) and x 4 for roughness (3 s window), half a relief window, the openness radius, plus
+    2 px of derivative reach. Coverage still counts the DEM pixels themselves; every guard fits inside the halo."""
+    k_sigma = float(cfg.get("edge_guard_sigma", 4.0))
+    if k_sigma <= 0 or valid.all():
+        return feats
+    dist = ndimage.distance_transform_edt(valid)
+    smin = min(scales) if scales else 2 * res
+    smax = max(scales) if scales else 2 * res
+    for k in list(feats):
+        if k.endswith("__w"):
+            continue
+        m = re.search(r"_([sw])(\d+)$", k)
+        if m and m.group(1) == "s":
+            mult = 4.0 if k.startswith("dem_rough") else (3.0 if k.startswith(("dem_aniso", "dem_orient")) else 1.0)
+            px = k_sigma * mult * float(m.group(2)) / res
+        elif m:
+            px = float(m.group(2)) / (2 * res)
+        elif k.startswith("dem_hs"):
+            px = k_sigma * smin / res                     # hillshades use the smallest scale
+        elif k.startswith("dem_open"):
+            px = float(cfg.get("openness_radius_m", 0)) / res
+        else:
+            px = k_sigma * smax / res                     # tier-wide persistence / drainage
+        feats[k] = np.where(dist > np.ceil(px) + 2, feats[k], np.nan)
+    return feats
 
 
 # =============================================================================== processing drivers
@@ -254,10 +289,10 @@ def aggregated_names(kinds: dict) -> list[str]:
 
 
 def process_window_stream(ds, grid, cfg: dict, tier: str, factor: int, vscale: float, acc, halo: int,
-                          windows=None, clip_bounds=None, progress=None) -> int:
+                          windows=None, clip_bounds=None, progress=None, neighbours=None) -> int:
     """Stream work windows of an open DEM dataset through the feature bank into an ``Accumulator``. Returns the
     number of windows with data. ``clip_bounds`` (west, south, east, north, dataset CRS) restricts the pixels that
-    are aggregated (the halo outside still feeds the filters)."""
+    are aggregated (the halo outside still feeds the filters); ``neighbours`` fill the halo beyond this raster."""
     from .dem_io import core_transform, iter_dem_tiles, read_dem_window
 
     res = float(abs(ds.res[0])) * factor
@@ -265,13 +300,13 @@ def process_window_stream(ds, grid, cfg: dict, tier: str, factor: int, vscale: f
     n = 0
     wins = windows if windows is not None else list(iter_dem_tiles(ds, tile, halo, factor))
     for i, w in enumerate(wins):
-        z = read_dem_window(ds, w, factor, vscale)
-        if not np.isfinite(z).any():
+        z = read_dem_window(ds, w, factor, vscale, neighbours=neighbours)
+        rs, cs = w.core
+        valid = np.isfinite(z[rs, cs])
+        if not valid.any():                               # data only in the halo: nothing to aggregate here
             continue
         f = dem_multiscale_features(z, res, cfg, tier)
-        rs, cs = w.core
         core = {k: v[rs, cs] for k, v in f.items()}
-        valid = np.isfinite(z[rs, cs])
         T = core_transform(ds, w, factor)
         if clip_bounds is not None:
             rr, cc = np.indices(valid.shape)
@@ -285,94 +320,154 @@ def process_window_stream(ds, grid, cfg: dict, tier: str, factor: int, vscale: f
     return n
 
 
-def process_fine_source(path, src, cfg: dict, grid, out_path, factor: int, meta: dict, progress=None):
-    """Fine tier of one DEM source -> analysis-window GeoTIFF (+ json); returns the path or None (no data)."""
+def process_fine_source(path, src, cfg: dict, grid, out_path, factor: int, meta: dict, progress=None, neighbours=None):
+    """Fine tier of one DEM source -> analysis-window GeoTIFF (+ json); returns the path or None (no data).
+    ``neighbours`` = DEMSource list whose aligned pixels fill the halo across this tile's edges."""
     import rasterio
 
     from .dem_io import Accumulator, analysis_window, source_vscale, write_window
 
-    with rasterio.open(path) as ds:
-        res = float(abs(ds.res[0])) * factor
-        kinds = feature_kinds(cfg, res, "fine")
-        win = analysis_window(tuple(ds.bounds), ds.crs, grid)
-        if win is None:
-            return None
-        acc = Accumulator(grid, win, kinds)
-        halo = max(int(cfg.get("halo_px", 128)), required_halo_px(cfg, res, "fine"))
-        n = process_window_stream(ds, grid, cfg, "fine", factor, source_vscale(src), acc, halo, progress=progress)
-        if not n:
-            return None
-        out = acc.finalize(float(abs(ds.res[0])))
-    names = ["dem_coverage"] + aggregated_names(kinds)
-    return write_window(out_path, out, names, grid, win, {**meta, "tier": "fine", "work_res_m": res,
-                                                          "halo_px": halo, "native_px": acc.native_px})
-
-
-def build_coarse_dem(sources, coarse_res_m: float, out_path, crs: str) -> object:
-    """One coarse (e.g. 10 m) DEM of every usable source of one CRS: NaN-aware block means, merged."""
-    import rasterio
-    from rasterio.merge import merge
-
-    from .dem_io import block_mean, source_vscale
-
-    tmp = []
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    for s in sources:
-        with rasterio.open(s.path) as ds:
-            f = max(int(round(coarse_res_m / abs(ds.res[0]))), 1)
-            a = ds.read(1, masked=True)
-            z = np.ma.filled(a.astype(np.float32), np.nan)
-            if ds.nodata is not None:
-                z[z == ds.nodata] = np.nan
-            z = block_mean(z * source_vscale(s), f)
-            T = ds.transform
-            prof = {"driver": "GTiff", "height": z.shape[0], "width": z.shape[1], "count": 1, "dtype": "float32",
-                    "crs": ds.crs, "nodata": np.nan, "compress": "deflate",
-                    "transform": rasterio.transform.Affine(T.a * f, T.b, T.c, T.d, T.e * f, T.f)}
-        p = out_path.with_name(f"{out_path.stem}__{s.tile_id}.tif")
-        with rasterio.open(p, "w", **prof) as d:
-            d.write(z, 1)
-        tmp.append(p)
-        del z
-    srcs = [rasterio.open(p) for p in tmp]
+    opened = []
     try:
-        arr, T = merge(srcs, res=coarse_res_m, nodata=np.nan, method="first")
+        with rasterio.open(path) as ds:
+            res = float(abs(ds.res[0])) * factor
+            kinds = feature_kinds(cfg, res, "fine")
+            win = analysis_window(tuple(ds.bounds), ds.crs, grid)
+            if win is None:
+                return None
+            for s in neighbours or []:
+                opened.append((rasterio.open(s.path), source_vscale(s)))
+            acc = Accumulator(grid, win, kinds)
+            halo = max(int(cfg.get("halo_px", 128)), required_halo_px(cfg, res, "fine"))
+            n = process_window_stream(ds, grid, cfg, "fine", factor, source_vscale(src), acc, halo, progress=progress,
+                                      neighbours=opened)
+            if not n:
+                return None
+            out = acc.finalize(res)                   # counts are WORK pixels (res = native x factor)
     finally:
-        for d in srcs:
+        for d, _ in opened:
             d.close()
-    prof = {"driver": "GTiff", "height": arr.shape[1], "width": arr.shape[2], "count": 1, "dtype": "float32",
-            "crs": crs, "transform": T, "nodata": np.nan, "compress": "deflate", "tiled": True, "blockxsize": 256,
-            "blockysize": 256, "BIGTIFF": "IF_SAFER"}
+    names = ["dem_coverage"] + aggregated_names(kinds)
+    return write_window(out_path, out, names, grid, win, {**meta, "tier": "fine", "work_res_m": res, "halo_px": halo,
+                                                          "native_px": acc.native_px,
+                                                          "neighbours": [s.tile_id for s in neighbours or []]})
+
+
+def coarse_part(src, coarse_res_m: float, parts_dir) -> Path:
+    """NaN-aware block mean of one source at ``coarse_res_m`` in metres (cached: pilot and full builds share parts)."""
+    import rasterio
+
+    from .dem_io import _read_clean, block_mean, source_vscale
     from .persistence import atomic_save
+
+    p = Path(parts_dir) / f"{src.tile_id}_{Path(src.path).stat().st_size}.tif"
+    if p.exists():
+        return p
+    with rasterio.open(src.path) as ds:
+        f = max(int(round(coarse_res_m / abs(ds.res[0]))), 1)
+        z = block_mean(_read_clean(ds, None) * source_vscale(src), f)
+        T = ds.transform
+        prof = {"driver": "GTiff", "height": z.shape[0], "width": z.shape[1], "count": 1, "dtype": "float32",
+                "crs": ds.crs, "nodata": np.nan, "compress": "deflate", "predictor": 3,
+                "transform": rasterio.transform.Affine(T.a * f, T.b, T.c, T.d, T.e * f, T.f)}
 
     def w(t):
         with rasterio.open(t, "w", **prof) as d:
-            d.write(arr[0].astype(np.float32), 1)
-            d.update_tags(units="metre", G07="coarse DEM (NaN-aware block mean)")
+            d.write(z.astype(np.float32), 1)
 
-    atomic_save(out_path, w)
-    for p in tmp:
-        p.unlink(missing_ok=True)
+    return atomic_save(p, w)
+
+
+def merge_coarse_parts(parts: list, coarse_res_m: float, out_path, crs: str) -> Path:
+    """Union of the parts on one grid (first part wins in overlaps), through a disk-backed array: the merged raster is
+    written block by block and never held in RAM. Parts of tiles in one project share one pixel phase."""
+    import rasterio
+    from rasterio.transform import Affine
+    from rasterio.windows import Window
+
+    from .persistence import atomic_save
+
+    boxes = []
+    for p in parts:
+        with rasterio.open(p) as d:
+            boxes.append(tuple(d.bounds))
+    west, north = min(b[0] for b in boxes), max(b[3] for b in boxes)
+    east, south = max(b[2] for b in boxes), min(b[1] for b in boxes)
+    res = float(coarse_res_m)
+    W, H = int(np.ceil((east - west) / res - 1e-9)), int(np.ceil((north - south) / res - 1e-9))
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_arr = out_path.with_name(out_path.stem + ".merge.npy")
+    mm = np.lib.format.open_memmap(tmp_arr, mode="w+", dtype=np.float32, shape=(H, W))
+    try:
+        mm[:] = np.nan
+        for p in parts:
+            with rasterio.open(p) as d:
+                a, T = d.read(1), d.transform
+            c0, r0 = int(round((T.c - west) / res)), int(round((north - T.f) / res))
+            h, w = min(a.shape[0], H - r0), min(a.shape[1], W - c0)
+            cur = mm[r0:r0 + h, c0:c0 + w]
+            hole = np.isnan(cur)
+            cur[hole] = a[:h, :w][hole]
+        prof = {"driver": "GTiff", "height": H, "width": W, "count": 1, "dtype": "float32", "crs": crs,
+                "transform": Affine(res, 0.0, west, 0.0, -res, north), "nodata": np.nan, "compress": "deflate",
+                "predictor": 3, "tiled": True, "blockxsize": 256, "blockysize": 256, "BIGTIFF": "IF_SAFER"}
+
+        def writer(t):
+            with rasterio.open(t, "w", **prof) as d:
+                for r in range(0, H, 2048):
+                    n = min(2048, H - r)
+                    d.write(np.asarray(mm[r:r + n], np.float32), 1, window=Window(0, r, W, n))
+                d.update_tags(units="metre", G07="coarse DEM (NaN-aware block mean)")
+
+        atomic_save(out_path, writer)
+    finally:
+        mm = None                                 # closes the memmap before its file goes
+        tmp_arr.unlink(missing_ok=True)
     return out_path
 
 
-def process_coarse(coarse_path, cfg: dict, grid, out_dir, meta: dict, progress=None) -> list:
-    """Coarse tier over the coarse DEM: one analysis-window product per work window (seamless halos)."""
+def build_coarse_dem(sources, coarse_res_m: float, out_path, crs: str, parts_dir=None, progress=None, on_part=None
+                     ) -> Path:
+    """One coarse (e.g. 10 m) DEM of every usable source of one CRS. Parts are cached per tile in ``parts_dir`` and
+    reported through ``on_part`` (persisted to Drive), so a disconnect never re-reads a finished tile."""
+    out_path = Path(out_path)
+    parts_dir = Path(parts_dir) if parts_dir else out_path.parent / "parts"
+    parts = []
+    for i, s in enumerate(sources):
+        existed = (parts_dir / f"{s.tile_id}_{Path(s.path).stat().st_size}.tif").exists()
+        p = coarse_part(s, coarse_res_m, parts_dir)
+        parts.append(p)
+        if not existed:
+            if on_part:
+                on_part(p)
+            if progress:
+                progress(f"  coarse part {i + 1}/{len(sources)} {s.tile_id}")
+    return merge_coarse_parts(parts, coarse_res_m, out_path, crs)
+
+
+def process_coarse(coarse_path, cfg: dict, grid, out_dir, meta: dict, progress=None, on_product=None, deadline=None
+                   ) -> tuple[list, int]:
+    """Coarse tier over the coarse DEM: one analysis-window product per work window (seamless halos). Returns
+    (products, windows deferred past ``deadline``, a ``time.time()`` value). Windows are large (``coarse_tile_px``)
+    because the halo of the 300 m operators would otherwise dominate the work."""
     import rasterio
 
     from .dem_io import Accumulator, analysis_window, core_transform, iter_dem_tiles, write_window
 
-    out = []
+    out, deferred = [], 0
     with rasterio.open(coarse_path) as ds:
         res = float(abs(ds.res[0]))
         kinds = feature_kinds(cfg, res, "coarse")
         names = ["dem_coverage"] + aggregated_names(kinds)
         halo = max(int(cfg.get("halo_px", 128)), required_halo_px(cfg, res, "coarse"))
-        for w in iter_dem_tiles(ds, int(cfg.get("tile_px", 1024)), halo, 1):
+        for w in iter_dem_tiles(ds, int(cfg.get("coarse_tile_px", 2048)), halo, 1):
             p = Path(out_dir) / f"coarse_{w.tile_id}.tif"
             if p.exists() and p.with_suffix(".json").exists():
                 out.append(p)
+                continue
+            if deadline is not None and time.time() > deadline:
+                deferred += 1
                 continue
             T = core_transform(ds, w, 1)
             h, wd = w.core_shape
@@ -383,9 +478,21 @@ def process_coarse(coarse_path, cfg: dict, grid, out_dir, meta: dict, progress=N
             if process_window_stream(ds, grid, cfg, "coarse", 1, 1.0, acc, halo, windows=[w]):
                 out.append(write_window(p, acc.finalize(res), names, grid, win,
                                         {**meta, "tier": "coarse", "work_res_m": res, "halo_px": halo}))
+                if on_product:
+                    on_product(p)
             if progress:
                 progress(f"  coarse window {w.tile_id}")
-    return out
+    return out, deferred
+
+
+def stage_tile_local(path, cache_dir) -> tuple[Path, bool]:
+    """(path to read, is a temporary copy): a Drive tile is copied to local disk once for its window reads."""
+    src, dst = Path(path), Path(cache_dir) / Path(path).name
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(dst.name + ".partial")
+    shutil.copy2(src, tmp)
+    tmp.replace(dst)
+    return dst, True
 
 
 def required_halo_px(cfg: dict, res: float, tier: str = "fine") -> int:

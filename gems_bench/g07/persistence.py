@@ -23,6 +23,8 @@ write_json, write_table = _P.write_json, _P.write_table
 
 BLOCKED_INPUT = "BLOCKED_INPUT"
 NO_GO = "COMPLETE_NO_GO"          # a decision stage that ran correctly and decided against continuing
+PARTIAL = "PARTIAL"               # usable but incomplete outputs: saved, never reused as COMPLETE (a rerun resumes)
+ALL_FILES = ("*.partial",)        # a push filter that keeps tile products (the default push excludes */tiles/*)
 
 
 def atomic_save(path, writer) -> Path:
@@ -39,10 +41,11 @@ def validate_cache(root, stage: str, fingerprint: str, outputs, schema_hash: str
     return _P.validate_cached_stage(root, stage, fingerprint, outputs, schema_hash, grid)
 
 
-def sync_artifacts(ws: Workspace, rels=None) -> None:
-    """Push to Drive (never fatal: local outputs stay intact if Drive is unavailable)."""
+def sync_artifacts(ws: Workspace, rels=None, exclude=None) -> None:
+    """Push to Drive (never fatal: local outputs stay intact if Drive is unavailable). ``exclude`` replaces the
+    workspace default (which drops ``*/tiles/*``); DEM tile products pass ``ALL_FILES`` so a disconnect keeps them."""
     try:
-        ws.push(rels)
+        ws.push(rels, exclude)
     except Exception as e:
         print(f"[g07] Drive push failed ({type(e).__name__}: {e}); local outputs are intact")
 

@@ -1,4 +1,7 @@
-"""G07 models: directional augmentation consistency, proximity regressor, U-Net head, candidate features, utility."""
+"""G07 models: directional augmentation, proximity regressor, GPU refusal, patch roles, U-Net training contract,
+candidate features, utility."""
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -53,6 +56,149 @@ def test_unet_has_centreline_and_orientation_heads():
     net = MS.build_surface_unet(4, base=4, depth=2)
     out = net(torch.zeros(2, 5, 32, 32))
     assert tuple(out.shape) == (2, 3, 32, 32)
+
+
+def test_gpu_request_refuses_cpu_fallback(monkeypatch):
+    torch = pytest.importorskip("torch")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(MS.GPURuntimeError):
+        MS.validate_gpu_runtime(requested=True, require_cuda=True)
+    with pytest.raises(MS.GPURuntimeError):
+        MS.resolve_device(True)
+    r = MS.validate_gpu_runtime(requested=False, require_cuda=False)
+    assert r["selected_device"] == "cpu" and r["readiness"] == "CPU_ONLY" and r["cuda_available"] is False
+    assert str(MS.resolve_device(False)) == "cpu"
+
+
+def test_gpu_report_when_cuda_is_present():
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA here")
+    r = MS.validate_gpu_runtime(True, True)
+    assert r["readiness"] == "READY" and r["selected_device"] == "cuda:0" and r["gpu_name"] and r["vram_total_gib"] > 0
+
+
+CELLS, F = 4, 2
+
+
+def patch_scene():
+    """8 x 16 analysis cells cut into 8 patches; a visible fault crosses both inner folds, a hidden one is elsewhere."""
+    H, W = 2 * CELLS, 4 * CELLS
+    visible, hidden = np.zeros((H, W), bool), np.zeros((H, W), bool)
+    visible[1, :] = True
+    hidden[6, :] = True
+    idx = pd.DataFrame([{"r0": r, "c0": c, "cells": CELLS, "dem_share": 1.0} for r in (0, 4) for c in (0, 4, 8, 12)])
+    inner = np.where(np.indices((H, W))[1] < 8, 0, 1).astype(np.int8)
+    vis = SimpleNamespace(fit_id="V1:0", visible=visible, hidden=hidden, region=np.ones((H, W), bool))
+    return vis, idx, inner
+
+
+UCFG = {"epochs": 2, "steps_per_epoch": 2, "batch": 2, "base_channels": 4, "depth": 2, "patience": 5,
+        "min_region_share": 0.7, "pos_patch_share": 0.5, "positive_weight": 5.0, "unlabeled_weight": 0.3}
+
+
+def test_patch_roles_keep_validation_cells_out_of_training():
+    vis, idx, inner = patch_scene()
+    I, facts = MS.select_surface_patches(idx, vis, inner, UCFG)
+    assert facts["status"] == "READY" and facts["n_val"] and facts["n_train"]
+    for r in I[I.role == "train"].itertuples():
+        cells = inner[r.r0:r.r0 + CELLS, r.c0:r.c0 + CELLS]
+        assert not (cells == facts["val_fold"]).any()
+    assert facts["n_val_pos"] >= 1 and facts["n_train_pos"] >= 1
+
+
+def test_straddling_patch_is_dropped():
+    vis, idx, inner = patch_scene()
+    inner = np.where(np.indices(inner.shape)[1] < 6, 0, 1).astype(np.int8)
+    I, _ = MS.select_surface_patches(idx, vis, inner, UCFG)
+    assert (I.role == "buffer").any()
+
+
+def test_validation_fold_follows_the_covered_positives():
+    """The DEM covers only inner fold 2: a fixed validation fold 0 would have left no validation patch at all."""
+    vis, idx, _ = patch_scene()
+    inner = np.where(np.indices(vis.visible.shape)[1] < 8, 1, 2).astype(np.int8)
+    inner[0, 0] = 0
+    I, facts = MS.select_surface_patches(idx.iloc[1:].reset_index(drop=True), vis, inner, UCFG)
+    assert facts["status"] == "READY" and facts["val_fold"] in (1, 2)
+
+
+@pytest.mark.parametrize("change,word", [("no_region", "training region"), ("no_positive", "visible fault")])
+def test_missing_patches_are_reported_with_the_reason(change, word):
+    vis, idx, inner = patch_scene()
+    if change == "no_region":
+        vis.region = np.zeros_like(vis.region)
+    else:
+        vis.visible = np.zeros_like(vis.visible)
+    _, facts = MS.select_surface_patches(idx, vis, inner, UCFG)
+    assert facts["status"] == "BLOCKED" and word in facts["reason"]
+
+
+def test_prediction_targets_align_with_patch_cells():
+    vis, idx, inner = patch_scene()
+    classes = np.where(vis.visible, 1, 0).astype(np.int8)
+    o = build_orientation_targets(vis.visible, 1.0, 0.1)
+    T = MS.prepare_targets(vis.visible, classes, o, UCFG)
+    y, w, oo, om = MS.patch_targets(T, 0, 4, CELLS, F)
+    assert y.shape == w.shape == om.shape == (CELLS * F, CELLS * F) and oo.shape == (2, CELLS * F, CELLS * F)
+    np.testing.assert_array_equal(y[2:4, :], 1.0)                           # analysis row 1 = input rows 2, 3
+    np.testing.assert_array_equal(y[:2, :], 0.0)
+    assert (w[2:4] == 5.0).all() and np.allclose(w[:2], 0.3)
+
+
+def fit_small_unet(tmp_path, cfg=UCFG):
+    pytest.importorskip("torch")
+    vis, idx, inner = patch_scene()
+    rng = np.random.default_rng(0)
+    arr = rng.normal(size=(len(idx), 3, CELLS * F, CELLS * F)).astype(np.float16)
+    arr[0, 1, :2, :2] = np.nan                                              # no DEM here: no loss, validity channel 0
+    mm = tmp_path / "patches.npy"
+    np.save(mm, arr)
+    classes = np.where(vis.visible, 1, 0).astype(np.int8)
+    o = build_orientation_targets(vis.visible, 1.0, 0.1)
+    out = MS.train_surface_unet(mm, idx, vis, classes, o, inner, cfg, F, False, 0, None, tmp_path / "ck.pt")
+    return out, mm, idx, vis
+
+
+def test_unet_trains_with_finite_losses_saves_contract_and_predicts(tmp_path):
+    (model, scaler, info), mm, idx, vis = fit_small_unet(tmp_path)
+    H = pd.DataFrame(info["history"])
+    assert len(H) == 2 and np.isfinite(H.train_loss).all() and np.isfinite(H.inner_val_loss).all()
+    assert {"lr", "gpu_allocated_mb", "gpu_reserved_mb", "seconds", "best_epoch", "fit_id"} <= set(H.columns)
+    assert info["device"] == "cpu" and 0 <= info["best_epoch"] <= 1 and info["n_val"] > 0
+    MS.save_surface_unet(model, scaler, info, tmp_path / "m", ["a", "b", "c"], UCFG, 50.0, CELLS)
+    m2, s2, meta = MS.load_surface_unet(tmp_path / "m")
+    assert meta["channels"] == ["a", "b", "c"] and meta["res_m"] == 50.0 and meta["out_channels"] == 3
+    p1 = MS.predict_surface_tiles(model, scaler, mm, idx, vis.visible.shape, F, False, 2)
+    p2 = MS.predict_surface_tiles(m2, s2, mm, idx, vis.visible.shape, F, False, 2)
+    assert p1.shape == vis.visible.shape and np.nanmin(p1) >= 0 and np.nanmax(p1) <= 1 and np.isfinite(p1).any()
+    np.testing.assert_allclose(p1, p2, atol=1e-5)                           # saved model = trained model
+
+
+def test_unet_restores_the_best_epoch_and_resumes(tmp_path):
+    fit_small_unet(tmp_path)
+    (_, _, info2), *_ = fit_small_unet(tmp_path, {**UCFG, "epochs": 3})
+    H = info2["history"]
+    assert [h["epoch"] for h in H] == [0, 1, 2]                             # resumed, not restarted
+    losses = [h["inner_val_loss"] for h in H]
+    assert info2["best_epoch"] == int(np.argmin(losses)) and info2["best_inner_val_loss"] == min(losses)
+
+
+def test_channel_mismatch_is_refused_at_inference(tmp_path):
+    (model, scaler, info), mm, idx, vis = fit_small_unet(tmp_path)
+    np.save(tmp_path / "wrong.npy", np.zeros((len(idx), 2, CELLS * F, CELLS * F), np.float16))
+    with pytest.raises(ValueError):
+        MS.predict_surface_tiles(model, scaler, tmp_path / "wrong.npy", idx, vis.visible.shape, F, False)
+
+
+def test_hidden_visible_overlap_refused(tmp_path):
+    pytest.importorskip("torch")
+    vis, idx, inner = patch_scene()
+    vis.hidden = vis.visible.copy()
+    np.save(tmp_path / "p.npy", np.zeros((len(idx), 2, CELLS * F, CELLS * F), np.float16))
+    with pytest.raises(LeakageError):
+        MS.train_surface_unet(tmp_path / "p.npy", idx, vis, np.zeros_like(inner), build_orientation_targets(
+            vis.visible, 1.0, 0.1), inner, UCFG, F, False, 0, None)
 
 
 def test_geology_only_candidates_refuse_w2():

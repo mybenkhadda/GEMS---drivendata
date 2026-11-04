@@ -46,18 +46,26 @@ dem:
   lineament_min_m: 0.05
   lineament_coherence: 0.5
   min_coverage: 0.5                   # a 100 m cell counts as DEM-covered at >= 50 % valid DEM
-  require_go: true                    # DEM_FEATURES needs a GO from DEM_FEASIBILITY
+  require_go: true                    # true = STRICT_RESEARCH (needs GO); false = EXPLORATORY_TRAINING (SCREENING_ONLY)
+  training_mode: null                 # optional explicit name: STRICT_RESEARCH | EXPLORATORY_TRAINING (wins over require_go)
+  edge_guard_sigma: 4.0               # features are NaN within this many smoothing scales of missing DEM (no edge lineaments)
+  coarse_tile_px: 2048                # coarse-tier windows (the 300 m operators need a ~480 px halo at 10 m)
+  fine_budget_hours: 4.0              # DEM_FEATURES: fine tier stops starting tiles after this; a rerun resumes (status PARTIAL)
+  coarse_budget_hours: 2.0            # DEM_FEATURES / pilot: same for coarse-tier windows
+  stage_tile_local: true              # copy each Drive tile to local disk while its fine tier runs
   agreement_scale_m: 300
   download: {enabled: false, max_tiles: 10, max_gib: 6.0, min_valid_frac: 0.05}
   coverage: {}
 
 feasibility:
   max_tiles: 12                       # pilot: label-free choice (largest eligible V1-zone area)
+  pilot_budget_hours: 2.0             # pilot fine tier stops starting tiles after this (largest area first); recorded
   near_px: 1
   background_km: 2.0
   fp_frac: 0.01
   dem_score_features: [dem_scarp_s10, dem_lin_s10, dem_hs_range, dem_curvprof_s10, dem_dircoh_fine]
   recall_fracs: [0.01, 0.02]
+  primary_recall_frac: 0.01           # the fraction whose V1 incremental systems gate GO (the other is reported)
   case_quotas: {w2_missed: 10, w2_recovered: 8, w2_false_positive: 8}
   case_box_cells: 40
   max_cases: 30
@@ -159,6 +167,10 @@ surface:                              # System A (DEM-covered cells)
   unet:
     res_m: 10.0
     patch_cells: 24                   # 2.4 km patches = 240 px at 10 m
+    patch_stride_cells: 24            # < patch_cells overlaps patches (Hann-blended predictions) at more disk
+    max_val_patches: 48               # fixed inner-validation subset per epoch (half with visible faults)
+    grad_clip: 5.0
+    max_push_gib: 15.0                # a larger patch memmap stays on local disk (rebuilt after a disconnect)
     channels: [dem_hs315, dem_hs45, dem_hs_range, dem_slope_s20, dem_curvprof_s20, dem_curvplan_s20, dem_tpi_s50,
                dem_rough_s20, dem_relief_w150, dem_scarp_s20, dem_lin_s20, dem_aniso_s20, dem_openpos]
     min_patch_coverage: 0.8

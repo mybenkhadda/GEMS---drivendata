@@ -1,6 +1,6 @@
 # G07 - high-resolution multiscale fault discovery
 
-Code rev `g07.1-r1`. **Status: authored, never executed** (`SESSION_HANDOFF.md`).
+Code rev `g07.1-r2`. **Status: authored and repaired, never executed** (`SESSION_HANDOFF.md`). First run: the notebook top to bottom on a Colab GPU runtime (`COLAB_EXECUTION.md`).
 
 **Hypothesis.** High-resolution surface morphology (USGS 3DEP 1 m DEM), better fault supervision and independent
 subsurface hypotheses reveal structures W2 misses; learned geological ranking + DTI-aware exact-budget selection turn

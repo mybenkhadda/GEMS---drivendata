@@ -134,20 +134,31 @@ def surface_channels(z: np.ndarray, res: float, cfg: dict, channels: list[str]) 
 
 def build_surface_patch_dataset(dem_path, grid, footprint: np.ndarray, coverage: np.ndarray, dem_cfg: dict,
                                 unet_cfg: dict, out_dir, fold_map=None, eval_zones=None, progress=None) -> dict:
-    """Patch index + float16 channel memmap of every analysis-aligned patch with DEM coverage >= threshold."""
-    from ..g06.persistence import stable_hash, write_json, write_table
+    """Patch index + float16 channel memmap of every analysis-aligned patch with DEM coverage >= threshold. Reused when
+    its identity matches; missing DEM stays NaN (the U-Net's validity channel and loss mask depend on it)."""
+    import shutil
+
+    from ..g06.persistence import read_json, stable_hash, write_json, write_table
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     res = float(unet_cfg.get("res_m", 10.0))
     cells = int(unet_cfg.get("patch_cells", 24))
+    stride = int(unet_cfg.get("patch_stride_cells", cells))
     chans = list(unet_cfg["channels"])
     min_cov = float(unet_cfg.get("min_patch_coverage", 0.8))
+    h = stable_hash("patches.2", str(dem_path), res, cells, stride, chans, min_cov,
+                    {k: dem_cfg.get(k) for k in ("unet_scales_m", "hillshade_azimuths", "relief_windows_m",
+                                                 "openness_radius_m", "edge_guard_sigma", "integration_factor")}, n=10)
+    old = read_json(out_dir / "surface_manifest.json")
+    if isinstance(old, dict) and old.get("fingerprint") == h and old.get("complete") and (
+            out_dir / "patch_index.parquet").exists() and (not old.get("memmap") or (out_dir / old["memmap"]).exists()):
+        return old
     H, W = grid.shape
     rows = []
     cov = np.nan_to_num(coverage)
-    for r0 in range(0, H - cells + 1, cells):
-        for c0 in range(0, W - cells + 1, cells):
+    for r0 in range(0, H - cells + 1, stride):
+        for c0 in range(0, W - cells + 1, stride):
             sl = (slice(r0, r0 + cells), slice(c0, c0 + cells))
             share = float((cov[sl] >= 0.5).mean())
             if share < min_cov or not np.asarray(footprint)[sl].any():
@@ -161,22 +172,34 @@ def build_surface_patch_dataset(dem_path, grid, footprint: np.ndarray, coverage:
             for d, m in (eval_zones or {}).items():
                 row[f"eval_share_{d}"] = float(np.asarray(m)[sl].mean())
             rows.append(row)
-    idx = pd.DataFrame(rows)
-    h = stable_hash(str(dem_path), res, cells, chans, n=10)
+    idx = pd.DataFrame(rows, columns=None if rows else ["patch_id", "r0", "c0", "cells", "dem_share", "footprint_share"])
     mm_path = out_dir / f"surface_{h}.npy"
+    progress_path = out_dir / f"surface_{h}.progress.json"
     from .dem_features import required_halo_px
 
     halo = required_halo_px({**dem_cfg, "scales_m": dem_cfg.get("unet_scales_m", dem_cfg["scales_m"])}, res, "fine")
     if len(idx):
         P = cells * int(round(grid.pixel_m / res))
-        mm = np.lib.format.open_memmap(mm_path, mode="w+", dtype=np.float16, shape=(len(idx), len(chans), P, P))
+        need = len(idx) * len(chans) * P * P * 2
+        free = shutil.disk_usage(out_dir).free
+        done = int((read_json(progress_path) or {}).get("done", 0)) if mm_path.exists() else 0
+        if not done and need > 0.9 * free:
+            raise OSError(f"surface patches need {need / 2**30:.1f} GiB, {free / 2**30:.1f} GiB free on the local disk: "
+                          "raise surface.unet.patch_stride_cells / min_patch_coverage or use a larger runtime")
+        mm = np.lib.format.open_memmap(mm_path, mode="r+" if done else "w+", dtype=np.float16,
+                                       shape=(len(idx), len(chans), P, P))
         ds, vrt, f = aligned_dem_reader(dem_path, grid, res)
         try:
             for i, r in enumerate(idx.itertuples()):
+                if i < done:
+                    continue
                 z = read_aligned_patch(vrt, f, r.r0, r.c0, cells, halo)
                 ch = surface_channels(z, res, dem_cfg, chans)
-                mm[i] = np.stack([np.clip(np.nan_to_num(ch[c][halo:halo + P, halo:halo + P], nan=0.0), -6e4, 6e4)
+                mm[i] = np.stack([np.clip(ch[c][halo:halo + P, halo:halo + P], -6e4, 6e4)    # NaN stays NaN
                                   for c in chans]).astype(np.float16)
+                if (i + 1) % 200 == 0:
+                    mm.flush()
+                    write_json(progress_path, {"done": i + 1})
                 if progress and i % 50 == 0:
                     progress(f"  surface patch {i + 1}/{len(idx)}")
         finally:
@@ -186,10 +209,80 @@ def build_surface_patch_dataset(dem_path, grid, footprint: np.ndarray, coverage:
         del mm
     write_table(out_dir / "patch_index.parquet", idx)
     meta = {"memmap": mm_path.name if len(idx) else None, "channels": chans, "res_m": res, "cells": cells,
-            "halo_px": halo, "n_patches": len(idx), "dem_path": str(dem_path), "fingerprint": h,
-            "target": "visible 100 m labels upsampled (nearest) per training visibility at train time"}
+            "stride_cells": stride, "halo_px": halo, "n_patches": len(idx), "dem_path": str(dem_path), "fingerprint": h,
+            "complete": True, "target": "visible 100 m labels upsampled (nearest) per training visibility at train time"}
     write_json(out_dir / "surface_manifest.json", meta)
+    progress_path.unlink(missing_ok=True)
     return meta
+
+
+def validate_surface_patch_artifacts(patch_dir, unet_cfg: dict, grid) -> tuple[dict | None, pd.DataFrame, list[str]]:
+    """(manifest, patch index, problems) of the patch dataset against the configuration and the analysis grid. An empty
+    problem list means: the memmap loads, its shape equals (patches, channels, P, P), the channel ORDER and resolution
+    match the configuration and every patch lies on the grid, so a 100 m target cell maps onto exactly f x f pixels."""
+    from ..g06.persistence import read_json
+
+    patch_dir = Path(patch_dir)
+    man = read_json(patch_dir / "surface_manifest.json")
+    if not isinstance(man, dict) or not man.get("complete"):
+        return None, pd.DataFrame(), ["no complete surface patch manifest: run BUILD_DATASETS after DEM_FEATURES"]
+    probs = []
+    if not man.get("n_patches") or not man.get("memmap"):
+        probs.append("the patch dataset is empty: no 2.4 km patch reaches surface.unet.min_patch_coverage of DEM")
+        return man, pd.DataFrame(), probs
+    if not Path(man.get("dem_path", "")).exists():
+        probs.append(f"coarse DEM {man.get('dem_path')} is missing")
+    if list(man.get("channels", [])) != list(unet_cfg["channels"]):
+        probs.append("patch channels differ from surface.unet.channels (rebuild with BUILD_DATASETS)")
+    if abs(float(man.get("res_m", -1)) - float(unet_cfg.get("res_m", 10.0))) > 1e-9:
+        probs.append(f"patch resolution {man.get('res_m')} m != configured {unet_cfg.get('res_m', 10.0)} m")
+    ratio = grid.pixel_m / float(man["res_m"])
+    if abs(ratio - round(ratio)) > 1e-9:
+        probs.append(f"{man['res_m']} m does not subdivide the {grid.pixel_m} m analysis cell")
+    idx_path = patch_dir / "patch_index.parquet"
+    idx = pd.read_parquet(idx_path) if idx_path.exists() else pd.DataFrame()
+    if not len(idx):
+        probs.append("patch_index.parquet is missing or empty")
+        return man, idx, probs
+    try:
+        mm = np.load(patch_dir / man["memmap"], mmap_mode="r")
+    except (OSError, ValueError) as e:
+        probs.append(f"patch memmap {man['memmap']} does not load: {type(e).__name__}: {e}")
+        return man, idx, probs
+    P = int(man["cells"]) * int(round(ratio))
+    if tuple(mm.shape) != (len(idx), len(man["channels"]), P, P):
+        probs.append(f"patch memmap shape {tuple(mm.shape)} != ({len(idx)}, {len(man['channels'])}, {P}, {P})")
+    H, W = grid.shape
+    if (idx.r0 < 0).any() or (idx.c0 < 0).any() or (idx.r0 + idx.cells > H).any() or (idx.c0 + idx.cells > W).any():
+        probs.append("a patch lies outside the analysis grid")
+    return man, idx, probs
+
+
+READINESS_COLUMNS = ("fit_id", "status", "reason", "n_train", "n_val", "n_train_pos", "n_val_pos", "n_train_neg",
+                     "n_val_neg", "val_fold", "mean_dem_share", "input_channels", "res_m")
+
+
+def surface_patch_readiness(fits: list[str], idx: pd.DataFrame, man: dict | None, problems: list[str], fit_inputs,
+                            unet_cfg: dict) -> pd.DataFrame:
+    """One row per fit: patch counts per role and READY / BLOCKED with the exact reason. ``fit_inputs(fit_id)`` ->
+    (visibility, inner folds): training-visible faults only."""
+    from .models_surface import select_surface_patches
+
+    rows = []
+    for fid in fits:
+        row = dict.fromkeys(READINESS_COLUMNS)
+        row.update(fit_id=fid, status="BLOCKED", input_channels=len((man or {}).get("channels", [])),
+                   res_m=(man or {}).get("res_m"))
+        if problems:
+            row["reason"] = "; ".join(problems)
+        else:
+            vis, inner = fit_inputs(fid)
+            I, facts = select_surface_patches(idx, vis, inner, unet_cfg)
+            row.update({k: v for k, v in facts.items() if k in READINESS_COLUMNS})
+            used = I[I.role.isin(["train", "val"])] if len(I) else I
+            row["mean_dem_share"] = float(used.dem_share.mean()) if len(used) else np.nan
+        rows.append(row)
+    return pd.DataFrame(rows, columns=list(READINESS_COLUMNS))
 
 
 # =============================================================================== subsurface pixels
@@ -253,16 +346,20 @@ def candidate_table_path(root, unit_key: str, kind: str = "") -> Path:
 
 
 def build_candidate_dataset(engine, store, vu, lab: np.ndarray, pools: dict, evidence: dict, cfg: dict,
-                            known_cfg: dict, sup_cfg: dict) -> dict:
+                            known_cfg: dict, sup_cfg: dict, truth: np.ndarray | None = None,
+                            known: np.ndarray | None = None) -> dict:
     """Candidate rows of one unit: G06 segment features over the combined store (geology + DEM channels), honest
-    evidence ranks, pool provenance / expert agreement; relevance table (evaluation side) separately."""
+    evidence ranks, pool provenance / expert agreement; relevance table (evaluation side) separately. ``truth`` /
+    ``known`` restrict relevance and context to what one training visibility may see (synthetic training candidates:
+    ``training_labels.synthetic_training_geometry``); the default is the unit's own truth and permitted context."""
     from ..g06.datasets import _means, segment_features
     from ..g06.feature_context import permitted_fault_context
     from ..g06.supervision import build_segment_supervision, dominant_system
 
     u = vu.unit
     window = (u.sl[0].start, u.sl[0].stop, u.sl[1].start, u.sl[1].stop)
-    kctx = permitted_fault_context(vu.known, engine.valid()[u.sl], known_cfg)
+    truth = vu.eval_truth() if truth is None else truth
+    kctx = permitted_fault_context(vu.known if known is None else known, engine.valid()[u.sl], known_cfg)
     seg_cfg = {**cfg, "geology_features": [f for f in cfg.get("geology_features", []) if f in store.names]}
     T = segment_features(lab, store, window, seg_cfg, kctx, evidence)
     if len(T):
@@ -279,9 +376,9 @@ def build_candidate_dataset(engine, store, vu, lab: np.ndarray, pools: dict, evi
         T.insert(1, "scenario", vu.scenario)
         T.insert(2, "zone", vu.zone)
         T["r_full"], T["c_full"] = T.row + u.sl[0].start, T.col + u.sl[1].start
-    L = build_segment_supervision(lab, vu.eval_truth(), sup_cfg)
+    L = build_segment_supervision(lab, truth, sup_cfg)
     if len(L):
-        L["system_id"] = dominant_system(lab, vu.sysmap, vu.eval_truth(), float(sup_cfg["tol_px"]))
+        L["system_id"] = dominant_system(lab, vu.sysmap, truth, float(sup_cfg["tol_px"]))
         L.insert(0, "unit", vu.key)
     return {"T": T, "L": L}
 

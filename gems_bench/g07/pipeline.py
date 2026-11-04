@@ -8,21 +8,25 @@ Stages [RUN flag] (dependencies) - see docs/g07/ARCHITECTURE.md::
 
     tests              [notebook run_synthetic_tests]   TESTS_FAILED blocks every training stage
     preflight          [PREFLIGHT]           sources, grid, frozen engine, G06 store, W2 artifacts
-    dem_inventory      [DEM_INVENTORY]       catalog vs local DEM headers, licences, optional guarded download
+    gpu_preflight      [TRAIN_SURFACE_UNET]  CUDA readiness; use_gpu without CUDA FAILS (no CPU fallback)
+    dem_inventory      [DEM_INVENTORY]       catalog vs local DEM headers, strict source status, optional guarded download
     dem_coverage       [DEM_COVERAGE]        coverage of the ELIGIBLE region / V1 zones          (dem_inventory)
     dem_feasibility    [DEM_FEASIBILITY]     pilot DEM features, signal, recall, cases, GO / NO_GO (dem_coverage)
-    dem_features       [DEM_FEATURES]        all local DEM -> 100 m store (BLOCKED_INPUT unless GO)  (dem_feasibility)
+    dem_features       [DEM_FEATURES]        all local DEM -> 100 m store, allowed by the training gate (dem_feasibility)
     g06_restore        [BUILD_DATASETS | TRAIN_SUBSURFACE | GENERATE_CANDIDATES | ...]  open + validate the G06 store
     datasets           [BUILD_DATASETS]      splits audit, subsurface pool + label variants, surface pool + patches
-    train_subsurface   [TRAIN_SUBSURFACE]    G07-B0 / B1 / B2                                      (datasets)
-    train_surface_classic [TRAIN_SURFACE_CLASSIC]  G07-A1 / A2 (DEM-covered cells)                 (datasets)
-    train_surface_unet [TRAIN_SURFACE_UNET]  G07-C1                                                (datasets)
+    train_surface_unet [TRAIN_SURFACE_UNET]  G07-C1 on CUDA (first: classical fits must not use up the session) (datasets)
+    train_subsurface   [TRAIN_SUBSURFACE]    G07-B0 / B1 / B2 (CPU)                                (datasets)
+    train_surface_classic [TRAIN_SURFACE_CLASSIC]  G07-A1 / A2 (CPU, DEM-covered cells)            (datasets)
     generate_candidates [GENERATE_CANDIDATES] pools, inventory, recall (G07-C2), candidate tables  (datasets)
     train_candidate_ranker [TRAIN_CANDIDATE_RANKER]  G07-D1, calibration, G07-D2 portfolio, G07-E1 corridor
     evaluate           [EVALUATE]            A0 (W2 exact-k) and every held-out map, V1 / V3 / V2, promotion
     full_inference     [FULL_INFERENCE]      FULL fits, full-region construction, parity
     export             [EXPORT_SUBMISSION]   gated validated GeoTIFF (READY_FOR_MANUAL_UPLOAD at best)
     report             [REPORT]
+
+Stage methods record their status and never raise (batch runs continue). ``require_stage`` is the strict counterpart
+the notebook uses: FAILED, BLOCKED_*, NOT_REQUESTED, PARTIAL raise a descriptive ``StageError`` unless allowed.
 """
 from __future__ import annotations
 
@@ -44,12 +48,18 @@ from .config import REPO, RUN_DEFAULTS, compute_run_id, stage_config, validate_c
 COMPLETE, FAILED, REUSED, VALID = PS.COMPLETE, PS.FAILED, PS.REUSED, PS.VALID
 BLOCKED_UPSTREAM, BLOCKED_INPUT, NOT_REQUESTED, SKIPPED = PS.BLOCKED_UPSTREAM, PS.BLOCKED_INPUT, PS.NOT_REQUESTED, \
     PS.SKIPPED
-NOT_RUN, TESTS_FAILED = PS.NOT_RUN, "TESTS_FAILED"
-STAGES = ("tests", "preflight", "dem_inventory", "dem_coverage", "dem_feasibility", "dem_features", "g06_restore",
-          "datasets", "train_subsurface", "train_surface_classic", "train_surface_unet", "generate_candidates",
-          "train_candidate_ranker", "evaluate", "full_inference", "export", "report")
-FLAGS = {"preflight": ("PREFLIGHT",), "dem_inventory": ("DEM_INVENTORY",), "dem_coverage": ("DEM_COVERAGE",),
-         "dem_feasibility": ("DEM_FEASIBILITY",), "dem_features": ("DEM_FEATURES",),
+NOT_RUN, TESTS_FAILED, PARTIAL = PS.NOT_RUN, "TESTS_FAILED", PS.PARTIAL
+STAGES = ("tests", "preflight", "gpu_preflight", "dem_inventory", "dem_coverage", "dem_feasibility", "dem_features",
+          "g06_restore", "datasets", "train_surface_unet", "train_subsurface", "train_surface_classic",
+          "generate_candidates", "train_candidate_ranker", "evaluate", "full_inference", "export", "report")
+STAGE_LABELS = {"gpu_preflight": "GPU preflight", "dem_inventory": "DEM inventory", "dem_coverage": "DEM coverage",
+                "dem_feasibility": "DEM feasibility", "dem_features": "DEM features", "g06_restore": "G06 restore",
+                "datasets": "Datasets", "train_surface_unet": "Surface U-Net", "train_subsurface": "Subsurface models",
+                "train_surface_classic": "Surface classical", "generate_candidates": "Candidates",
+                "train_candidate_ranker": "Candidate ranker", "evaluate": "Evaluation", "tests": "Synthetic tests",
+                "preflight": "Preflight", "full_inference": "Full inference", "export": "Export", "report": "Report"}
+FLAGS = {"preflight": ("PREFLIGHT",), "gpu_preflight": ("TRAIN_SURFACE_UNET",), "dem_inventory": ("DEM_INVENTORY",),
+         "dem_coverage": ("DEM_COVERAGE",), "dem_feasibility": ("DEM_FEASIBILITY",), "dem_features": ("DEM_FEATURES",),
          "g06_restore": ("BUILD_DATASETS", "TRAIN_SUBSURFACE", "GENERATE_CANDIDATES", "TRAIN_CANDIDATE_RANKER",
                          "EVALUATE", "FULL_INFERENCE"),
          "datasets": ("BUILD_DATASETS",), "train_subsurface": ("TRAIN_SUBSURFACE",),
@@ -60,14 +70,15 @@ FLAGS = {"preflight": ("PREFLIGHT",), "dem_inventory": ("DEM_INVENTORY",), "dem_
 DEPENDS = {"dem_coverage": ("dem_inventory",), "dem_feasibility": ("dem_coverage",),
            "dem_features": ("dem_feasibility",), "datasets": ("g06_restore",),
            "train_subsurface": ("datasets", "tests"), "train_surface_classic": ("datasets", "tests"),
-           "train_surface_unet": ("datasets", "tests"), "generate_candidates": ("datasets", "tests"),
+           "train_surface_unet": ("datasets", "tests", "gpu_preflight"), "generate_candidates": ("datasets", "tests"),
            "train_candidate_ranker": ("generate_candidates", "tests"), "evaluate": ("g06_restore",),
            "full_inference": ("evaluate", "tests"), "export": ("full_inference",)}
 SOFT_DEPS = {"dem_coverage", "dem_feasibility", "dem_features"}   # BLOCKED_INPUT there does not block the geology path
-MODULES = {"preflight": ["inventory"], "dem_inventory": ["inventory", "dem_io"], "dem_coverage": ["inventory"],
-           "dem_feasibility": ["dem_io", "dem_features", "terrain_structure", "evaluation"],
+MODULES = {"preflight": ["inventory"], "gpu_preflight": ["models_surface"], "dem_inventory": ["inventory", "dem_io"],
+           "dem_coverage": ["inventory"], "dem_feasibility": ["dem_io", "dem_features", "terrain_structure", "evaluation"],
            "dem_features": ["dem_io", "dem_features", "terrain_structure"], "g06_restore": ["models_subsurface"],
-           "datasets": ["datasets", "training_labels"], "train_subsurface": ["crossfit", "models_subsurface"],
+           "datasets": ["datasets", "training_labels", "models_surface"],
+           "train_subsurface": ["crossfit", "models_subsurface"],
            "train_surface_classic": ["crossfit", "models_surface"], "train_surface_unet": ["models_surface"],
            "generate_candidates": ["candidate_generation", "datasets", "training_labels"],
            "train_candidate_ranker": ["models_candidates", "crossfit", "confidence", "representation"],
@@ -77,7 +88,9 @@ OUTPUTS = {
     "tests": [("audit/tests.csv", ("test", "status"))],
     "preflight": [("dependencies/existing_artifacts.csv", ("artifact", "status")),
                   ("dependencies/missing_dependencies.json", None), ("manifests/dependencies.json", None)],
+    "gpu_preflight": [("audit/gpu_runtime.json", None)],
     "dem_inventory": [("dem_catalog/dem_inventory.csv", ("tile_id", "status")),
+                      ("dem_catalog/dem_invalid_sources.csv", None), ("dem_catalog/dem_source_validation.json", None),
                       ("dem_catalog/source_licenses.csv", ("source",))],
     "dem_coverage": [("tables/dem_coverage.csv", ("region", "local_dem_share")),
                      ("dem_catalog/dem_coverage.geojson", None)],
@@ -86,7 +99,8 @@ OUTPUTS = {
                                                                      ("feature_id",))],
     "g06_restore": [("dependencies/g06_store.json", None)],
     "datasets": [("splits/fits.csv", ("fit_id",)), ("datasets/subsurface/pool_meta.parquet", ("row_id",)),
-                 ("datasets/dataset_summary.csv", ("dataset",))],
+                 ("datasets/dataset_summary.csv", ("dataset",)),
+                 ("datasets/surface/patch_readiness.csv", ("fit_id", "status"))],
     "train_subsurface": [("models/subsurface_registry.csv", ("experiment", "fit_id", "status"))],
     "train_surface_classic": [("models/surface_registry.csv", ("experiment", "fit_id", "status"))],
     "train_surface_unet": [("models/surface_unet_registry.csv", ("experiment", "fit_id", "status"))],
@@ -103,6 +117,11 @@ OUTPUTS = {
 ARCHIVE_EXTRA = {"evaluate": ["evaluation/metrics", "evaluation/geographic", "evaluation/ablations"],
                  "generate_candidates": ["candidates", "datasets/candidates"]}
 MERGED = ("train_subsurface", "train_surface_classic", "train_surface_unet")
+NO_ARCHIVE = MERGED + ("datasets",)      # finished parts are keyed by fingerprint and reused inside the stage
+
+
+class StageError(RuntimeError):
+    """A stage the notebook requires did not reach a valid state."""
 
 
 class G07Pipeline:
@@ -118,7 +137,8 @@ class G07Pipeline:
         self.local_root, self.drive_root = Path(self.nb["local_root"]), Path(self.nb["drive_root"])
         self.roots = [self.local_root, self.drive_root, REPO]
         self._factory, self._engine, self._units, self._g06, self._dem = factory, None, None, None, None
-        self._engine_error = None
+        self._engine_error, self._dem_cat = None, None
+        self.soft_errors: list = []
         self.src = self._resolve_sources()
         cache = self.local_root / ".g07_source_sha.json"
         self.src_fp = {k: PS.source_fingerprint(p, cache) for k, p in self.src.items() if p is not None}
@@ -167,9 +187,11 @@ class G07Pipeline:
         st = self.status.get(dep)
         if dep == "tests":
             return st not in (TESTS_FAILED, FAILED)
-        if st in VALID or st == PS.NO_GO:
-            return True
-        return False
+        if dep == "gpu_preflight":                       # only a real failure blocks; the U-Net re-checks its device
+            return st != FAILED
+        # PARTIAL passes: e.g. datasets without surface patches must not stop the geology path; each consumer then
+        # checks what it needs and reports the exact reason
+        return st in VALID or st in (PS.NO_GO, PARTIAL)
 
     def _run(self, stage: str, parts: list, fn, *, force: bool = False) -> dict:
         bad = [d for d in DEPENDS.get(stage, ()) if not self._dep_ok(d)]
@@ -181,6 +203,10 @@ class G07Pipeline:
         if not self.requested(stage):
             if reusable:
                 return self._set(stage, REUSED, fp, {"note": "not requested; valid cache adopted"})
+            prev = PS.load_cached_stage(self.root, stage) or {}
+            if prev.get("status") == PS.NO_GO and prev.get("fingerprint") == fp and not PS.check_outputs(self.root, outs)[1]:
+                self.status[stage] = PS.NO_GO              # a finished decision, adopted when not re-assessed
+                return {"stage": stage, "status": PS.NO_GO, "note": "not requested; earlier decision adopted"}
             return self._set(stage, NOT_REQUESTED, fp, {"note": f"RUN {FLAGS.get(stage)} off, no valid cache"},
                              save=False)
         if bad:
@@ -189,7 +215,7 @@ class G07Pipeline:
         if reusable and not force and self.nb.get("reuse_cached", True):
             return self._set(stage, REUSED, fp, {"note": f"fingerprint {fp[:10]}"})
         prev = PS.load_cached_stage(self.root, stage)
-        if prev and prev.get("status") == COMPLETE and prev.get("fingerprint") != fp and stage not in MERGED:
+        if prev and prev.get("status") == COMPLETE and prev.get("fingerprint") != fp and stage not in NO_ARCHIVE:
             moved = PS.archive_outputs(self.root, stage, ARCHIVE_EXTRA.get(stage, []) + [o[0] for o in outs],
                                        prev.get("fingerprint"))
             if moved:
@@ -201,12 +227,68 @@ class G07Pipeline:
         except Exception as e:
             st, info = FAILED, {"error": f"{type(e).__name__}: {e}", "traceback": traceback.format_exc()[-5000:]}
             self.errors.append({"stage": stage, **info, "time": time.strftime("%Y-%m-%dT%H:%M:%S")})
-        if st == COMPLETE:
+        if st in (COMPLETE, PARTIAL):
             _, probs = PS.check_outputs(self.root, outs)
             if probs:
                 st, info = FAILED, {**info, "error": f"required outputs invalid: {probs[:4]}"}
         info["seconds"] = round(time.perf_counter() - t0, 1)
         return self._set(stage, st, fp, info)
+
+    def require_stage(self, stage: str, allow=()) -> dict:
+        """The stage's manifest when it reached a valid state in this session, else a descriptive ``StageError``.
+        COMPLETE and REUSED pass (REUSED is only ever set after cache validation); anything else passes only through
+        ``allow`` (e.g. ``PS.NO_GO`` for the feasibility decision, ``PARTIAL`` for a resumable DEM build)."""
+        st = self.status.get(stage, NOT_RUN)
+        m = PS.load_cached_stage(self.root, stage) or {}
+        if st in VALID or st in allow:
+            return m
+        label = STAGE_LABELS.get(stage, stage)
+        detail = m.get("error") or m.get("reason") or m.get("note") or ""
+        if st in (FAILED, TESTS_FAILED):
+            tb = str(m.get("traceback") or "")[-1500:]
+            hint = " See audit/pytest_output.txt." if st == TESTS_FAILED else " See manifests/runtime_errors.json."
+            raise StageError(f"{label} {st}: {detail}.{hint}\n{tb}")
+        if st == BLOCKED_INPUT:
+            raise StageError(f"{label} BLOCKED_INPUT (missing or refused input): {detail}")
+        if st == BLOCKED_UPSTREAM:
+            raise StageError(f"{label} BLOCKED_UPSTREAM: {detail}. Fix that stage first, then rerun from the top.")
+        if st == NOT_REQUESTED:
+            raise StageError(f"{label} was NOT_REQUESTED: RUN flags {FLAGS.get(stage)} are off and no valid cache "
+                             "exists. That is not a success.")
+        if st == PS.NO_GO:
+            raise StageError(f"{label} decided NO_GO / INCONCLUSIVE: {detail}. See reports/DEM_FEASIBILITY.md.")
+        if st == PARTIAL:
+            raise StageError(f"{label} is PARTIAL: {detail}. Rerun to resume it; partial results are saved.")
+        raise StageError(f"{label} has status {st}: it did not run in this session. Run it before this cell.")
+
+    def execution_summary(self) -> pd.DataFrame:
+        """Stage / status table of this session, printed; the feasibility line shows the actual decision."""
+        rows = []
+        decision = (self.ws.read_json("dem_catalog/feasibility_decision.json") or {}).get("decision")
+        for s in STAGES:
+            st = self.status.get(s, NOT_RUN)
+            if s == "gpu_preflight" and st in VALID:
+                st = "READY"
+            if s == "dem_feasibility" and st in (COMPLETE, REUSED, PS.NO_GO, BLOCKED_INPUT) and decision:
+                st = decision
+            rows.append({"stage": STAGE_LABELS.get(s, s), "status": st})
+        T = pd.DataFrame(rows)
+        print(f"{'Stage':<22} Status\n" + "-" * 40)
+        for r in T.itertuples():
+            print(f"{r.stage:<22} {r.status}")
+        self.ws.save_table(T, "manifests/execution_summary.csv")
+        self.push(["manifests"])
+        return T
+
+    def _soft(self, what: str, fn, *a, **k):
+        """Run an auxiliary product (figure, diagnostic): a failure is recorded and shown, the stage's result stands."""
+        try:
+            return fn(*a, **k)
+        except Exception as e:
+            self.soft_errors.append({"what": what, "error": f"{type(e).__name__}: {e}"[:600]})
+            self.say(f"[g07] auxiliary product '{what}' failed: {type(e).__name__}: {e}")
+            PS.write_json(self.root / "manifests" / "auxiliary_errors.json", self.soft_errors)
+            return None
 
     def _set(self, stage, st, fp, info, save=True) -> dict:
         self.status[stage] = st
@@ -224,6 +306,11 @@ class G07Pipeline:
 
     def push(self, rels) -> None:
         PS.sync_artifacts(self.ws, rels)
+
+    def push_files(self, *paths) -> None:
+        """Persist finished products at once, tile products included (the default push skips ``*/tiles/*``)."""
+        rels = [Path(p).relative_to(self.root).as_posix() for p in paths if Path(p).exists()]
+        PS.sync_artifacts(self.ws, rels, PS.ALL_FILES)
 
     def save_run_manifest(self) -> None:
         PS.write_json(self.root / "manifests" / "run.json", {
@@ -292,10 +379,54 @@ class G07Pipeline:
                                         or "")
         return self._dem
 
-    def dem_sources(self):
-        from .inventory import discover_dem_sources
+    def dem_sources(self, refresh: bool = False):
+        """(table, sources) with strict status; the headers of every file are read once per session."""
+        if self._dem_cat is None or refresh:
+            from .inventory import discover_dem_sources
 
-        return discover_dem_sources(self.cfg["dem"], self.roots)
+            self._dem_cat = discover_dem_sources(self.cfg["dem"], self.roots, self.grid(), self._footprint_or_none())
+        return self._dem_cat
+
+    def _footprint_or_none(self):
+        from ..g06.inventory import EngineUnavailable
+
+        try:
+            return self.engine().valid()
+        except EngineUnavailable as e:
+            self.say(f"[g07] footprint unavailable, DEM sources checked against the grid only: {str(e)[:200]}")
+            return None
+
+    def dem_gate(self) -> dict:
+        """The training gate of the current mode and decision, saved and shown before any DEM-based training."""
+        from .config import training_mode
+        from .evaluation import training_gate
+
+        dec = self.ws.read_json("dem_catalog/feasibility_decision.json")
+        usable = self._usable_sources(self.dem_sources()[1])
+        val = self.ws.read_json("dem_catalog/dem_source_validation.json") or {}
+        gate = training_gate(dec, training_mode(self.cfg), len(usable), val)
+        self.ws.save_json(gate, "dem_catalog/training_gate.json")
+        self.push(["dem_catalog"])
+        return gate
+
+    def _need_nested(self) -> bool:
+        """Nested inner fits exist only for the candidate ranker's strict inputs: they are not trained before it."""
+        return bool(self.run_flags.get("GENERATE_CANDIDATES") or self.run_flags.get("TRAIN_CANDIDATE_RANKER"))
+
+    def _dem_content_fp(self) -> str | None:
+        return (self.ws.read_json("dem_features/dem_features_manifest.json") or {}).get("content_fp")
+
+    def _subsurface_ds_fp(self) -> str:
+        return PS.stable_hash("subsurface", (self.cfg["datasets"] or {}).get("subsurface_sampling"), self.cfg["labels"],
+                              self.cfg["validation"], self.cfg.get("inner_cv"), self.seed(), self.fp_of("g06_restore"),
+                              PS.code_identity(["gems_bench.g07.datasets", "gems_bench.g07.training_labels",
+                                                "gems_bench.g06.datasets", "gems_bench.g06.sampling"]))
+
+    def _surface_ds_fp(self) -> str:
+        return PS.stable_hash("surface", (self.cfg["datasets"] or {}).get("surface_sampling"), self.cfg["labels"],
+                              self.cfg["validation"], self.cfg.get("inner_cv"), self.seed(), self._dem_content_fp(),
+                              PS.code_identity(["gems_bench.g07.datasets", "gems_bench.g07.training_labels",
+                                                "gems_bench.g06.datasets", "gems_bench.g06.sampling"]))
 
     def w2_maps(self) -> dict:
         out = {}
@@ -377,19 +508,39 @@ class G07Pipeline:
                                       f"{miss['blocked_stages'] or 'none'}"}
         return self._run("preflight", [self.src_fp, stage_config(self.cfg, "preflight")], fn, force=True)
 
+    # =========================================================================== GPU
+    def gpu_preflight(self) -> dict:
+        """CUDA readiness for the U-Net (audit/gpu_runtime.json). Classical models always run on CPU."""
+        def fn():
+            from .models_surface import validate_gpu_runtime
+
+            use = bool(self.nb.get("use_gpu"))
+            R = validate_gpu_runtime(requested=use, require_cuda=use)
+            self.ws.save_json({**R, "classical_models_device": "cpu"}, "audit/gpu_runtime.json")
+            self.push(["audit"])
+            return COMPLETE, {"note": f"{R['readiness']}: {R['selected_device']} {R['gpu_name'] or ''} "
+                                      f"{R['vram_total_gib'] or ''} GiB, torch {R['torch_version']}"}
+        return self._run("gpu_preflight", [time.strftime("%Y-%m-%dT%H:%M")], fn, force=True)
+
     # =========================================================================== DEM inventory / coverage
     def inspect_dem(self) -> dict:
         return {"inventory": self.dem_inventory(), "coverage": self.dem_coverage()}
 
     def dem_inventory(self) -> dict:
         def fn():
+            from .dem_io import source_validation_summary
             from .inventory import source_licenses
 
             dc = self.cfg["dem"]
             if (dc.get("download") or {}).get("enabled"):
                 self._download_dem()
-            T, sources = self.dem_sources()
+            T, sources = self.dem_sources(refresh=True)
             self.ws.save_table(T, "dem_catalog/dem_inventory.csv")
+            bad = T[~T.status.isin(["LOCAL", "CATALOG_ONLY"])] if len(T) else T
+            self.ws.save_table(bad[["tile_id", "path", "status", "exclusion_codes", "problems", "crs", "res_m",
+                                    "vertical_unit", "vertical_unit_source"]], "dem_catalog/dem_invalid_sources.csv")
+            val = source_validation_summary(T, dc)
+            self.ws.save_json(val, "dem_catalog/dem_source_validation.json")
             self.ws.save_table(pd.DataFrame(T.attrs.get("existing_products", [])), "dem_catalog/existing_products.csv")
             self.ws.save_table(source_licenses(self.cfg, False), "dem_catalog/source_licenses.csv")
             if (dc.get("catalog") or {}).get("inspect_remote_headers") and len(T):
@@ -402,8 +553,8 @@ class G07Pipeline:
             n_local = int((T.status == "LOCAL").sum()) if len(T) else 0
             res = sorted(set(T.loc[T.status == "LOCAL", "res_m"].dropna().round(3))) if n_local else []
             return COMPLETE, {"note": f"{len(T)} DEM sources ({n_local} local and valid, resolutions {res} m); "
-                                      f"{int((T.status == 'CATALOG_ONLY').sum()) if len(T) else 0} catalog-only",
-                              "n_local": n_local}
+                                      f"{int((T.status == 'CATALOG_ONLY').sum()) if len(T) else 0} catalog-only; "
+                                      f"excluded {val['exclusion_codes'] or 'none'}", "n_local": n_local}
         return self._run("dem_inventory", [stage_config(self.cfg, "dem_inventory"), self._dem_listing()], fn)
 
     def _dem_listing(self) -> list:
@@ -446,8 +597,8 @@ class G07Pipeline:
             if self.figures_on():
                 from . import visualization as V
 
-                V.plot_dem_coverage(masks["local"], masks["catalog"], masks["eligible"], self.grid().transform,
-                                    self.figs("dem_atlas"))
+                self._soft("DEM coverage figure", V.plot_dem_coverage, masks["local"], masks["catalog"], masks["eligible"],
+                           self.grid().transform, self.figs("dem_atlas"))
             self.push(["tables", "dem_catalog", "figures"])
             e = C[C.region == "eligible"].iloc[0]
             return COMPLETE, {"note": f"local DEM covers {e.local_dem_share:.1%} of the eligible region "
@@ -456,12 +607,12 @@ class G07Pipeline:
 
     # =========================================================================== DEM features (pilot + full)
     def _dem_fp(self) -> str:
-        """DEM-processing identity (configuration + code). Per-tile products are named by tile id and size, so the
-        pilot and the full build share every finished tile."""
-        dc = {k: v for k, v in self.cfg["dem"].items() if k not in ("download", "catalog", "research_use_ok",
-                                                                    "competition_eligibility_verified")}
-        return PS.stable_hash(dc, PS.code_identity(["gems_bench.g07.dem_features", "gems_bench.g07.terrain_structure",
-                                                    "gems_bench.g07.dem_io"]), n=10)
+        """DEM-processing identity (what determines the values + code). Per-tile products are named by tile id and size,
+        so the pilot and the full build share every finished tile; gating and budget settings never invalidate them."""
+        from .config import dem_identity
+
+        return PS.stable_hash(dem_identity(self.cfg["dem"]), PS.code_identity(
+            ["gems_bench.g07.dem_features", "gems_bench.g07.terrain_structure", "gems_bench.g07.dem_io"]), n=10)
 
     def _usable_sources(self, sources) -> list:
         """Local, valid sources; one per tile id (latest year) - overlapping projects are not double counted."""
@@ -472,51 +623,86 @@ class G07Pipeline:
                 best[s.tile_id] = s
         return sorted(best.values(), key=lambda s: s.tile_id)
 
-    def _build_dem_features(self, sources, tag: str, out_tif: Path) -> dict:
-        """Fine tier per source + coarse tier over the merged coarse DEM -> mosaic ``out_tif`` (resumable)."""
-        from .dem_features import aggregated_names, build_coarse_dem, feature_kinds, process_coarse, process_fine_source
-        from .dem_io import mosaic_windows
+    def _build_dem_features(self, sources, tag: str, out_tif: Path, fine_budget_h: float | None = None) -> dict:
+        """Merged coarse DEM (all the U-Net needs) -> fine tier per source -> coarse tier -> mosaic ``out_tif``. Every
+        product is persisted when finished; past the time budget no new tile starts and a rerun resumes."""
+        from collections import Counter
+
+        from .dem_features import (aggregated_names, build_coarse_dem, feature_kinds, process_coarse,
+                                   process_fine_source, required_halo_px, stage_tile_local)
+        from .dem_io import coverage_100m_from_dem, mosaic_windows, neighbour_sources
 
         dc = self.cfg["dem"]
         grid = self.grid()
         fp = self._dem_fp()
         tdir = self.root / "dem_features" / "tiles" / fp
         tdir.mkdir(parents=True, exist_ok=True)
-        files, names, max_bands = [], ["dem_coverage"], set()
-        for i, s in enumerate(sources):
-            p = tdir / f"fine_{s.tile_id}_{Path(s.path).stat().st_size}.tif"
-            factor = max(int(round(float(dc.get("work_res_m", 1.0)) / float(s.res_m))), 1)
-            if not (p.exists() and p.with_suffix(".json").exists()):
-                self.say(f"  [{tag}] fine tier {i + 1}/{len(sources)} {s.tile_id} (factor {factor})")
-                r = process_fine_source(s.path, s, dc, grid, p, factor, {"tile_id": s.tile_id, "project": s.project,
-                                                                          "fingerprint": fp}, None)
-                if r is None:
-                    continue
-                self.push([str((tdir / p.name).relative_to(self.root).as_posix())])
-            files.append(p)
-            k = feature_kinds(dc, float(s.res_m) * factor, "fine")
-            names += [n for n in aggregated_names(k) if n not in names]
-            max_bands |= {n for n, v in k.items() if v == "max"}
+        pool = self._usable_sources(self.dem_sources()[1])       # halos may read any usable tile, not just this set
+        cpath = None
+        extra = {}
         if dc.get("coarse_scales_m") and sources:
-            crs = sources[0].crs
+            crs = Counter(s.crs for s in sources).most_common(1)[0][0]
             same = [s for s in sources if s.crs == crs]
             cfp = PS.stable_hash(fp, sorted(s.tile_id for s in same), n=10)          # depends on the source set
             cpath = self.root / "dem_features" / "coarse" / cfp / f"coarse_dem_{int(dc.get('coarse_res_m', 10))}m.tif"
             if not cpath.exists():
                 self.say(f"  [{tag}] coarse DEM ({len(same)} sources at {dc.get('coarse_res_m', 10)} m)")
-                build_coarse_dem(same, float(dc.get("coarse_res_m", 10.0)), cpath, crs)
-            cdir = tdir / "coarse" / cfp
-            cdir.mkdir(parents=True, exist_ok=True)
-            cfiles = process_coarse(cpath, dc, grid, cdir, {"fingerprint": fp}, None)
-            files += cfiles
-            k = feature_kinds(dc, float(dc.get("coarse_res_m", 10.0)), "coarse")
+                build_coarse_dem(same, float(dc.get("coarse_res_m", 10.0)), cpath, crs,
+                                 self.root / "dem_features" / "coarse_parts" / fp, self.say, self.push_files)
+                self.push_files(cpath)
+            extra["dem_coverage_coarse"] = coverage_100m_from_dem(cpath, grid)
+        t0 = time.time()
+        fine_files, names, max_bands, deferred = [], ["dem_coverage"], set(), 0
+        for i, s in enumerate(sources):
+            p = tdir / f"fine_{s.tile_id}_{Path(s.path).stat().st_size}.tif"
+            factor = max(int(round(float(dc.get("work_res_m", 1.0)) / float(s.res_m))), 1)
+            if not (p.exists() and p.with_suffix(".json").exists()):
+                if fine_budget_h is not None and time.time() - t0 > float(fine_budget_h) * 3600:
+                    deferred += 1
+                    continue
+                self.say(f"  [{tag}] fine tier {i + 1}/{len(sources)} {s.tile_id} (factor {factor}, "
+                         f"{(time.time() - t0) / 3600:.2f} h used)")
+                res = float(s.res_m) * factor
+                halo_m = max(int(dc.get("halo_px", 128)), required_halo_px(dc, res, "fine")) * res
+                near = neighbour_sources(s, pool, halo_m)
+                path, copied = s.path, False
+                if dc.get("stage_tile_local", True) and str(s.path).startswith(str(self.drive_root)):
+                    path, copied = stage_tile_local(s.path, self.local_root / ".dem_tile_cache")
+                try:
+                    r = process_fine_source(path, s, dc, grid, p, factor, {"tile_id": s.tile_id, "project": s.project,
+                                                                           "fingerprint": fp}, self.say, near)
+                finally:
+                    if copied:
+                        Path(path).unlink(missing_ok=True)
+                if r is None:
+                    continue
+                self.push_files(p, p.with_suffix(".json"))
+            fine_files.append(p)
+            k = feature_kinds(dc, float(s.res_m) * factor, "fine")
             names += [n for n in aggregated_names(k) if n not in names]
             max_bands |= {n for n, v in k.items() if v == "max"}
+        files = list(fine_files)
+        n_coarse_deferred = 0
+        if cpath is not None:
+            cdir = tdir / "coarse" / cfp
+            cdir.mkdir(parents=True, exist_ok=True)
+            deadline = time.time() + float(dc.get("coarse_budget_hours", 2.0)) * 3600
+            cfiles, n_coarse_deferred = process_coarse(cpath, dc, grid, cdir, {"fingerprint": fp}, self.say,
+                                                       lambda q: self.push_files(q, Path(q).with_suffix(".json")),
+                                                       deadline)
+            files += cfiles
+            k = feature_kinds(dc, float(dc.get("coarse_res_m", 10.0)), "coarse")
+            if cfiles:
+                names += [n for n in aggregated_names(k) if n not in names]
+                max_bands |= {n for n, v in k.items() if v == "max"}
         if not files:
-            return {"status": "EMPTY"}
-        mosaic_windows(files, grid, names, out_tif, tuple(max_bands))
-        return {"status": "COMPLETE", "fingerprint": fp, "n_sources": len(sources), "n_products": len(files),
-                "names": names, "coarse": str(cpath) if dc.get("coarse_scales_m") and sources else None}
+            return {"status": "EMPTY", "n_deferred": deferred}
+        mosaic_windows(files, grid, names, out_tif, tuple(max_bands), fine_files, extra)
+        return {"status": "COMPLETE" if not (deferred or n_coarse_deferred) else "PARTIAL", "fingerprint": fp,
+                "n_sources": len(sources), "n_fine_done": len(fine_files), "n_deferred": deferred,
+                "n_coarse_windows_deferred": n_coarse_deferred, "n_products": len(files), "names": names,
+                "coarse_dem": str(cpath.relative_to(self.root)) if cpath is not None else None,
+                "content_fp": PS.stable_hash(sorted(Path(f).name for f in files), fp, n=16)}
 
     def assess_dem_feasibility(self) -> dict:
         def fn():
@@ -533,8 +719,8 @@ class G07Pipeline:
             if usable and licence_ok:
                 pilot = self._pilot_sources(usable, int(fc.get("max_tiles", 12)))
                 out = self.root / "dem_features" / "pilot" / "dem_features_100m_pilot.tif"
-                info = self._build_dem_features(pilot, "pilot", out)
-                if info.get("status") == "COMPLETE":
+                info = self._build_dem_features(pilot, "pilot", out, fc.get("pilot_budget_hours"))
+                if info.get("status") in ("COMPLETE", "PARTIAL"):
                     from .dem_io import DemFeatureStore
 
                     st = DemFeatureStore(out, float(dc.get("min_coverage", 0.5)), info["fingerprint"])
@@ -544,8 +730,9 @@ class G07Pipeline:
                                                 {"W2": w2})
                     R = self._dem_recall(U, st, w2, fc, exact_k_mask, evaluate_candidate_recall)
                     if self.figures_on():
-                        self._feasibility_figures(S, U, st, w2, pilot)
-            dec = feasibility_decision(C, S, facts, R, licence_ok, bool(usable), self.cfg)
+                        self._soft("feasibility figures", self._feasibility_figures, S, U, st, w2, pilot)
+            val = self.ws.read_json("dem_catalog/dem_source_validation.json") or {}
+            dec = feasibility_decision(C, S, facts, R, licence_ok, bool(usable), self.cfg, val)
             self.ws.save_table(S, "tables/dem_fault_signal.csv")
             self.ws.save_table(facts, "tables/dem_feasibility_units.csv")
             self.ws.save_table(R, "evaluation/recall/dem_candidate_recall.csv")
@@ -749,29 +936,31 @@ class G07Pipeline:
                  f"## Decision: **{dec['decision']}**", ""]
         for k, v in (dec.get("criteria") or {}).items():
             lines.append(f"* {k}: {v['value']} -> {'PASS' if v['pass'] else 'FAIL'}")
-        lines += ["", f"Reasons: {dec.get('reasons')}", "", f"_{dec.get('note', '')}_", "",
+        lines += ["", f"Reasons: {dec.get('reasons')}", "", f"V3 (reported, does not gate): {dec.get('v3_report')}", "",
+                  f"_{dec.get('note', '')}_", "",
                   "## Sources", "", f"{len(T)} DEM sources in the catalog / on disk; {len(usable)} usable locally "
                   "(headers verified: resolution, CRS, vertical unit).", "",
                   _md(T, 30, ["tile_id", "status", "res_m", "crs", "vertical_unit", "vertical_unit_source", "project",
                               "problems"]),
                   "## Coverage of the eligible region", "", _md(C), "## Fault signal (held-out truth, diagnostic)", "",
-                  _md(S, 30, ["feature", "auc", "auc_abs", "rho_with_coverage", "scale_stability",
+                  _md(S, 30, ["feature", "auc", "auc_abs", "auc_abs_v3", "rho_with_coverage", "scale_stability",
                               "truth_orient_agreement", "mean_at_w2_fp", "mean_at_w2_tp", "is_reference"]),
                   "## Candidate recall at controlled area (DEM score vs W2, DEM-covered cells)", "",
                   _md(R, 30, ["unit", "frac", "source", "n_systems", "n_covered", "recall", "area_frac"]),
                   "## What to do next", ""]
         if dec["decision"] == "BLOCKED_INPUT":
-            lines += ["* No usable high-resolution DEM (or research use not confirmed). Put the USGS TNM URL list at "
-                      "`MyDrive/GEMS_2/data/raw/dem_1m/tnm_urls.json`, then either download pilot tiles with "
-                      "`dem.download.enabled: true` (guarded: max tiles / GiB) or copy tiles to "
-                      "`MyDrive/GEMS_2/data/raw/dem_1m/<project>/`. The 100 m `det_elev` band is NEVER used as a "
-                      "substitute.", "* Continue with the geology path: BUILD_DATASETS + TRAIN_SUBSURFACE."]
+            lines += [f"* Reasons: {dec.get('reasons')}.", *[f"* {x}" for x in dec.get("remedy", [])],
+                      "* See `dem_catalog/dem_invalid_sources.csv` for every excluded file. The 100 m `det_elev` band "
+                      "is NEVER used as a substitute.", "* The geology path stays available: BUILD_DATASETS + "
+                      "TRAIN_SUBSURFACE."]
         elif dec["decision"] == "GO":
-            lines += ["* GO: DEM_FEATURES (all local tiles) -> BUILD_DATASETS -> TRAIN_SURFACE_CLASSIC."]
+            lines += ["* GO: DEM_FEATURES -> BUILD_DATASETS -> TRAIN_SURFACE_UNET (CUDA) -> classical models -> "
+                      "EVALUATE."]
         else:
-            lines += ["* NO_GO / INCONCLUSIVE: keep the DEM as an optional feature family; prioritise improved "
-                      "subsurface supervision (TRAIN_SUBSURFACE) and candidate ranking. Re-assess only with more "
-                      "coverage (never by lowering the predeclared thresholds)."]
+            lines += ["* NO_GO / INCONCLUSIVE: STRICT_RESEARCH stops DEM-based training here. To train anyway set "
+                      "`OVERRIDES['dem']['require_go'] = False` (EXPLORATORY_TRAINING: results stay SCREENING_ONLY and "
+                      "can never be promoted). Re-assess only with more coverage, never by lowering the predeclared "
+                      "thresholds."]
         return "\n".join(lines) + "\n"
 
     def prepare_dem_features(self) -> dict:
@@ -779,31 +968,47 @@ class G07Pipeline:
             from .contracts import DEMFeatureSpec
             from .dem_features import feature_kinds
 
-            dec = (self.ws.read_json("dem_catalog/feasibility_decision.json") or {}).get("decision")
-            if self.cfg["dem"].get("require_go", True) and dec != "GO":
-                return BLOCKED_INPUT, {"note": f"DEM feasibility decision {dec}: DEM features not built "
-                                               "(dem.require_go)"}
+            gate = self.dem_gate()
+            if not gate["gpu_training_can_proceed"]:
+                return BLOCKED_INPUT, {"note": f"{gate['reason']}. {gate['corrective_action']}"}
             _, sources = self.dem_sources()
             usable = self._usable_sources(sources)
-            if not usable:
-                return BLOCKED_INPUT, {"note": "no usable local DEM"}
-            info = self._build_dem_features(usable, "full", self.root / "dem_features" / "dem_features_100m.tif")
-            if info.get("status") != "COMPLETE":
-                return BLOCKED_INPUT, {"note": "no DEM data produced"}
             dc = self.cfg["dem"]
+            info = self._build_dem_features(usable, "full", self.root / "dem_features" / "dem_features_100m.tif",
+                                            dc.get("fine_budget_hours"))
+            if info.get("status") not in ("COMPLETE", "PARTIAL"):
+                return BLOCKED_INPUT, {"note": f"no DEM product was produced from {len(usable)} usable sources"}
+            self.ws.save_json({k: v for k, v in info.items() if k != "names"},
+                              "dem_features/dem_features_manifest.json")
             rows = []
             for tier, res in (("fine", float(dc.get("work_res_m", 1.0))), ("coarse", float(dc.get("coarse_res_m",
                                                                                                 10.0)))):
                 for k, v in feature_kinds(dc, res, tier).items():
                     rows.append(DEMFeatureSpec(k, f"{tier} tier {k}", "", None, k.split("_")[1], v, res).to_row())
             self.ws.save_table(pd.DataFrame(rows), "dem_features/dem_feature_registry.csv")
-            self._agreement_raster()
             self._dem = None
-            self.push(["dem_features"])
-            return COMPLETE, {"note": f"{info['n_sources']} sources -> {len(info['names'])} bands",
-                              "dem_fingerprint": info["fingerprint"]}
+            self._soft("terrain-geophysics agreement raster", self._agreement_raster)
+            self._soft("seam audit", self._seam_audit, sources)
+            self.push(["dem_features", "tables"])
+            note = (f"{info['n_fine_done']}/{info['n_sources']} fine-tier sources, {info['n_coarse_windows_deferred']} "
+                    f"coarse windows deferred -> {len(info['names'])} bands")
+            st = PARTIAL if info["status"] == "PARTIAL" else COMPLETE
+            if st == PARTIAL:
+                note += " (time budget reached: rerun to resume; the merged coarse DEM for the U-Net is complete)"
+            return st, {"note": note, "dem_fingerprint": info["fingerprint"], "content_fp": info["content_fp"]}
         return self._run("dem_features", [stage_config(self.cfg, "dem_features"), self._dem_listing(),
                                           self.fp_of("dem_feasibility")], fn)
+
+    def _seam_audit(self, sources) -> None:
+        from .dem_io import DemFeatureStore, seam_audit
+
+        st = DemFeatureStore(self.root / "dem_features" / "dem_features_100m.tif",
+                             float(self.cfg["dem"].get("min_coverage", 0.5)))
+        A = seam_audit(st, sources, self.grid())
+        self.ws.save_table(A, "tables/dem_seam_audit.csv")
+        if len(A) and A.flag.any():
+            self.say(f"  seam audit: {int(A.flag.sum())}/{len(A)} features differ at DEM tile boundaries "
+                     "(tables/dem_seam_audit.csv)")
 
     def _agreement_raster(self) -> None:
         """Terrain-vs-geophysics orientation agreement (100 m) when the G06 store has the structure orientations."""
@@ -896,64 +1101,140 @@ class G07Pipeline:
             sm = np.asarray(S.system_map)
             lab = self.cfg["labels"]
             summary = []
+            label_fits = [f for f in fits if "|" not in f or self._need_nested()]
+
+            def write_labels(kind, meta, fp, samp):
+                """Per-fit labels, skipped when already written for this dataset identity (resume, nested later)."""
+                done = self.ws.read_json(f"datasets/{kind}/labels_state.json") or {}
+                finished = set(done.get("fits", [])) if done.get("fingerprint") == fp else set()
+                n = 0
+                for fid in label_fits:
+                    rel = f"datasets/{kind}/labels/{unit_file(fid)}.parquet"
+                    if fid in finished and self.ws.exists(rel):
+                        continue
+                    vis = build_training_visibility(eng, fid, val, tuple(val["scenarios"]))
+                    L = subsurface_labels(meta, vis, eng.valid(), sm, lab["supervision"], samp,
+                                          self.cfg.get("inner_cv") or {}, lab.get("improved", {}), self.seed(),
+                                          float(lab.get("proximity_lambda_km", 0.3)))
+                    self.ws.save_table(L, rel)
+                    finished.add(fid)
+                    self.ws.save_json({"fingerprint": fp, "fits": sorted(finished)},
+                                      f"datasets/{kind}/labels_state.json")
+                    n += 1
+                return n
+
             g6 = self.g06_store()
-            m = build_subsurface_pixel_dataset(g6, eng.labels(), sm, {**self.cfg["datasets"]["subsurface_sampling"],
-                                                                     "seed": self.seed()},
-                                               self.root / "datasets" / "subsurface")
+            sfp = self._subsurface_ds_fp()
+            pm0 = self.ws.read_json("datasets/subsurface/pool_manifest.json") or {}
+            if pm0.get("fingerprint") == sfp and self.ws.exists("datasets/subsurface/pool_meta.parquet") and \
+                    self.ws.exists("datasets/subsurface/pool_features.parquet"):
+                m = pm0                                                    # a DEM rebuild never redraws this pool
+            else:
+                m = build_subsurface_pixel_dataset(g6, eng.labels(), sm, {**self.cfg["datasets"]["subsurface_sampling"],
+                                                                         "seed": self.seed()},
+                                                   self.root / "datasets" / "subsurface")
+                m = {**m, "fingerprint": sfp}
+                self.ws.save_json(m, "datasets/subsurface/pool_manifest.json")
             summary.append({"dataset": "subsurface_pool", **{k: v for k, v in m.items() if k != "strata"}})
             meta = pd.read_parquet(self.root / "datasets" / "subsurface" / "pool_meta.parquet")
-            for fid in fits:
-                vis = build_training_visibility(eng, fid, val, tuple(val["scenarios"]))
-                L = subsurface_labels(meta, vis, eng.valid(), sm, lab["supervision"], self.cfg["datasets"][
-                    "subsurface_sampling"], self.cfg.get("inner_cv") or {}, lab.get("improved", {}), self.seed(),
-                                      float(lab.get("proximity_lambda_km", 0.3)))
-                self.ws.save_table(L, f"datasets/subsurface/labels/{unit_file(fid)}.parquet")
-                summary.append({"dataset": f"subsurface_labels:{fid}", "n_rows": len(L),
-                                "n_pos": int((L.cls == 1).sum()), "n_systems": int(L.loc[L.cls == 1, "system_id"]
-                                                                                  .nunique())})
+            n_new = write_labels("subsurface", meta, sfp, self.cfg["datasets"]["subsurface_sampling"])
+            summary.append({"dataset": "subsurface_labels", "n_rows": len(label_fits), "note": f"{n_new} fits written"})
+            self.push(["splits", "datasets/subsurface"])
             ds = self.dem_store()
+            uc = self.cfg["surface"]["unet"]
+            patch_error = None
+            exclude_patches = False
             if ds is not None:
                 from ..g06.datasets import build_pixel_pool
 
-                smeta, sX = build_pixel_pool(ds, eng.labels(), sm, {**self.cfg["datasets"]["surface_sampling"],
-                                                                   "seed": self.seed()})
-                ag = self.surface_store()
-                if ag is not None and len(ag.names) > len(ds.names):
-                    extra = [n for n in ag.names if n not in ds.names]
-                    sX = pd.concat([sX, pd.DataFrame(ag.sample(extra, smeta.row.to_numpy(), smeta.col.to_numpy()),
-                                                     columns=extra)], axis=1)
-                self.ws.save_table(smeta, "datasets/surface/pool_meta.parquet")
-                self.ws.save_table(sX, "datasets/surface/pool_features.parquet")
-                for fid in fits:
-                    vis = build_training_visibility(eng, fid, val, tuple(val["scenarios"]))
-                    L = subsurface_labels(smeta, vis, eng.valid(), sm, lab["supervision"],
-                                          self.cfg["datasets"]["surface_sampling"], self.cfg.get("inner_cv") or {},
-                                          lab.get("improved", {}), self.seed(), float(lab.get("proximity_lambda_km", 0.3)))
-                    self.ws.save_table(L, f"datasets/surface/labels/{unit_file(fid)}.parquet")
-                summary.append({"dataset": "surface_pool", "n_rows": len(smeta), "n_features": sX.shape[1] - 1})
-                cands = sorted((self.root / "dem_features" / "coarse").glob("*/coarse_dem_*m.tif"),
-                               key=lambda p: p.stat().st_mtime)
-                cpath = cands[-1] if cands else None                     # the most recent (full) coarse DEM
+                gfp = self._surface_ds_fp()
+                pm1 = self.ws.read_json("datasets/surface/pool_manifest.json") or {}
+                if not ds.footprint().any():      # fine tier not started: classical surface models wait, patches do not
+                    summary.append({"dataset": "surface_pool", "n_rows": 0, "note": "no fine-tier DEM coverage yet"})
+                else:
+                    if pm1.get("fingerprint") == gfp and self.ws.exists("datasets/surface/pool_meta.parquet") and \
+                            self.ws.exists("datasets/surface/pool_features.parquet"):
+                        smeta = pd.read_parquet(self.root / "datasets" / "surface" / "pool_meta.parquet")
+                    else:
+                        smeta, sX = build_pixel_pool(ds, eng.labels(), sm, {**self.cfg["datasets"]["surface_sampling"],
+                                                                           "seed": self.seed()})
+                        ag = self.surface_store()
+                        if ag is not None and len(ag.names) > len(ds.names):
+                            extra = [n for n in ag.names if n not in ds.names]
+                            sX = pd.concat([sX, pd.DataFrame(ag.sample(extra, smeta.row.to_numpy(),
+                                                                       smeta.col.to_numpy()), columns=extra)], axis=1)
+                        self.ws.save_table(smeta, "datasets/surface/pool_meta.parquet")
+                        self.ws.save_table(sX, "datasets/surface/pool_features.parquet")
+                        self.ws.save_json({"fingerprint": gfp, "n_rows": len(smeta)},
+                                          "datasets/surface/pool_manifest.json")
+                    write_labels("surface", smeta, gfp, self.cfg["datasets"]["surface_sampling"])
+                    summary.append({"dataset": "surface_pool", "n_rows": len(smeta)})
+                    self.push(["datasets/surface/pool_meta.parquet", "datasets/surface/pool_features.parquet",
+                               "datasets/surface/pool_manifest.json", "datasets/surface/labels",
+                               "datasets/surface/labels_state.json"])
+                dm = self.ws.read_json("dem_features/dem_features_manifest.json") or {}
+                cpath = self.root / dm["coarse_dem"] if dm.get("coarse_dem") else None
                 if self.cfg["datasets"].get("surface_patches", True) and cpath is not None:
                     ez = {d: S.eval_zone(d) for d in range(S.n_splits)}
-                    pm = build_surface_patch_dataset(cpath, self.grid(), eng.valid(), ds.coverage(), self.cfg["dem"],
-                                                     self.cfg["surface"]["unet"], self.root / "datasets" / "surface"
-                                                     / "patches", np.asarray(eng.ctx.folds.fold_map), ez, self.say)
-                    summary.append({"dataset": "surface_patches", "n_rows": pm["n_patches"]})
+                    try:
+                        pm = build_surface_patch_dataset(cpath, self.grid(), eng.valid(), ds.coverage_for_patches(),
+                                                         self.cfg["dem"], uc, self.root / "datasets" / "surface" /
+                                                         "patches", np.asarray(eng.ctx.folds.fold_map), ez, self.say)
+                        summary.append({"dataset": "surface_patches", "n_rows": pm["n_patches"]})
+                    except Exception as e:                 # the geology path stays usable; the rerun retries patches
+                        patch_error = f"surface patches failed: {type(e).__name__}: {e}"
+                        self.say(f"[datasets] {patch_error}")
+                elif cpath is None:
+                    patch_error = "dem_features_manifest.json names no coarse DEM (DEM_FEATURES has not completed it)"
             else:
-                summary.append({"dataset": "surface", "n_rows": 0, "note": "BLOCKED_INPUT: no DEM feature store"})
+                patch_error = "no DEM feature store: DEM_FEATURES did not produce one (see the training gate)"
+                summary.append({"dataset": "surface", "n_rows": 0, "note": f"BLOCKED_INPUT: {patch_error}"})
+            R = self._patch_readiness(patch_error)
+            self.ws.save_table(R, "datasets/surface/patch_readiness.csv")
             self.ws.save_table(pd.DataFrame(summary), "datasets/dataset_summary.csv")
-            self.push(["splits", "datasets"])
-            return COMPLETE, {"note": f"{len(fits)} fits; {len(summary)} dataset parts",
-                              "feature_schema_hash": g6.schema_hash}
-        parts = [stage_config(self.cfg, "datasets"), self.fp_of("g06_restore"), self.fp_of("dem_features")]
+            man = self.ws.read_json("datasets/surface/patches/surface_manifest.json") or {}
+            if man.get("memmap") and (self.root / "datasets/surface/patches" / man["memmap"]).exists():
+                gib = (self.root / "datasets/surface/patches" / man["memmap"]).stat().st_size / 2**30
+                exclude_patches = gib > float(uc.get("max_push_gib", 15.0))
+                if exclude_patches:
+                    self.say(f"[datasets] patch memmap {gib:.1f} GiB stays local (surface.unet.max_push_gib): a new "
+                             "runtime rebuilds it")
+            PS.sync_artifacts(self.ws, ["splits", "datasets"], ["*/tiles/*", "*/patches/surface_*.npy"] if
+                              exclude_patches else None)
+            n_ready = int((R.status == "READY").sum())
+            note = f"{len(fits)} fits; surface patches ready for {n_ready}/{len(R)} U-Net fits"
+            if patch_error:
+                return PARTIAL, {"note": f"{note}; {patch_error}", "feature_schema_hash": g6.schema_hash}
+            return COMPLETE, {"note": note, "feature_schema_hash": g6.schema_hash}
+        parts = [stage_config(self.cfg, "datasets"), self.fp_of("g06_restore"), self._dem_content_fp(),
+                 self._need_nested(), PS.code_identity(["gems_bench.g07.dem_features"])]
         return self._run("datasets", parts, fn)
+
+    def _patch_fit_inputs(self, fid: str) -> tuple:
+        from ..g06.splits import build_training_visibility
+        from .crossfit import build_inner_folds
+
+        ic = self.cfg.get("inner_cv") or {}
+        val = self.cfg["validation"]
+        vis = build_training_visibility(self.engine(), fid, val, tuple(val["scenarios"]))
+        return vis, build_inner_folds(vis.region, vis.visible, float(ic.get("block_km", 20)), int(ic.get("n_folds", 3)),
+                                      self.seed())
+
+    def _patch_readiness(self, error: str | None = None) -> pd.DataFrame:
+        """``datasets/surface/patch_readiness.csv``: one row per U-Net fit, READY or the exact reason why not."""
+        from .datasets import surface_patch_readiness, validate_surface_patch_artifacts
+
+        uc = self.cfg["surface"]["unet"]
+        man, idx, probs = validate_surface_patch_artifacts(self.root / "datasets" / "surface" / "patches", uc, self.grid())
+        if error:
+            probs = [error] + probs
+        return surface_patch_readiness(list(uc.get("fits", [])), idx, man, probs, self._patch_fit_inputs, uc)
 
     # =========================================================================== model benchmarks
     def _fit_list(self, nested_for: str | None = None, exps_nested=()) -> list:
         F = self.ws.load_table("splits/fits.csv")
         fits = [f for f in (list(F.fit_id) if len(F) else []) if f != "FULL"]
-        return [f for f in fits if "|" not in f or nested_for in exps_nested]
+        return [f for f in fits if "|" not in f or (self._need_nested() and nested_for in exps_nested)]
 
     def _registry(self, rel, rows) -> pd.DataFrame:
         prev = self.ws.load_table(rel)
@@ -962,6 +1243,28 @@ class G07Pipeline:
         ALL = pd.concat([keep, R], ignore_index=True) if len(keep) else R
         self.ws.save_table(ALL, rel)
         return R
+
+    def _finish_models(self, name: str, rows: list, expected: dict, load_model=None, schema_hash=None) -> tuple:
+        """Registry + completeness check of one training stage -> (stage status, info). COMPLETE only when every expected
+        fit is valid; some valid = PARTIAL (saved, resumable, never pooled as complete); none = FAILED / BLOCKED_INPUT."""
+        from .crossfit import summarize_experiments, validate_model_registry
+
+        R = self._registry(f"models/{name}_registry.csv", rows)
+        V = validate_model_registry(self.root, R, expected, self.units(), load_model, schema_hash)
+        self.ws.save_table(V, f"models/{name}_validation.csv")
+        E = summarize_experiments(V)
+        self.ws.save_table(E, f"models/{name}_experiment_status.csv")
+        self.push(["models"])
+        n, ok = len(V), int(V.valid.sum())
+        detail = "; ".join(f"{r.experiment} {r.fit_id}: {r.problem}" for r in V[~V.valid.astype(bool)].head(4).itertuples())
+        note = f"{ok}/{n} expected fits valid across {len(E)} experiments" + (f"; {detail}" if detail else "")
+        if n and ok == n:
+            return COMPLETE, {"note": note}
+        if ok:
+            return PARTIAL, {"note": note}
+        if n and V.registry_status.isin(["BLOCKED_INPUT", "MISSING"]).all():
+            return BLOCKED_INPUT, {"note": note}
+        return FAILED, {"error": note or "no fit was expected"}
 
     def benchmark_subsurface_models(self) -> dict:
         def fn():
@@ -972,105 +1275,192 @@ class G07Pipeline:
             sc = self.cfg["subsurface"]
             d = self.root / "datasets" / "subsurface"
             meta = pd.read_parquet(d / "pool_meta.parquet")
-            rows = []
+            rows, expected = [], {}
             for eid, ec in sc["experiments"].items():
                 cols = select_subsurface_features(st, ec["families"])
                 X = pd.read_parquet(d / "pool_features.parquet", columns=["row_id"] + cols)
                 params = self.cfg["models"][ec.get("params", "lightgbm")]
-                efp = PS.stable_hash(eid, ec, params, self.fp_of("datasets"), st.schema_hash, self.seed(), n=16)
+                efp = PS.stable_hash(eid, ec, params, self._subsurface_ds_fp(), st.schema_hash, self.seed(), n=16)
                 fl = self._fit_list(eid, sc.get("nested_experiments", []))
+                expected[eid] = fl
                 rows += crossfit_subsurface_model(eid, "lightgbm", cols, st, X, meta, d / "labels", fl, self.units(),
                                                   self.root, params, self.seed(), efp, ec.get("weight", "weight_g06"),
-                                                  ec.get("target", "classification"), progress=self.say)
-                self.push(["models", "predictions"])
-            R = self._registry("models/subsurface_registry.csv", rows)
-            return COMPLETE, {"note": f"{len(R)} fits of {R.experiment.nunique() if len(R) else 0} experiments"}
-        return self._run("train_subsurface", [stage_config(self.cfg, "train_subsurface"), self.fp_of("datasets")],
-                         fn)
+                                                  ec.get("target", "classification"), progress=self.say,
+                                                  strictness="STRICT_ISOLATED",
+                                                  on_fit=lambda: self.push(["models", "predictions"]))
+            return self._finish_models("subsurface", rows, expected, schema_hash=st.schema_hash)
+        return self._run("train_subsurface", [stage_config(self.cfg, "train_subsurface"), self._subsurface_ds_fp(),
+                                              self._need_nested()], fn)
 
     def benchmark_surface_models(self) -> dict:
         def fn():
             from .crossfit import crossfit_surface_model
 
+            gate = self.dem_gate()
+            if not gate["gpu_training_can_proceed"]:
+                return BLOCKED_INPUT, {"note": f"{gate['reason']}. {gate['corrective_action']}"}
+            strict = "STRICT_ISOLATED" if gate["result_tier"] == "STRICT_ELIGIBLE" else "SCREENING_ONLY"
             st = self.surface_store()
             if st is None:
-                return BLOCKED_INPUT, {"note": "no DEM feature store (DEM_FEATURES not GO / not built)"}
+                return BLOCKED_INPUT, {"note": "no DEM feature store (DEM_FEATURES did not produce one)"}
             sc = self.cfg["surface"]
             d = self.root / "datasets" / "surface"
             if not (d / "pool_meta.parquet").exists():
                 return BLOCKED_INPUT, {"note": "no surface pool (BUILD_DATASETS after DEM_FEATURES)"}
             meta = pd.read_parquet(d / "pool_meta.parquet")
             cov = st.footprint()
-            rows = []
+            rows, expected = [], {}
             for eid, ec in sc["experiments"].items():
                 cols = [n for n in st.usable() if n.startswith(tuple(ec["prefixes"]))]
+                fl = self._fit_list(eid, sc.get("nested_experiments", []))
+                expected[eid] = fl
                 if not cols:
-                    rows.append({"experiment": eid, "fit_id": "*", "status": "BLOCKED_INPUT", "detail": "no feature"})
+                    rows += [{"experiment": eid, "fit_id": f, "status": "BLOCKED_INPUT", "detail": "no feature"}
+                             for f in fl]
                     continue
                 X = pd.read_parquet(d / "pool_features.parquet", columns=["row_id"] + cols)
                 params = self.cfg["models"][ec.get("params", ec["model"])]
-                efp = PS.stable_hash(eid, ec, params, self.fp_of("datasets"), st.schema_hash, self.seed(), n=16)
-                fl = self._fit_list(eid, sc.get("nested_experiments", []))
+                efp = PS.stable_hash(eid, ec, params, self._surface_ds_fp(), st.schema_hash, self.seed(), strict, n=16)
                 rows += crossfit_surface_model(eid, ec["model"], cols, st, X, meta, d / "labels", fl, self.units(),
                                                self.root, params, self.seed(), efp, ec.get("weight", "weight_improved"),
-                                               "classification", cov, progress=self.say)
-                self.push(["models", "predictions"])
-            R = self._registry("models/surface_registry.csv", rows)
-            return COMPLETE, {"note": f"{len(R)} surface fits"}
+                                               "classification", cov, progress=self.say, strictness=strict,
+                                               on_fit=lambda: self.push(["models", "predictions"]))
+            return self._finish_models("surface", rows, expected, schema_hash=st.schema_hash)
+        from .config import training_mode
+
         return self._run("train_surface_classic", [stage_config(self.cfg, "train_surface_classic"),
-                                                   self.fp_of("datasets")], fn)
+                                                   self._surface_ds_fp(), self._need_nested(),
+                                                   training_mode(self.cfg)], fn)
 
     def train_surface_unet_stage(self) -> dict:
+        """G07-C1 on the device the runtime check selected. Every precondition is verified first and reported with its
+        exact reason; a finished fit is reused, an interrupted one resumes from its checkpoint."""
         def fn():
             from ..g06.datasets import unit_file
-            from ..g06.models_patch import save_patch_model
             from ..g06.models_pixel import oof_path
-            from ..g06.splits import build_training_visibility
             from ..g06.supervision import build_orientation_targets, build_pixel_supervision
-            from .crossfit import build_inner_folds
-            from .models_surface import predict_surface_tiles, train_surface_unet
+            from .crossfit import check_prediction, fit_prediction_units
+            from .datasets import validate_surface_patch_artifacts
+            from .models_surface import (load_surface_unet, predict_surface_tiles, save_surface_unet,
+                                         train_surface_unet, validate_gpu_runtime)
 
-            pdir = self.root / "datasets" / "surface" / "patches"
-            man = self.ws.read_json("datasets/surface/patches/surface_manifest.json")
-            if not man or not man.get("memmap"):
-                return BLOCKED_INPUT, {"note": "no surface patch dataset (needs DEM GO + BUILD_DATASETS)"}
+            gate = self.dem_gate()
+            if not gate["gpu_training_can_proceed"]:
+                return BLOCKED_INPUT, {"note": f"{gate['reason']}. {gate['corrective_action']}"}
+            strict = "STRICT_ISOLATED" if gate["result_tier"] == "STRICT_ELIGIBLE" else "SCREENING_ONLY"
+            use_gpu = bool(self.nb.get("use_gpu"))
+            runtime = validate_gpu_runtime(requested=use_gpu, require_cuda=use_gpu)       # raises: no CPU fallback
             uc = self.cfg["surface"]["unet"]
+            fits = list(uc.get("fits", ["V1:0", "V1:1", "V1:2"]))
             eng, U = self.engine(), self.units()
-            idx = pd.read_parquet(pdir / "patch_index.parquet")
-            f = int(round(100.0 / float(man["res_m"])))
-            efp = PS.stable_hash(uc, man["fingerprint"], self.seed(), n=10)
-            rows = []
-            for fid in uc.get("fits", ["V1:0", "V1:1", "V1:2"]):
-                vis = build_training_visibility(eng, fid, self.cfg["validation"], tuple(self.cfg["validation"]
-                                                                                       ["scenarios"]))
-                sup = build_pixel_supervision(vis.visible, vis.region, eng.valid(), self.cfg["labels"]["supervision"])
-                orient = build_orientation_targets(vis.visible, 2.0, 0.5)
-                ic = self.cfg.get("inner_cv") or {}
-                inner = build_inner_folds(vis.region, vis.visible, float(ic.get("block_km", 20)),
-                                          int(ic.get("n_folds", 3)), self.seed())
-                model, scaler, info = train_surface_unet(pdir / man["memmap"], idx, vis, sup["classes"], orient,
-                                                         inner, uc, f, bool(self.nb.get("use_gpu")), self.seed(),
-                                                         self.say)
+            grid = self.grid()
+            pdir = self.root / "datasets" / "surface" / "patches"
+            ds = self.dem_store()
+            if ds is None:
+                return BLOCKED_INPUT, {"note": "dem_features_100m.tif is missing: DEM_FEATURES did not produce it"}
+            if not (np.nan_to_num(ds.coverage_for_patches()) > 0).any():
+                return BLOCKED_INPUT, {"note": "dem_features_100m.tif has no covered cell"}
+            man, idx, problems = validate_surface_patch_artifacts(pdir, uc, grid)
+            if problems:
+                return BLOCKED_INPUT, {"note": "; ".join(problems)}
+            R = self._patch_readiness()
+            self.ws.save_table(R, "datasets/surface/patch_readiness.csv")
+            ready = dict(zip(R.fit_id, R.status))
+            why = dict(zip(R.fit_id, R.reason))
+            f = int(round(grid.pixel_m / float(man["res_m"])))
+            efp = PS.stable_hash(uc, man["fingerprint"], self.seed(), strict, n=10)
+            mm_path = pdir / man["memmap"]
+            rows, history = [], []
+            for fid in fits:
+                t0 = time.perf_counter()
+                row = {"experiment": "G07-C1", "fit_id": fid, "fingerprint": efp, "kind": "unet",
+                       "device": runtime["selected_device"], "strictness": strict}
+                if ready.get(fid) != "READY":
+                    rows.append({**row, "status": "BLOCKED_INPUT", "detail": why.get(fid)})
+                    self.say(f"  U-Net {fid}: BLOCKED_INPUT: {why.get(fid)}")
+                    continue
                 mdir = self.root / "models" / "surface_unet" / efp / unit_file(fid)
-                save_patch_model(model, scaler, info, mdir)
-                full = predict_surface_tiles(model, scaler, pdir / man["memmap"], idx, self.grid().shape, f,
-                                             bool(self.nb.get("use_gpu")))
-                for key in vis.predicts:
-                    vu = U.get(key)
-                    if vu is None:
+                row["model_dir"] = str(mdir.relative_to(self.root))
+                keys = fit_prediction_units(fid, U)
+                preds = [oof_path(self.root, "G07-C1", fid, k, efp) for k in keys]
+                row["predictions"] = ";".join(str(p.relative_to(self.root)) for p in preds)
+                try:
+                    if (mdir / "unet.pt").exists() and (mdir / "unet.json").exists() and not any(
+                            check_prediction(p, U[k].unit.ev.shape, U[k].unit.ev) for p, k in zip(preds, keys)):
+                        _, _, meta = load_surface_unet(mdir)
+                        hp = mdir / "history.csv"
+                        if hp.exists():
+                            history.append(pd.read_csv(hp))
+                        rows.append({**row, "status": "REUSED", "best_inner_val_loss": meta.get("best_inner_val_loss"),
+                                     "best_epoch": meta.get("best_epoch"), "n_train": meta.get("n_train"),
+                                     "n_val": meta.get("n_val"), "device": meta.get("device", row["device"]),
+                                     "seconds": round(time.perf_counter() - t0, 1)})
                         continue
-                    pf = oof_path(self.root, "G07-C1", fid, key, efp)
-                    pf.parent.mkdir(parents=True, exist_ok=True)
-                    crop = np.where(vu.unit.ev, full[vu.sl], np.nan).astype(np.float32)
-                    PS.atomic_save(pf, lambda t, a=crop: np.save(t, a))
-                rows.append({"experiment": "G07-C1", "fit_id": fid, "status": "COMPLETE", "fingerprint": efp,
-                             "best_inner_val_loss": info["best_inner_val_loss"], "n_train": info["n_train"]})
-                del vis, sup, inner
+                    vis, inner = self._patch_fit_inputs(fid)
+                    sup = build_pixel_supervision(vis.visible, vis.region, eng.valid(), self.cfg["labels"]["supervision"])
+                    orient = build_orientation_targets(vis.visible, 2.0, 0.5)
+                    ck = self.root / "models" / "surface_unet" / efp / f"{unit_file(fid)}.checkpoint.pt"
+                    ck.parent.mkdir(parents=True, exist_ok=True)
+
+                    def on_epoch(h, ck=ck, n=fid):
+                        self.ws.save_table(pd.DataFrame(h), f"models/surface_unet/{efp}/{unit_file(n)}.history.csv")
+                        self.push_files(ck, self.root / "models" / "surface_unet" / efp / f"{unit_file(n)}.history.csv")
+
+                    model, scaler, info = train_surface_unet(mm_path, idx, vis, sup["classes"], orient, inner, uc, f,
+                                                             use_gpu, self.seed(), self.say, ck, on_epoch)
+                    save_surface_unet(model, scaler, info, mdir, man["channels"], uc, float(man["res_m"]),
+                                      int(man["cells"]))
+                    full = predict_surface_tiles(model, scaler, mm_path, idx, grid.shape, f, use_gpu,
+                                                 int(uc.get("batch", 8)))
+                    for key, pf in zip(keys, preds):
+                        vu = U[key]
+                        pf.parent.mkdir(parents=True, exist_ok=True)
+                        crop = np.where(vu.unit.ev, full[vu.sl], np.nan).astype(np.float32)
+                        PS.atomic_save(pf, lambda t, a=crop: np.save(t, a))
+                    history.append(pd.DataFrame(info["history"]))
+                    rows.append({**row, "status": "COMPLETE", "best_inner_val_loss": info["best_inner_val_loss"],
+                                 "best_epoch": info["best_epoch"], "n_train": info["n_train"], "n_val": info["n_val"],
+                                 "device": info["device"], "seconds": round(time.perf_counter() - t0, 1)})
+                    del vis, sup, inner, orient, model, full
+                except Exception as e:                          # OOM guidance etc. stay in the registry
+                    rows.append({**row, "status": "FAILED", "detail": f"{type(e).__name__}: {e}"[:600],
+                                 "seconds": round(time.perf_counter() - t0, 1)})
+                    self.say(f"  U-Net {fid}: FAILED: {type(e).__name__}: {str(e)[:400]}")
+                self._release_gpu()
                 self.push(["models", "predictions"])
-            self._registry("models/surface_unet_registry.csv", rows)
-            return COMPLETE, {"note": f"{len(rows)} U-Net fits"}
-        return self._run("train_surface_unet", [stage_config(self.cfg, "train_surface_unet"),
-                                                self.fp_of("datasets")], fn)
+            if history:
+                H = pd.concat(history, ignore_index=True)
+                self.ws.save_table(H, "models/surface_unet/training_history.csv")
+                if self.figures_on():
+                    from . import visualization as V
+
+                    self._soft("U-Net training curves", V.plot_training_curves, H, self.figs("training"))
+                    self.push(["figures"])
+
+            def load_model(d):
+                return load_surface_unet(d)[0]
+
+            return self._finish_models("surface_unet", rows, {"G07-C1": fits}, load_model)
+        from .config import training_mode
+
+        return self._run("train_surface_unet", [stage_config(self.cfg, "train_surface_unet"), self._patch_identity(),
+                                                training_mode(self.cfg)], fn)
+
+    def _patch_identity(self):
+        return (self.ws.read_json("datasets/surface/patches/surface_manifest.json") or {}).get("fingerprint")
+
+    @staticmethod
+    def _release_gpu() -> None:
+        import gc
+
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
 
     # =========================================================================== candidates
     def _current_fp(self, rel: str) -> dict:
@@ -1093,16 +1483,18 @@ class G07Pipeline:
         def fn():
             from ..g06.datasets import nested_known_table, unit_file
             from .candidate_generation import generate_unit_candidates
+            from ..g06.splits import build_training_visibility
             from .datasets import build_candidate_dataset
             from .evaluation import evaluate_candidate_recall
-            from .training_labels import perturbed_candidates, random_negative_candidates
+            from .training_labels import (assert_no_heldout_geometry, candidate_provenance,
+                                          synthetic_training_candidates)
 
             eng, U = self.engine(), self.units()
             store = self.combined_store()
             cc = self.cfg["candidates"]
             W = self.grid().width
             rec, summ = [], []
-            labs = {}
+            labs, unit_outputs = {}, {}
             for key in sorted(U):
                 vu = U[key]
                 mm = {k: self._model_map(k, key) for k in ("surface", "subsurface")}
@@ -1114,33 +1506,13 @@ class G07Pipeline:
                                                                                                      {}),
                                             self.cfg["labels"]["candidate"])
                 f = unit_file(key)
-                self.ws.save_table(D["T"].assign(synthetic=False), f"datasets/candidates/{f}.parquet")
+                prov = candidate_provenance(vu.scenario, -1, vu.zone, "", "label_free_pools", False, [],
+                                            out["provenance"])
+                self.ws.save_table(D["T"].assign(synthetic=False, **prov), f"datasets/candidates/{f}.parquet")
                 self.ws.save_table(D["L"], f"datasets/candidates/{f}_labels.parquet")
                 self.ws.save_npz(f"datasets/candidates/{f}_lab.npz", lab=lab)
                 self.ws.save_table(out["dedup"], f"candidates/{f}_provenance.csv")
-                aug = cc.get("augmentation") or {}
-                if aug.get("enabled", True):
-                    rng = np.random.default_rng(self.seed() + 31 * vu.zone)
-                    slab, ST = perturbed_candidates(vu.eval_truth(), vu.sysmap, rng, int(aug.get("per_system", 4)),
-                                                    float(aug.get("max_shift_px", 4)), float(aug.get("max_rot_deg", 15)))
-                    nlab = random_negative_candidates(vu.unit.scored_mask(), vu.eval_truth() | vu.known, rng,
-                                                      int(aug.get("n_negatives", 200)))
-                    for tag, off, L_ in (("syn_pos", 1_000_000, slab), ("syn_neg", 2_000_000, nlab)):
-                        if L_.max() > 0:
-                            Ds = build_candidate_dataset(eng, store, vu, L_, out["pools"], ev, cc,
-                                                         self.cfg.get("known_context", {}),
-                                                         self.cfg["labels"]["candidate"])
-                            # synthetic label ids never collide with real ones (nested overrides merge on label;
-                            # synthetic rows therefore get NaN nested context instead of non-nested context)
-                            Ts, Ls = Ds["T"].copy(), Ds["L"].copy()
-                            if len(Ts):
-                                Ts["label"] += off
-                            if len(Ls):
-                                Ls["label"] += off
-                            self.ws.save_table(Ts.assign(synthetic=True, synthetic_kind=tag),
-                                               f"datasets/candidates/{f}_{tag}.parquet")
-                            self.ws.save_table(Ls, f"datasets/candidates/{f}_{tag}_labels.parquet")
-                            self.ws.save_npz(f"datasets/candidates/{f}_{tag}_lab.npz", lab=L_)
+                unit_outputs[key] = {"pools": out["pools"], "ev": ev, "provenance": out["provenance"]}
                 r = evaluate_candidate_recall(vu, lab, out["pools"])
                 if len(r):
                     rec.append(r)
@@ -1148,6 +1520,50 @@ class G07Pipeline:
                              "provenance": json.dumps(out["provenance"])})
                 eng.release(vu.base)
                 self.say(f"  candidates {key}: {int(lab.max())} from {list(out['pools'])}")
+            aug = cc.get("augmentation") or {}
+            val = self.cfg["validation"]
+            n_syn = 0
+            # Synthetic candidates are generated PER FIT: for held-out unit s:z, from the other units' truth that fit
+            # s:z may see. The rows of outer z carry its provenance and train only the model of outer z.
+            for sc_ in (aug.get("scenarios", ["V1", "V3"]) if aug.get("enabled", True) else []):
+                zones = sorted(vu.zone for vu in U.values() if vu.scenario == sc_)
+                for z in zones:
+                    fit = f"{'V1' if sc_ == 'V1' else 'V3'}:{z}"
+                    vis = build_training_visibility(eng, fit, val, tuple(val["scenarios"]))
+                    outer = U[f"{sc_}:{z}"]
+                    outer_truth = outer.full(outer.eval_truth(), eng.shape)
+                    for k in (x for x in zones if x != z):
+                        key = f"{sc_}:{k}"
+                        vu = U[key]
+                        seed_k = self.seed() + 1009 * z + 31 * k
+                        S = synthetic_training_candidates(vis, vu, aug, seed_k)
+                        g = S["geometry"]
+                        assert_no_heldout_geometry(vu.full(g["truth"] | g["known"], eng.shape), outer_truth, fit,
+                                                   f"{key} training")
+                        uo = unit_outputs[key]
+                        method = {"syn_pos": "perturbed_visible_truth", "syn_neg": "random_far_from_visible"}
+                        for tag, off, L_ in (("syn_pos", 1_000_000, S["syn_pos"][0]), ("syn_neg", 2_000_000,
+                                                                                       S["syn_neg"])):
+                            if not L_.max():
+                                continue
+                            Ds = build_candidate_dataset(eng, store, vu, L_, uo["pools"], uo["ev"], cc,
+                                                         self.cfg.get("known_context", {}),
+                                                         self.cfg["labels"]["candidate"], g["truth"], g["known"])
+                            # synthetic label ids never collide with real ones (nested overrides merge on label;
+                            # synthetic rows therefore get NaN nested context instead of non-nested context)
+                            Ts, Ls = Ds["T"].copy(), Ds["L"].copy()
+                            if len(Ts):
+                                Ts["label"] += off
+                            if len(Ls):
+                                Ls["label"] += off
+                            pv = candidate_provenance(sc_, z, k, fit, method[tag], True, g["systems"], uo["provenance"])
+                            d_ = f"datasets/candidates/synthetic/{sc_}_{z}"
+                            self.ws.save_table(Ts.assign(synthetic=True, synthetic_kind=tag, **pv),
+                                               f"{d_}/{unit_file(key)}_{tag}.parquet")
+                            self.ws.save_table(Ls, f"{d_}/{unit_file(key)}_{tag}_labels.parquet")
+                            n_syn += len(Ts)
+                    del vis, outer_truth
+                self.say(f"  synthetic candidates {sc_}: {n_syn} rows so far (training-visible geometry per fit)")
             for key, vu in U.items():
                 if vu.scenario not in ("V1", "V3"):
                     continue
@@ -1172,8 +1588,8 @@ class G07Pipeline:
     def _load_candidates(self) -> pd.DataFrame:
         d = self.root / "datasets" / "candidates"
         parts = []
-        for p in sorted(d.glob("*.parquet")):
-            if p.stem.endswith("_labels") or p.parent.name == "nested_known":
+        for p in sorted(d.glob("*.parquet")) + sorted((d / "synthetic").glob("*/*.parquet")):
+            if p.stem.endswith("_labels"):
                 continue
             lp = p.with_name(p.stem + "_labels.parquet")
             T = pd.read_parquet(p)
@@ -1198,6 +1614,7 @@ class G07Pipeline:
                 return FAILED, {"error": "no candidate dataset (GENERATE_CANDIDATES first)"}
             eng, U = self.engine(), self.units()
             rc, rep = self.cfg["ranker"], self.cfg["representation"]
+            surface_tier = (self.ws.read_json("dem_catalog/training_gate.json") or {}).get("result_tier")
             zm = {k: _zone_mask(U[k].unit, eng.shape, float(self.cfg["validation"].get("segment_buffer_km", 5.0)))
                   for k in D.unit.unique() if k in U}
             labs = {}
@@ -1241,6 +1658,10 @@ class G07Pipeline:
                                                          ec.get("model", "lightgbm"), params, zm, self.seed(),
                                                          unit_columns if ec.get("nested", True) else None, inputs,
                                                          bool(rc.get("require_strict", False)), self.say)
+                dem_used = inputs["surface"] or any(c.startswith(("geo_mean_dem", "geo_std_dem")) for c in D.columns)
+                if dem_used and surface_tier != "STRICT_ELIGIBLE" and info["strictness"] != "BLOCKED_UPSTREAM":
+                    info["strictness"] = "SCREENING_ONLY"       # DEM inputs from exploratory training stay screening
+                    info["strictness_reason"] = f"DEM inputs under gate tier {surface_tier}"
                 efp = PS.stable_hash(eid, ec, params, self.fp_of("generate_candidates"), n=10)
                 d = f"predictions/candidates/{eid}/{efp}"
                 self.ws.save_table(scores, f"{d}/scores.parquet")
@@ -1308,13 +1729,22 @@ class G07Pipeline:
         'selection' -> evaluated as produced (raw)."""
         from ..g06.models_pixel import load_oof
 
+        from ..g06.models_pixel import heldout_fit_for
+
         U = self.units()
         maps, strict, kind = {"W2": self.w2_maps()}, {"W2": "REFERENCE"}, {"W2": "score"}
-        for rel in ("models/subsurface_registry.csv", "models/surface_registry.csv",
-                    "models/surface_unet_registry.csv"):
-            for exp, fp in self._current_fp(rel).items():
-                maps[exp] = {k: m for k in U if (m := load_oof(self.root, exp, k, fp)) is not None}
-                strict[exp], kind[exp] = "STRICT_ISOLATED", "score"
+        for name in ("subsurface", "surface", "surface_unet"):
+            V = self.ws.load_table(f"models/{name}_validation.csv")         # only fits that passed the completeness check
+            R = self.ws.load_table(f"models/{name}_registry.csv")
+            if not len(V) or not len(R):
+                continue
+            valid = {(r.experiment, r.fit_id) for r in V[V.valid.astype(bool)].itertuples()}
+            for exp, fp in self._current_fp(f"models/{name}_registry.csv").items():
+                maps[exp] = {k: m for k in U if (exp, heldout_fit_for(k)) in valid and
+                             (m := load_oof(self.root, exp, k, fp)) is not None}
+                sts = set(R.loc[R.experiment == exp, "strictness"].dropna().astype(str)) if "strictness" in R else set()
+                strict[exp] = "STRICT_ISOLATED" if sts == {"STRICT_ISOLATED"} else "SCREENING_ONLY"
+                kind[exp] = "score"
         reg = self.ws.read_json("models/candidate_registry.json") or {}
         for eid, v in reg.items():
             for name, by in (v.get("maps") or {}).items():
@@ -1331,6 +1761,15 @@ class G07Pipeline:
             eng, U = self.engine(), self.units()
             ec, rep = self.cfg["evaluation"], self.cfg["representation"]
             maps, strict, kind = self._score_maps()
+            scenarios = list(self.cfg["validation"]["scenarios"])
+            ES = EV.evaluation_status(maps, U, strict, scenarios)
+            self.ws.save_table(ES, "evaluation/metrics/evaluation_status.csv")
+            w2_state = ES[ES.model == "W2"]
+            if not len(w2_state) or not (w2_state[w2_state.scenario == "V1"].status == "FULLY_EVALUATED").all():
+                missing = ";".join(w2_state.missing_units) if len(w2_state) else "all units"
+                return BLOCKED_INPUT, {"note": f"W2 held-out maps are incomplete ({missing}): nothing can be compared. "
+                                               "Check dependencies/missing_dependencies.json (outputs/p6_fast_track)."}
+            complete = {(r.model, r.scenario) for r in ES.itertuples() if r.status == "FULLY_EVALUATED"}
             templates = {k: eng.template_valid()[vu.sl] for k, vu in U.items()}
             score_maps = {m: d for m, d in maps.items() if kind[m] == "score"}
             sel_maps = {m: d for m, d in maps.items() if kind[m] == "selection"}
@@ -1347,6 +1786,11 @@ class G07Pipeline:
                 alls += [S, S2]
             Rw = pd.concat([r for r in allr if len(r)], ignore_index=True)
             Sw = pd.concat([s for s in alls if len(s)], ignore_index=True)
+            # a model missing some units of a scenario keeps its per-unit rows, but never a pooled DTI
+            in_full = [(m, s) in complete for m, s in zip(Rw.model, Rw.scenario)]
+            self.ws.save_table(Rw[~np.asarray(in_full)], "evaluation/metrics/partial_unit_rows.csv")
+            Rw = Rw[in_full].reset_index(drop=True)
+            Sw = Sw[[(m, s) in complete for m, s in zip(Sw.model, Sw.scenario)]].reset_index(drop=True)
             self.ws.save_table(Rw, "evaluation/metrics/metrics_rows.csv")
             SUM = EV.aggregate_components(Rw)
             SUM["strictness"] = SUM.model.map(strict)
@@ -1378,21 +1822,36 @@ class G07Pipeline:
                                else pd.DataFrame(), "evaluation/metrics/representation_selection.csv")
             from .datasets import build_meta_dataset
 
-            prov = {m: {k: {"strictness": strict.get(m)} for k in d} for m, d in maps.items()}
-            MP, MR = build_meta_dataset(U, score_maps, prov, eng.labels(), self.cfg.get("meta_rows", {}), self.seed())
-            self.ws.save_table(MP, "datasets/meta/provenance.csv")
-            self.ws.save_table(MR, "datasets/meta/rank_rows.parquet")
+            def meta_rows():
+                prov = {m: {k: {"strictness": strict.get(m)} for k in d} for m, d in maps.items()}
+                MP, MR = build_meta_dataset(U, score_maps, prov, eng.labels(), self.cfg.get("meta_rows", {}), self.seed())
+                self.ws.save_table(MP, "datasets/meta/provenance.csv")
+                self.ws.save_table(MR, "datasets/meta/rank_rows.parquet")
+
+            self._soft("meta dataset", meta_rows)
             best = PD[PD.status == "PROMOTE_CANDIDATE"].sort_values("v1_gain", ascending=False) if len(PD) else PD
             self.ws.save_json({"primary": prim, "promote": list(best.model) if len(best) else [], "strictness": strict,
                                "statuses": dict(zip(PD.model, PD.status)) if len(PD) else {},
                                "exact_budget": EB.to_dict("records")}, "evaluation/promotion/decision.json")
             if self.figures_on():
-                self._evaluation_figures(Rw, SUM, SR)
+                self._soft("evaluation figures", self._evaluation_figures, Rw, SUM, SR)
             self.push(["evaluation", "figures", "datasets/meta"])
-            return COMPLETE, {"note": f"{len(maps)} models; promote {list(best.model) if len(best) else 'none'}"}
-        parts = [stage_config(self.cfg, "evaluate"), self.fp_of("train_subsurface"), self.fp_of("train_surface_classic"),
-                 self.fp_of("train_surface_unet"), self.fp_of("train_candidate_ranker"), self.fp_of("g06_restore")]
+            partial = ES[(ES.status == "PARTIALLY_EVALUATED")]
+            note = (f"{len(maps)} models; promote {list(best.model) if len(best) else 'none'}; "
+                    f"{len(partial)} (model, scenario) pairs only partially evaluated, excluded from pooled DTI")
+            return COMPLETE, {"note": note}
+        parts = [stage_config(self.cfg, "evaluate"), self.fp_of("g06_restore")] + [
+            self._model_state(n) for n in ("subsurface", "surface", "surface_unet")] + [
+            self.fp_of("train_candidate_ranker")]
         return self._run("evaluate", parts, fn)
+
+    def _model_state(self, name: str):
+        """What evaluation depends on: the validated fits, so a PARTIAL stage that resumes re-evaluates."""
+        V = self.ws.load_table(f"models/{name}_validation.csv")
+        if not len(V):
+            return None
+        cols = ["experiment", "fit_id", "valid", "fingerprint", "strictness"]
+        return PS.stable_hash(V[cols].astype(str).to_dict("list"))
 
     def _ablations(self, SUM) -> pd.DataFrame:
         if not len(SUM):
@@ -1539,7 +1998,7 @@ class G07Pipeline:
         eid = chosen.split(":", 1)[1]
         ec = self.cfg["ranker"]["experiments"][eid]
         D = self._load_candidates()
-        D = D[D.target.notna()]
+        D = D[D.target.notna() & ~D.synthetic.astype(bool)]     # synthetic rows are outer-specific: not a FULL fit input
         cols = candidate_feature_columns(D, bool(ec.get("w2_aware", False)))
         y = D.target.to_numpy(int)
         est = train_candidate_classifier(ec.get("model", "lightgbm"), D[cols].to_numpy(np.float32), y,
@@ -1611,20 +2070,22 @@ class G07Pipeline:
     def run(self) -> dict:
         self.run_tests()
         self.preflight()
+        self.gpu_preflight()
         self.inspect_dem()
         self.assess_dem_feasibility()
         self.prepare_dem_features()
         self.restore_g06()
         self.prepare_training_data()
+        self.train_surface_unet_stage()          # first: the CPU benchmarks must not use up the GPU session
         self.benchmark_subsurface_models()
         self.benchmark_surface_models()
-        self.train_surface_unet_stage()
         self.generate_candidates()
         self.train_candidate_ranker()
         self.evaluate()
         self.reconstruct_full_region()
         self.build_report()
         self.final_message()
+        self.execution_summary()
         return dict(self.status)
 
     def stage_table(self) -> pd.DataFrame:
@@ -1662,10 +2123,12 @@ def write_reports(P: G07Pipeline) -> None:
     REC = ws.load_table("evaluation/recall/candidate_recall.csv")
     f = float(P.cfg["representation"]["primary_frac"])
     regs = {k: ws.load_table(f"models/{k}_registry.csv") for k in ("subsurface", "surface", "surface_unet")}
+    ES = ws.load_table("evaluation/metrics/evaluation_status.csv")
     lines = ["# G07 training results", "", hdr, ""]
     for k, R in regs.items():
-        lines += [f"## {k}", "", _md(R, 40, ["experiment", "fit_id", "status", "kind", "target", "n_train",
-                                              "best_iteration", "seconds"])]
+        lines += [f"## {k}", "", _md(ws.load_table(f"models/{k}_experiment_status.csv"), 20),
+                  _md(R, 40, ["experiment", "fit_id", "status", "kind", "device", "strictness", "target", "n_train",
+                              "best_iteration", "best_epoch", "seconds", "detail"])]
     cr = ws.read_json("models/candidate_registry.json") or {}
     lines += ["## Candidate models", ""] + [f"* {k}: {v.get('strictness')} - {v.get('reason')}" for k, v in cr.items()]
     ws.save_text("\n".join(lines) + "\n", "reports/TRAINING_RESULTS.md")
@@ -1679,7 +2142,9 @@ def write_reports(P: G07Pipeline) -> None:
              "ties); portfolio / corridor selections evaluated as produced at the same budget. Pooled DTI from summed "
              "components; worst zone with every pooled number.", "",
              "Historical references (other protocols - not comparable): " + ", ".join(f"{k} = {v}" for k, v in
-                                                                                      hist.items()), ""]
+                                                                                      hist.items()), "",
+             "## Evaluation status", "", "Only FULLY_EVALUATED (model, scenario) pairs have a pooled DTI below.", "",
+             _md(ES, 60), ""]
     if len(SUM):
         s = SUM[(SUM.frac == f) & SUM.rep.isin(["top", "as_selected"])]
         lines += ["## Pooled DTI", "", _md(s.sort_values(["scenario", "dti"], ascending=[True, False]), 60,
@@ -1703,10 +2168,11 @@ def write_reports(P: G07Pipeline) -> None:
         nxt.append("* Provide DEM tiles (docs/g07/DEM_DATA_CONTRACT.md) or continue on the geology path "
                    "(BUILD_DATASETS + TRAIN_SUBSURFACE + EVALUATE).")
     elif dec == "GO":
-        nxt.append("* GO: DEM_FEATURES -> BUILD_DATASETS -> TRAIN_SURFACE_CLASSIC (A1 / A2) -> EVALUATE; U-Net only "
-                   "if A1 / A2 add systems vs W2.")
+        nxt.append("* GO: read the U-Net and A1 / A2 rows of DTI_EVALUATION.md, then GENERATE_CANDIDATES + "
+                   "TRAIN_CANDIDATE_RANKER (nested fits are trained then).")
     else:
-        nxt.append("* NO_GO: keep DEM optional; run B0 / B1 / B2, then candidates + ranker (D1 / D2).")
+        nxt.append("* NO_GO / INCONCLUSIVE: DEM models are SCREENING_ONLY at best; read B0 / B1 / B2, then candidates + "
+                   "ranker (D1 / D2).")
     if len(PD):
         best = PD.sort_values("v1_gain", ascending=False).iloc[0]
         nxt.append(f"* Best V1 gain vs W2: {best.model} {best.v1_gain:+.4f} ({best.status}; {best.reasons}).")

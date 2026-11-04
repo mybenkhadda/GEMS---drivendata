@@ -24,7 +24,9 @@ assert_label_free_columns, validate_feature_order = _C6.assert_label_free_column
 validate_grid, validate_probability = _C6.validate_grid, _C6.validate_probability
 
 METRE_UNITS = ("m", "metre", "meter", "metres", "meters")
-FOOT_UNITS = ("ft", "foot", "feet", "us survey foot", "us_survey_foot", "ftus")
+FOOT_UNITS = ("ft", "foot", "feet", "us survey foot", "us_survey_foot", "ftus", "foot_us", "us_ft")
+LOCAL, CATALOG_ONLY, LOCAL_INVALID, LOCAL_OUTSIDE = "LOCAL", "CATALOG_ONLY", "LOCAL_INVALID", "LOCAL_OUTSIDE_STUDY_AREA"
+UNKNOWN_VERTICAL_UNIT = "UNKNOWN_VERTICAL_UNIT"
 STRICTNESS = ("STRICT_NESTED", "STRICT_ISOLATED", "STRICT_LABEL_FREE", "SCREENING_ONLY", "BLOCKED_UPSTREAM",
               "REFERENCE")
 
@@ -43,14 +45,19 @@ class DEMSource:
     vertical_unit: str = "unknown"
     nodata: float | None = None
     dtype: str | None = None
-    status: str = "CATALOG_ONLY"           # CATALOG_ONLY | LOCAL | LOCAL_INVALID
+    status: str = "CATALOG_ONLY"           # CATALOG_ONLY | LOCAL | LOCAL_INVALID | LOCAL_OUTSIDE_STUDY_AREA
     license: str = "USGS 3DEP - public domain (verify competition eligibility)"
-    problems: tuple = ()
+    problems: tuple = ()                   # blocking problems: why the source is excluded
+    exclusion_codes: tuple = ()            # machine-readable form of ``problems`` (EXCLUSION_* codes)
+    warnings: tuple = ()                   # non-blocking remarks (recorded, never a reason to exclude)
+    vertical_unit_source: str = ""         # band_units | tag | crs_vertical | sidecar_xml | override | ""
 
     def to_row(self) -> dict:
         d = asdict(self)
         d["bounds"] = json.dumps(list(self.bounds)) if self.bounds else ""
         d["problems"] = ";".join(self.problems)
+        d["exclusion_codes"] = ";".join(self.exclusion_codes)
+        d["warnings"] = ";".join(self.warnings)
         return d
 
 
@@ -168,28 +175,45 @@ def vertical_scale(unit: str) -> float:
                         "source metadata")
 
 
-def validate_dem_source(src: DEMSource, target_res_m: float, max_res_m: float, allowed_epsg=(26911, 32611, 6340)
-                        ) -> list[str]:
-    """Problems of one DEM source against the G07 contract (empty = usable)."""
-    p = []
+def dem_source_issues(src: DEMSource, target_res_m: float, max_res_m: float, header: dict | None = None
+                      ) -> tuple[list[tuple[str, str]], list[str]]:
+    """(blocking [(code, message)], non-blocking warnings) of one DEM source against the G07 contract.
+
+    ``header`` = ``dem_io.read_header`` output: it adds the checks that need the open dataset (projected CRS in
+    metres, north-up geotransform, square pixels). The CRS may be any projected metric CRS (compound 3DEP CRSs have no
+    single EPSG code): the aggregation reprojects to the analysis grid exactly. The vertical unit is never inferred
+    from the horizontal CRS unit."""
+    h = header or {}
+    blocking, warn = [], []
+    if h.get("error"):
+        blocking.append(("UNREADABLE", f"cannot read the GeoTIFF: {h['error']}"))
     if src.res_m is None:
-        p.append("resolution unknown (header not read)")
+        blocking.append(("RESOLUTION_UNKNOWN", "resolution unknown (header not read)"))
     elif src.res_m > max_res_m + 1e-9:
-        p.append(f"resolution {src.res_m} m coarser than the accepted {max_res_m} m")
+        blocking.append(("RESOLUTION_TOO_COARSE", f"resolution {src.res_m} m coarser than the accepted {max_res_m} m"))
+    elif h and abs(float(h.get("res_y_m", src.res_m)) - float(src.res_m)) > 1e-6:
+        blocking.append(("NON_SQUARE_PIXELS", f"pixel {src.res_m} x {h.get('res_y_m')} m is not square"))
     if src.crs is None:
-        p.append("CRS unknown")
-    else:
-        if not any(str(src.crs).upper().endswith(str(e)) for e in allowed_epsg):
-            p.append(f"CRS {src.crs} not among {allowed_epsg} (reprojection not implemented for G07)")
+        blocking.append(("CRS_MISSING", "the GeoTIFF has no CRS"))
+    elif h and not h.get("crs_projected_metric", False):
+        blocking.append(("CRS_NOT_PROJECTED_METRIC", f"CRS {str(src.crs)[:80]} is not a projected CRS in metres"))
+    if h and not h.get("transform_valid", False):
+        blocking.append(("INVALID_TRANSFORM", "geotransform is not north-up with finite, non-zero pixel sizes"))
     try:
         vertical_scale(src.vertical_unit)
     except ContractError as e:
-        p.append(str(e))
+        blocking.append((UNKNOWN_VERTICAL_UNIT, str(e)))
     if src.nodata is None:
-        p.append("nodata undeclared (non-finite values only are treated as missing)")
+        warn.append("nodata undeclared (non-finite values only are treated as missing)")
     if src.res_m is not None and target_res_m and src.res_m > target_res_m * 1.5:
-        p.append(f"resolution {src.res_m} m differs from the {target_res_m} m target (recorded, not substituted)")
-    return p
+        warn.append(f"resolution {src.res_m} m differs from the {target_res_m} m target (recorded, not substituted)")
+    return blocking, warn
+
+
+def validate_dem_source(src: DEMSource, target_res_m: float, max_res_m: float, header: dict | None = None
+                        ) -> list[str]:
+    """Blocking problems of one DEM source (empty = usable); see ``dem_source_issues``."""
+    return [m for _, m in dem_source_issues(src, target_res_m, max_res_m, header)[0]]
 
 
 def assert_analysis_grid(a: np.ndarray, grid: GridSpec, what: str) -> None:

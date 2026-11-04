@@ -113,7 +113,7 @@ def plot_dem_coverage(local: np.ndarray, catalog: np.ndarray, eligible: np.ndarr
 def plot_signal_auc(T: pd.DataFrame, out_dir, name: str = "dem_fault_signal", top: int = 25) -> dict:
     """Per DEM feature: AUC of fault-near vs background cells (held-out truth, DIAGNOSTIC) with a 0.5 reference."""
     plt = _plt()
-    S = T.sort_values("auc_abs", ascending=False).head(top).iloc[::-1]
+    S = T.dropna(subset=["auc_abs"]).sort_values("auc_abs", ascending=False).head(top).iloc[::-1]
     fig, ax = plt.subplots(figsize=(6.5, 0.24 * len(S) + 1.3))
     ax.barh(S.feature, S.auc_abs, color=SERIES[0], height=0.7)
     ax.axvline(0.5, color=AXIS, linewidth=1)
@@ -121,6 +121,29 @@ def plot_signal_auc(T: pd.DataFrame, out_dir, name: str = "dem_fault_signal", to
     ax.grid(axis="x", color=GRID, linewidth=0.6)
     ax.set_title("DEM fault signal (diagnostic - held-out truth)")
     return save_figure(fig, T, out_dir, name)
+
+
+def plot_training_curves(H: pd.DataFrame, out_dir, name: str = "unet_training_curves") -> dict:
+    """Training and inner-validation loss per epoch, one panel per fit (small multiples: one axis each), best epoch
+    marked."""
+    plt = _plt()
+    if not len(H):
+        return {}
+    fits = sorted(H.fit_id.unique())
+    fig, axes = plt.subplots(1, len(fits), figsize=(3.6 * len(fits), 3.0), squeeze=False, sharey=True)
+    for ax, fid in zip(axes.ravel(), fits):
+        g = H[H.fit_id == fid].sort_values("epoch")
+        ax.plot(g.epoch, g.train_loss, color=SERIES[0], linewidth=2, label="train")
+        ax.plot(g.epoch, g.inner_val_loss, color=SERIES[1], linewidth=2, label="inner validation")
+        best = g.inner_val_loss.idxmin()
+        ax.plot([g.epoch[best]], [g.inner_val_loss[best]], "o", color=SERIES[1], markersize=8, markeredgecolor="white")
+        ax.set_title(f"{fid} (best epoch {int(g.epoch[best])})", fontsize=9)
+        ax.set_xlabel("epoch")
+        ax.grid(axis="y", color=GRID, linewidth=0.6)
+    axes.ravel()[0].set_ylabel("loss")
+    axes.ravel()[0].legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    return save_figure(fig, H, out_dir, name)
 
 
 def plot_candidate_recall(R: pd.DataFrame, out_dir, name: str = "candidate_recall") -> dict:

@@ -99,6 +99,10 @@ def apply_policy(rep: dict, score: np.ndarray, ev: np.ndarray, frac: float, *, e
     else:
         q = R.apply(rep, score, ev, frac, known=known, eligible=dom)
         report = {"policy": "gems3." + sel, "tie_break": "n/a", "requested_frac": frac}
+        if sel == "raw":                     # a ready-made selection (portfolio): audit its area like any exact-k row
+            n, k = int(((q > 0) & dom).sum()), budget_k(frac, int(dom.sum()))
+            report.update(policy=POLICY_VERSION + ":as_selected", k=k, actual_px=n, shortfall=max(k - n, 0),
+                          n_tied_at_cutoff=0)
     report["final_px"] = int((q > 0).sum())
     report["final_frac_eligible"] = float(((q > 0) & dom).sum() / max(int(dom.sum()), 1))
     report["final_mass"] = float(q.sum())

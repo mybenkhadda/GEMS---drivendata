@@ -57,7 +57,8 @@ def required_extra_px(cfg: dict, res: float, scales) -> int:
 
 
 def _sample(a, rr, cc, dr, dc):
-    return ndimage.map_coordinates(a, [rr + dr, cc + dc], order=1, mode="nearest")
+    # orientation is NaN where the DEM is missing: sample in place there (the result is masked afterwards)
+    return ndimage.map_coordinates(a, [rr + np.nan_to_num(dr), cc + np.nan_to_num(dc)], order=1, mode="nearest")
 
 
 def scarp_candidates(d: dict, cfg: dict) -> dict:
