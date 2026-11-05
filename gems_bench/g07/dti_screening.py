@@ -331,3 +331,66 @@ def save_dti_figures(results: dict, root) -> list[str]:
             saved.append(str(path))
         plt.close(fig)
     return saved
+
+
+
+def continuous_probability_dti(P, model_names: tuple[str, ...] = ("G07-B0", "G07-B1")) -> dict:
+    """Official-form DTI of explicit [0,1] model probability maps, no area cap.
+
+    Does NOT convert feature ranks to probabilities and does NOT presume W2 ranks
+    are calibrated probabilities. No paired W2 delta is claimed on this track.
+    Complete scenario coverage is required for a pooled DTI. Calibration remains
+    an independent training-fold-only question; all results are diagnostic.
+    """
+    maps, strict, kind = P._score_maps()
+    U = {k: v for k, v in P.units().items() if v.scenario in ("V1", "V3")}
+    expected = {s: sum(v.scenario == s for v in U.values()) for s in ("V1", "V3")}
+    rows, rejected = [], []
+    for model in model_names:
+        if model not in maps or kind.get(model) != "score":
+            rejected.append({"model": model, "unit": "*", "reason": "model unavailable or not a score map"})
+            continue
+        for key, vu in sorted(U.items()):
+            if key not in maps[model]:
+                rejected.append({"model": model, "unit": key, "reason": "missing held-out prediction"})
+                continue
+            u = vu.unit
+            raw = np.asarray(maps[model][key], np.float64)
+            if raw.shape != u.ev.shape:
+                rejected.append({"model": model, "unit": key, "reason": "shape mismatch"})
+                continue
+            eligible = u.scored_mask()
+            values = raw[eligible & np.isfinite(raw)]
+            if not values.size:
+                rejected.append({"model": model, "unit": key, "reason": "no finite eligible predictions"})
+                continue
+            lo, hi = float(values.min()), float(values.max())
+            if lo < -1e-6 or hi > 1 + 1e-6:
+                rejected.append({"model": model, "unit": key,
+                                 "reason": f"not probability-valued: range [{lo}, {hi}]"})
+                continue
+            # Undefined prediction pixels count as zero, as in the canonical scorer.
+            q = np.clip(np.nan_to_num(raw, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
+            comp = u.components(q)
+            rows.append(_component_row(comp, model=model, unit=key, scenario=vu.scenario,
+                                       frac=np.nan, protocol="FULL_CONTINUOUS_NO_AREA_CAP",
+                                       prediction_kind="probability_uncalibrated",
+                                       nonfinite_px=int((eligible & ~np.isfinite(raw)).sum()),
+                                       positive_area_px=int(((q > 0) & eligible).sum()),
+                                       strictness=strict.get(model, "SCREENING_ONLY")))
+            u.release()
+    frame = pd.DataFrame(rows)
+    pooled = _pooled(frame, ("model", "scenario"), expected) if len(frame) else pd.DataFrame()
+    if len(pooled):
+        # Even when sources are strict by split, calibration/promotional eligibility
+        # cannot be inferred from numeric ranges alone.
+        pooled["prediction_kind"] = "probability_uncalibrated"
+        pooled["metric"] = "official_form_dti_without_area_cap"
+        pooled["usable_for_promotion"] = False
+    out = "evaluation/dti_screening"
+    P.ws.save_table(frame, f"{out}/continuous_probability_unit_rows.csv")
+    P.ws.save_table(pooled, f"{out}/continuous_probability_pooled.csv")
+    P.ws.save_table(pd.DataFrame(rejected, columns=["model", "unit", "reason"]),
+                    f"{out}/continuous_probability_exclusions.csv")
+    P.push([out])
+    return {"units": frame, "pooled": pooled, "rejected": pd.DataFrame(rejected)}
