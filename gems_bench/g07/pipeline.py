@@ -1829,7 +1829,11 @@ class G07Pipeline:
                 self.ws.save_table(MR, "datasets/meta/rank_rows.parquet")
 
             self._soft("meta dataset", meta_rows)
-            best = PD[PD.status == "PROMOTE_CANDIDATE"].sort_values("v1_gain", ascending=False) if len(PD) else PD
+            # No V1 row means no 'v1_gain' column; do not let a non-promotable run
+            # crash after valid DTI tables have already been persisted.
+            best = PD[PD.status == "PROMOTE_CANDIDATE"] if len(PD) else PD
+            if len(best) and "v1_gain" in best.columns:
+                best = best.sort_values("v1_gain", ascending=False)
             self.ws.save_json({"primary": prim, "promote": list(best.model) if len(best) else [], "strictness": strict,
                                "statuses": dict(zip(PD.model, PD.status)) if len(PD) else {},
                                "exact_budget": EB.to_dict("records")}, "evaluation/promotion/decision.json")
