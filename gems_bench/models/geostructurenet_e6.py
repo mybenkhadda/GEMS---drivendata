@@ -93,9 +93,17 @@ class GeoStructureNetE6(nn.Module):
         state = ck.get("state_dict", ck.get("model", ck.get("model_state_dict", ck)))
         if any(k.startswith("module.") for k in state):
             state = {k.removeprefix("module."): v for k, v in state.items()}
-        self.baseline.load_state_dict(state, strict=True)
+        loaded = self.baseline.load_state_dict(state, strict=False)
+        # E1 had a score head only. New E6 proximity/orientation heads are
+        # intentionally initialized fresh; every other baseline weight must match.
+        allowed = ("dist_head.", "orient_head.")
+        bad = [key for key in loaded.missing_keys if not key.startswith(allowed)]
+        if bad or loaded.unexpected_keys:
+            raise RuntimeError(f"E1/E6 warm-start baseline schema mismatch: missing={bad} "
+                               f"unexpected={loaded.unexpected_keys}")
         self._warm_started = True
-        return {"checkpoint": str(checkpoint), "strict": True}
+        return {"checkpoint": str(checkpoint), "matched_e1": True,
+                "new_auxiliary_head_keys": loaded.missing_keys}
 
     def freeze_baseline(self):
         self._frozen = True
