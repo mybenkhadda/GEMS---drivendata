@@ -41,6 +41,12 @@ class P5Spec(P4Spec):
     w_thin: float = 0.0
     w_continuity: float = 0.0
     continuity_step_px: float = 1.0
+    # E6 masked DEM modality, fold-safe checkpoint initialization
+    e6_dem_width: int = 16
+    e6_dropout: float = 0.30
+    e6_freeze_epochs: int = 2
+    e6_warm_dir: str = ""
+    e6_tversky_weight: float = 0.3
     # runtime / robustness
     ckpt_every: int = 5                    # resumable checkpoint every n epochs (and at budget / end)
     ckpt_sync_min: float = 10.0            # push resume checkpoints to Drive at most every n minutes
@@ -100,7 +106,7 @@ def spec_from_experiment(ctx, model_cfg: dict, name: str, seed: int) -> P5Spec:
                [c for c in cfg.get("channels", []) if c not in drop]
     typ = model_cfg.get("type", "geounet")
     kw = {**cfg, **(model_cfg.get("overrides") or {}), "name": name, "channels": channels, "seed": seed, "model": typ}
-    if typ == "geostructurenet":
+    if typ in ("geostructurenet", "geostructurenet_e6"):
         kw["gsn_groups"] = groups
         kw["groups"] = {g: v for g, v in groups.items() if g != "context"}
         kw["context"] = bool(groups.get("context"))
