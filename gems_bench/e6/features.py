@@ -45,7 +45,6 @@ def _grid(ctx):
 def stage_cached_dem(exp, ctx, *, max_tiles=32) -> dict:
     import rasterio
     from rasterio.warp import reproject, Resampling
-    from . import __name__ as _module
     from ..g07.fast_coarse import FEATURES, extract_fast_features
     from ..g07.dem_io import analysis_window, mosaic_windows, write_window
 
