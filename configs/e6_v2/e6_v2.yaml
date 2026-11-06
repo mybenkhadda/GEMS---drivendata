@@ -1,0 +1,142 @@
+# GEMS E6 V2 - GeoStructureNet from raw data only. One architecture, one configuration.
+# Every path, scale, width and policy of the pipeline is defined here. Docs: docs/e6_v2/.
+version: e6v2.1
+
+paths:
+  drive_root: /content/drive/MyDrive/GEMS_2
+  namespace: e6_v2_from_raw          # <drive_root>/<namespace>/{manifests,cache,datasets,...}
+  scratch_root: /content/e6v2_scratch  # local disk: temporary files only, never a source of truth
+
+raw:
+  # Raw files are searched ONLY in these sub-folders of drive_root. Anything under a forbidden prefix is refused.
+  features_file: gems-geodawn-numerical-features.tif
+  faults_file: existing_faults.tif
+  template_file: example_submission.tif
+  search_dirs: ["", data/raw, data/raw/geodawn, data/raw/faults]
+  dem_dirs: [data/raw/dem_1m]
+  forbidden_prefixes: [outputs, experiments, data/feature_store, data/processed, model_registry, e6_v2_from_raw]
+  nodata_abs: 1.0e30                 # |x| above this is nodata in the GeoDAWN raster
+  valid_min_band_share: 0.5          # data footprint: >= 50 % of bands finite
+  label_min_value: 1                 # fault pixel: value >= 1 in existing_faults.tif
+  hash_mode: sha256                  # GeoDAWN files; DEM tiles are fingerprinted by name + size + header
+
+grid_expected: {epsg: 32611, pixel_m: 100.0, height: 3730, width: 3292}
+
+terrain:                             # branch 1 - 100 m raw terrain
+  elevation_band: det_elev
+  slope_band: det_elev_slope         # raw slope band, used as delivered
+  derivative_scales_m: [300, 1000, 3000]
+  relief_windows_m: [1000, 3000]
+  tpi_radii_m: [500, 2000]
+  dog_bands_m: [[300, 1000], [1000, 3000]]
+  edge_guard_sigma: 2.0              # terrain features NaN within 2 sigma (or half window) of the footprint edge
+
+potential:                           # branch 2 - magnetic and gravity fields, FFT derivatives
+  fields:
+    magnetic: {band: rtp, unit: nT}            # reduced-to-pole field: derivatives are rotation-safe
+    gravity: {band: iso_grav_anom, unit: mGal}
+  continuation_heights_m: [500, 1000, 2000, 5000]
+  pad_frac: 0.25                     # padding on each side before the FFT (no wrap-around)
+  taper_px: 32                       # cosine taper width inside the padding
+  edge_guard_m: 1000                 # derivatives NaN within this distance of the data footprint edge
+  continuation_guard_cap_m: 2000     # continuation products: guard = min(h, cap)
+  # Other raw GeoDAWN bands passed to the field encoder unchanged (normalised only). All are scalars whose
+  # pattern does not depend on map orientation, so 90-degree rotations and flips stay physically valid.
+  subsurface_bands: [iso_grav_anom_hg, iso_grav_anom_vg, iso_grav_anom_slope, depth_to_base_surf, cond_surf,
+                     geod_2ndinv, geod_shearrate, geod_dilaterate, deq_n100a15, ieq_n100a15]
+  # Total-field magnetic bands are NOT reduced to the pole: their anomaly shape depends on the geomagnetic
+  # inclination / declination, so rotating or flipping them creates physically impossible patterns. Excluded;
+  # the magnetic information enters through rtp and its FFT features.
+  excluded_orientation_dependent: [mag_anom, tmi, tmi_hg, tmi_vg, tc]
+
+dem:                                 # branch 3 - USGS 1 m DEM -> 2 m -> features -> 100 m statistics
+  native_res_min_m: 0.5
+  native_res_max_m: 1.5
+  vertical_unit_override: null       # e.g. metre - ONLY after checking the USGS metadata yourself
+  work_res_m: 2.0                    # 1 m sources are averaged to 2 m before every operator
+  window_cells: 50                   # window core = 50 x 50 analysis cells (5 km)
+  halo_m: 420                        # >= the largest operator support (TPI 200 m: 4 sigma = 400 m) + derivatives
+  seam_guard_m: 60                   # pixels this close to a border between two DEM projects are excluded
+  structure_scales_m: [5, 20]
+  tpi_radii_m: [50, 200]
+  gradient_sigma_m: 2.0
+  curvature_sigma_m: 10.0
+  roughness_sigma_m: 10.0
+  scarp_offset_m: 10.0
+  edge_slope_deg: 20.0
+  edge_coherence: 0.5
+  edge_guard_sigma: 4.0              # features NaN within 4 sigma of missing data / seams
+  min_cell_valid_frac: 0.25          # a 100 m statistic needs >= 25 % usable 2 m pixels in the cell, else NaN
+  qa_windows: 3                      # the first N processed windows also keep 2 m mosaic + 2 m feature GeoTIFFs
+  workers: 0                         # window processes; 0 = min(4, cpu_count)
+  budget_minutes: 0                  # 0 = no limit; otherwise stop cleanly and resume next session
+
+normalization:
+  q_low: 0.05
+  q_high: 0.95
+  clip: 6.0
+  sample_px: 2000000
+
+splits:
+  geographic: {n_folds: 3, block_km: 20.0, clusters_per_fold: 3, buffer_km: 13.0, inner_buffer_km: 5.0}
+  discovery: {n_splits: 3, link_km: 1.0, frac_trace: 0.12, min_system_km: 5.0, max_system_frac: 0.05,
+              ignore_km: 1.0, eval_km: 10.0}
+  seed: 2026
+
+model:
+  levels: 4                          # 256 -> 128 -> 64 -> 32
+  terrain_width: 32                  # level widths 32, 64, 128, 256
+  field_width: 32
+  dem_width: 16                      # half width: 16, 32, 64, 128
+  dilations: [1, 2, 4, 8]
+  context_pool: 8                    # pooled grid factor = bottleneck downsampling
+  context_extent: 4                  # context crop = 4 x the patch extent
+  context_width: 32
+  dem_gate_bias: -2.0
+
+training:
+  patch_px: 256
+  batch_size: 8
+  grad_accum: 2
+  amp: auto                          # bf16 when supported, else fp16; off on CPU
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  epochs: {baseline: 20, dem: 8, joint: 8}
+  steps_per_epoch: 60
+  min_epochs: 5
+  patience: 5
+  eval_every: 1
+  finetune_lr_mult: 0.2              # stage D: copied dual-path weights at lr x 0.2
+  pos_patch_frac: 0.5
+  min_valid_frac: 0.6
+  dem_dropout: 0.30                  # stage E: per patch, DEM inputs and gate mask zeroed (see TRAINING_PROTOCOL)
+  dem_patch_frac: 0.8                # stages D/E: share of patches drawn where DEM covers the patch
+  dem_patch_min_cov: 0.2             # ... with mean coverage >= 0.2
+  ignore_m: 100                      # unlabeled pixels this close to a visible fault: weight 0 in nnPU
+  prior_inflation: 1.5               # pi = observed visible-fault share x 1.5 (unmapped faults), training units only
+  prior_min: 0.002
+  prior_max: 0.05
+  loss: {nnpu: 1.0, tversky: 1.0, proximity: 0.3, orientation: 0.1, tversky_alpha: 0.2, tversky_beta: 0.8,
+         radius_m: 300.0}
+  proximity_neighborhood_m: 1000.0
+  orientation_min_coherence: 0.5
+  augmentation: {rot90: true, flips: true}
+  infer_batch: 8
+  infer_overlap: 0.5
+  max_stage_minutes: 0
+  seed: 2026
+
+evaluation:
+  short_fault_km: 3.0
+  system_recovered_support: 0.5
+
+export:
+  final: area_budget_binary          # area_budget_binary | continuous  -> submissions/submission_e6_final.tif
+  area_fraction_rule: training_label_density   # training_label_density | fixed
+  area_fraction_fixed: 0.01
+  density_factor: 1.0
+  area_fraction_clip: [0.002, 0.05]
+  fold_combination: mean             # one fixed policy: arithmetic mean of the fold models
+  # Hidden-test truth = new faults only; known fault pixels are masked by the organisers. In the binary map the
+  # budget is ranked over pixels that are NOT mapped faults, so no budget is spent where nothing can be scored.
+  known_faults_in_budget: false
