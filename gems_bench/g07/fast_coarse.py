@@ -191,7 +191,8 @@ def build_fast_coarse(P, *, max_tiles: int = 10, draw_figures: bool = True) -> d
         return {"status": "NO_STUDY_INTERSECTION", "tiles": 0, "store": None}
 
     fp = PS.stable_hash("G07_FAST_COARSE_V1", [(x[1].tile_id, int(x[1].bytes)) for x in priorities],
-                        FEATURES, (30, 60, 150), n=12)
+                        FEATURES, (30, 60, 150),
+                        PS.code_identity(["gems_bench.g07.fast_coarse"]), n=12)
     target = P.root / "dem_features" / "fast_coarse" / fp / "dem_features_100m_fast.tif"
     products = target.parent / "tiles"
     products.mkdir(parents=True, exist_ok=True)
