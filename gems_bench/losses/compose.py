@@ -65,6 +65,17 @@ def loss5(out: dict, a, names: list[str], spec, *, epoch: int = 0, return_parts:
     else:
         loss = cnn3.loss_fn(logits, y, k, w, spec)
     parts["base"] = loss.detach()
+    if spec.model == "geostructurenet_e6" and spec.e6_tversky_weight > 0:
+        import torch
+        p = torch.sigmoid(logits)
+        # 300m visible-label soft kernel, masked by training-visible weight.
+        soft = k.clamp(0, 1)
+        tp = (p * soft * w).sum()
+        fp = (p * (1-soft) * w).sum()
+        fn = ((1-p) * soft * w).sum()
+        tv = 1.0 - (tp + 1e-6) / (tp + 0.2*fp + 0.8*fn + 1e-6)
+        loss = loss + spec.e6_tversky_weight * tv
+        parts["e6_soft_tversky"] = tv.detach()
     if spec.aux_dist > 0 and "dist" in out:
         l_d = geometry.proximity_loss(out["dist"], sl("dist"), w)
         loss = loss + spec.aux_dist * l_d
