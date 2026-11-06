@@ -39,7 +39,6 @@ class E6Runner(Cnn5Runner):
         if spec.model != "geostructurenet_e6":
             raise ValueError("E6 milestone must use a GeoStructureNetE6 model, not an old model")
         assert spec.aux_dist > 0 and spec.aux_orient > 0, "E6 production requires auxiliary geometry heads"
-        ensure_channels(self.ctx, spec)
         if self.exp.drive:
             # Persist only derived per-band E6 caches; raw USGS DEMs are not mirrored.
             self.exp.drive.push([self.exp.paths.rel(self.ctx.store.p5_dir)])
