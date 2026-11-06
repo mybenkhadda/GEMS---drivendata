@@ -143,6 +143,7 @@ class E6Runner(Cnn5Runner):
         if parity["status"] != "PASS":
             raise RuntimeError(f"E6 selection parity failed: {parity}")
         path = rd.path / "submissions" / "submission_e6_geostructurenet.tif"
+        path.parent.mkdir(parents=True, exist_ok=True)
         checks = {"new_e6_model": True,
                   "three_complete_cv_checkpoints": len(checkpoints) == len(expected),
                   "completed_discovery_predictions": all(rd.raster_path(f"disc{d}").is_file()
