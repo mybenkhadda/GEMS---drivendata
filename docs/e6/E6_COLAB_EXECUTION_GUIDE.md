@@ -1,6 +1,6 @@
 # E6 Colab execution guide
 
-* **Notebook:** `notebooks/colab/GEMS_E6_SUBMISSION_MILESTONE.ipynb` (branch `e6-submission-fasttrack`)
+* **Notebook:** `notebooks/colab/GEMS_E6_SUBMISSION_MILESTONE.ipynb` (branch `main`)
 * **Config:** `configs/experiments/e6_masked_threeway_full.yaml`
 * **Code in Colab:** `/content/GEMS_E6` | **local work:** `/content/gems_work` | **Drive:** `/content/drive/MyDrive/GEMS_2`
 
@@ -8,7 +8,7 @@ Nothing in this guide has been executed. The notebook clones the branch from Git
 
 ## 1. Before the first run
 
-1. Commit and push the audit fixes to `e6-submission-fasttrack`. Without this the notebook runs the old code.
+1. The notebook clones `main` (`REF` in cell 00); the audit fixes are on `main` (commit `7ff6947`). Pin `REF` to a commit SHA for a reproducible run.
 2. Colab: Runtime -> Change runtime type -> **GPU**. High RAM is recommended.
 3. On Drive, the inputs of `E6_FINAL_ARTIFACT_MANIFEST.md` (Inputs table). The two that matter most:
    * `GEMS_2/outputs/g07_multiscale_fault_discovery/g07-*/dem_features/coarse_parts/*/*.tif`: the cached 10 m DEM parts;

@@ -1,6 +1,6 @@
 # E6 Production — fully connected GPU training to NEW GEMS submission
 
-**Implemented** on \`e6-submission-fasttrack\`; the old W2 champion fallback
+**Implemented** on \`main\` (developed on the deleted branch e6-submission-fasttrack); the old W2 champion fallback
 was REMOVED. This milestone writes a NEW E6 prediction GeoTIFF from
 trained three-way GeoStructureNet models.
 

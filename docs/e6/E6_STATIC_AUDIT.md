@@ -1,6 +1,6 @@
 # E6 static audit
 
-Branch `e6-submission-fasttrack` (base commit `326f563`) plus the uncommitted fixes of this audit (2026-11-06).
+Audited on branch `e6-submission-fasttrack` (base commit `326f563`); the fixes are commit `7ff6947`, merged into `main` (2026-11-06; the branch was then deleted).
 **Method: source reading only. Nothing was executed** (no Python, tests, notebook, Git, data access). The three
 documents the audit brief named as inputs (`E6_ARTIFACT_CONTRACT.md`, `E6_DEPENDENCY_GRAPH.md`,
 `E6_IMPLEMENTATION_INVENTORY.md`) do not exist on the branch; the only E6 document was `SUBMISSION_MILESTONE.md`. The
@@ -10,7 +10,7 @@ graph below was reconstructed from source.
 
 | # | caller -> callee | arguments / config | artifact in -> out | failure behaviour | upstream produced? |
 |---|---|---|---|---|---|
-| 1 | notebook cell 03 -> `git clone --branch e6-submission-fasttrack`, `pip install -e .[colab]`, `runtime.colab.configure`, `DriveSync.stage_in(minimum)` | `REF`, `LOCAL`, `DRIVE`, `CODE` | Drive raw / folds / datasets / eda -> `/content/gems_work` | missing Drive folders skipped (printed) | user's Drive |
+| 1 | notebook cell 03 -> `git clone --branch main`, `pip install -e .[colab]`, `runtime.colab.configure`, `DriveSync.stage_in(minimum)` | `REF`, `LOCAL`, `DRIVE`, `CODE` | Drive raw / folds / datasets / eda -> `/content/gems_work` | missing Drive folders skipped (printed) | user's Drive |
 | 2 | notebook 01b -> `e6.preflight.run_preflight(config, LOCAL, DRIVE, CODE)` **(new)** | config path | headers only, read-only | raises with every blocker | - |
 | 3 | `Experiment.from_yaml` -> `ExperimentConfig.from_yaml` -> `runners.get_runner("e6")` -> `E6Runner` | `kind: e6` | `experiments/<name>__<hash8>/` (staged from Drive if present) | unknown kind -> ValueError | yes |
 | 4 | `Experiment.prepare` -> `E6Runner.prepare` -> `Cnn5Runner.prepare` -> `E6Runner.spec()` **(new override)** -> `Cnn5Runner.spec` -> `spec_from_experiment(ctx, model, name, seed)` | `model.base: P4_B_gated`, `add_channels`, `overrides` | `configs/baselines/legacy_specs/P4_B_gated.json` (or the legacy run's `config.json`) | FileNotFoundError if neither | snapshot in repo |

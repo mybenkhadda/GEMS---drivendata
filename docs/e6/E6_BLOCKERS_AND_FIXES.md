@@ -25,6 +25,8 @@ Nothing below was executed. "Fixed" = the source was corrected and re-read; it h
 | F17 | notebook, `gems_bench/e6/preflight.py` | no readiness check | blockers found hours into a run | read-only preflight cell 01b, stops on blockers |
 | F18 | notebook cell 06 | download without integrity check | wrong / partial file downloaded | readback status + local sha256 required |
 | F19 | yaml | `freeze_encoder_epochs`, `e6_freeze_epochs` silently ignored | misleading config | annotated |
+| F20 | notebook | the audit commit `7ff6947` applied its notebook edits to shifted cells: `EXP.export()` was gone, the preflight cell overwritten, headings out of order | export never run; no readiness check | notebook rebuilt from `326f563` with the edits matched by cell content; order of mount / preflight / prepare / train / evaluate / export / download asserted |
+| F21 | notebook cell 00 | `REF = "e6-submission-fasttrack"` after the branch was merged and deleted | clone fails | `REF = "main"` |
 
 ## Runtime-only blockers (checked by the preflight; cannot be settled from source)
 
