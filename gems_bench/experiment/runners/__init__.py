@@ -11,6 +11,8 @@ def get_runner(kind: str):
         from .audit import SplitsRunner as R
     elif kind == "cnn5":
         from .cnn5 import Cnn5Runner as R
+    elif kind == "e6":
+        from .e6 import E6Runner as R
     elif kind == "lgbm5":
         from .lgbm5 import Lgbm5Runner as R
     elif kind == "ensemble5":
@@ -24,4 +26,4 @@ def get_runner(kind: str):
     return R
 
 
-KINDS = ("zoo", "parity", "splits", "cnn5", "lgbm5", "ensemble5", "dem_pilot", "submission")
+KINDS = ("zoo", "parity", "splits", "cnn5", "e6", "lgbm5", "ensemble5", "dem_pilot", "submission")
