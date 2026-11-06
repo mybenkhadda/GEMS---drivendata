@@ -1,0 +1,73 @@
+# E6 PRODUCTION — direct CV/discovery training and a NEW submission GeoTIFF.
+# No W2 fallback, no tests, no ablations, no original-DEM file mirrors.
+extends: [_base_cnn5.yaml]
+name: e6_masked_threeway_full
+kind: e6
+model_name: P5_E6_masked_threeway
+seed: 2026
+discovery: true
+model:
+  base: P4_B_gated
+  type: geostructurenet_e6
+  fusion: gated
+  long_range: none            # warm-start parity with E1; E4 dilation not assumed validated
+  add_channels:
+    dem:
+      - dem:dem_fast_slope_s30
+      - dem:dem_fast_scarp_s60
+      - dem:dem_fast_curv_s60
+      - dem:dem_fast_rough_s60
+      - dem:dem_fast_dircoh_s60
+      - dem:dem_fast_hs_range
+      - dem:dem_fast_dog_s60
+    coverage:
+      - dem:dem_coverage   # separate mask, never an encoder evidence channel
+  overrides:
+    enc_width: 24
+    dec_width: 32
+    pu: nnpu
+    pu_prior: 0.01
+    tversky_alpha: 0.2
+    tversky_beta: 0.8
+    e6_tversky_weight: 0.3
+    aux_dist: 0.3
+    aux_orient: 0.1
+    orient_loss: cosine
+    dist_clip_km: 0.3
+    e6_dem_width: 16
+    e6_dropout: 0.30
+    e6_freeze_epochs: 2
+    e6_warm_dir: /content/drive/MyDrive/GEMS_2/experiments/e1_gsn_parity__b8b8c3db/checkpoints
+    freeze_encoder_epochs: 0
+    epochs: 10
+    steps_per_epoch: 36
+    batch_size: 4
+    grad_accum: 2
+    min_epochs: 5
+    patience: 4
+    eval_every: 2
+    infer_batch: 4
+    ckpt_every: 1
+    ckpt_sync_min: 2
+    max_runtime_min: 0
+    oom_retries: 2
+    lr: 0.00035
+    data_on_gpu: true
+    rot180: true
+    augment: false
+    collapse_max_unlabeled_mean: 0.5
+# A single fixed prediction policy (no R&D comparisons)
+e6:
+  max_cached_dem_tiles: 32
+  submission_fraction: 0.01
+  usgs_dem_license_verified: true
+runtime:
+  max_stage_minutes: 0    # full run; resume from epoch caches if Colab disconnects
+  checkpoint:
+    save_every_epochs: 1
+    sync_every_minutes: 2
+  gpu:
+    infer_batch: 4
+# Sync only derived feature cache, checkpoints and experiment artifacts.
+drive:
+  sync: true
