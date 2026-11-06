@@ -76,6 +76,17 @@ def train5(spec, gstack, gaux, aux_names: list[str], allowed, positives, valid, 
 
     cnn3._seed_all(spec.seed, spec.cudnn_benchmark and device.type == "cuda")
     model = build_model5(spec)
+    if spec.model == "geostructurenet_e6":
+        from pathlib import Path
+        # Each fold may only warm start from its OWN E1 fold checkpoint.
+        # Discovery split checkpoints must likewise match their own split;
+        # never leak a CV model trained on the withheld discovery systems.
+        warm = Path(spec.e6_warm_dir) / f"{ckpt.unit}_model.pt" if (ckpt and spec.e6_warm_dir) else None
+        if warm is not None and warm.is_file():
+            model.warm_start(warm, device="cpu")
+            print(f"{log_prefix} E6 warm start: {warm.name} (fold/split isolated)")
+        else:
+            print(f"{log_prefix} E6 baseline training from scratch (no isolated checkpoint)")
     if pretrained_path and spec.model == "geounet":
         from ..geological_encoders import load_encoder_weights
 
@@ -86,7 +97,18 @@ def train5(spec, gstack, gaux, aux_names: list[str], allowed, positives, valid, 
     enc_ids = {id(p) for p in model.encoder_parameters()}
     enc = [p for p in model.parameters() if id(p) in enc_ids]
     rest = [p for p in model.parameters() if id(p) not in enc_ids]
-    groups = [{"params": enc, "lr": spec.lr * spec.encoder_lr_mult}, {"params": rest, "lr": spec.lr}]
+    if spec.model == "geostructurenet_e6":
+        base_p = list(model.baseline.parameters())
+        base_ids = {id(p) for p in base_p}
+        specialist = [p for p in model.parameters() if id(p) not in base_ids]
+        # Warmed baseline only fine-tunes at a lower LR; a missing baseline
+        # must learn normally, including the third E1-fold case.
+        base_lr = spec.lr * 0.2 if model._warm_started else spec.lr
+        groups = [{"params": base_p, "lr": base_lr},
+                  {"params": specialist, "lr": spec.lr}]
+    else:
+        groups = [{"params": enc, "lr": spec.lr * spec.encoder_lr_mult},
+                  {"params": rest, "lr": spec.lr}]
     opt = torch.optim.AdamW(groups, lr=spec.lr, weight_decay=spec.weight_decay)
     epochs = fixed_epochs or spec.epochs
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=[g["lr"] for g in groups],
@@ -123,9 +145,16 @@ def train5(spec, gstack, gaux, aux_names: list[str], allowed, positives, valid, 
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
     for ep in range(st["epoch"], epochs):
-        frozen = ep < spec.freeze_encoder_epochs
-        for p in enc:
-            p.requires_grad_(not frozen)
+        if spec.model == "geostructurenet_e6":
+            frozen = model._warm_started and ep < spec.e6_freeze_epochs
+            if frozen:
+                model.freeze_baseline()
+            else:
+                model.unfreeze_all()
+        else:
+            frozen = ep < spec.freeze_encoder_epochs
+            for p in enc:
+                p.requires_grad_(not frozen)
         model.train()
         t0 = time.perf_counter()
         loss_sum = torch.zeros((), device=device)
