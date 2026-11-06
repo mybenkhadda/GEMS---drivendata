@@ -27,6 +27,15 @@ def build_model5(spec):
                                fusion=spec.gsn_fusion, long_range=spec.gsn_long_range, context_idx=ctx_idx,
                                context_factor=spec.context_factor, heads=spec.gsn_heads,
                                aux_dist=spec.aux_dist > 0, aux_orient=spec.aux_orient > 0)
+    if spec.model == "geostructurenet_e6":
+        from .geostructurenet_e6 import GeoStructureNetE6
+        return GeoStructureNetE6(
+            spec.channels, spec.gsn_groups or spec.groups,
+            enc_width=spec.enc_width, dec_width=spec.dec_width,
+            dem_width=spec.e6_dem_width, long_range=spec.gsn_long_range,
+            aux_dist=spec.aux_dist > 0, aux_orient=spec.aux_orient > 0,
+            dem_dropout=spec.e6_dropout,
+            freeze_warm_epochs=spec.e6_freeze_epochs)
     raise ValueError(f"unknown model {spec.model}")
 
 
