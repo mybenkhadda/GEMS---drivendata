@@ -21,6 +21,8 @@ class E6Runner(Cnn5Runner):
         ctx = super().ctx
         if not getattr(self, "_e6_inputs_ready", False):
             from ...e6.features import stage_cached_dem, register_e6_dem
+            if self.exp.paths.drive:
+                ctx.store.drive_mirror = (self.exp.paths.root, self.exp.paths.drive)
             info = stage_cached_dem(self.exp, ctx, max_tiles=int(self.cfg.get("e6.max_cached_dem_tiles", 32)))
             available = register_e6_dem(ctx, Path(info["folder"]), info["fingerprint"],
                                         self.exp.paths.root)
@@ -38,6 +40,9 @@ class E6Runner(Cnn5Runner):
             raise ValueError("E6 milestone must use a GeoStructureNetE6 model, not an old model")
         assert spec.aux_dist > 0 and spec.aux_orient > 0, "E6 production requires auxiliary geometry heads"
         ensure_channels(self.ctx, spec)
+        if self.exp.drive:
+            # Persist only derived per-band E6 caches; raw USGS DEMs are not mirrored.
+            self.exp.drive.push([self.exp.paths.rel(self.ctx.store.p5_dir)])
         self.rd.save_json({"model": "E6", "baseline": "original gated dual encoder",
                            "dem_modality_dropout": spec.e6_dropout,
                            "warm_start_dir": spec.e6_warm_dir,
