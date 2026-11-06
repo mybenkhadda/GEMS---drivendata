@@ -36,9 +36,10 @@ model:
     dist_clip_km: 0.3
     e6_dem_width: 16
     e6_dropout: 0.30
-    e6_freeze_epochs: 2
+    e6_finetune_baseline: false   # warm-started E1 baseline stays frozen: no-DEM pixels == that E1 fold model
+    e6_freeze_epochs: 2           # frozen epochs before fine-tuning; used only with e6_finetune_baseline: true
     e6_warm_dir: /content/drive/MyDrive/GEMS_2/experiments/e1_gsn_parity__b8b8c3db/checkpoints
-    freeze_encoder_epochs: 0
+    freeze_encoder_epochs: 0      # Phase-4 option; ignored by GeoStructureNetE6 (the e6_* fields control freezing)
     epochs: 10
     steps_per_epoch: 36
     batch_size: 4
@@ -60,7 +61,7 @@ model:
 e6:
   max_cached_dem_tiles: 32
   submission_fraction: 0.01
-  usgs_dem_license_verified: true
+  usgs_dem_license_verified: true   # YOUR statement that external USGS DEM use is allowed; export gate reads it
 runtime:
   max_stage_minutes: 0    # full run; resume from epoch caches if Colab disconnects
   checkpoint:

@@ -44,9 +44,13 @@ class P5Spec(P4Spec):
     # E6 masked DEM modality, fold-safe checkpoint initialization
     e6_dem_width: int = 16
     e6_dropout: float = 0.30
-    e6_freeze_epochs: int = 2
+    e6_freeze_epochs: int = 2              # only used with e6_finetune_baseline=True
+    e6_finetune_baseline: bool = False     # False: a warm-started E1 baseline stays frozen for the whole unit, so
+                                           # predictions without DEM coverage equal that E1 fold model exactly
     e6_warm_dir: str = ""
     e6_tversky_weight: float = 0.3
+    e6_dem_fingerprint: str = ""           # identity of the DEM 100 m cache (set by the E6 runner): semantic, so a
+                                           # changed DEM bank never reuses checkpoints trained on another one
     # runtime / robustness
     ckpt_every: int = 5                    # resumable checkpoint every n epochs (and at budget / end)
     ckpt_sync_min: float = 10.0            # push resume checkpoints to Drive at most every n minutes

@@ -108,17 +108,19 @@ def extract_fast_features(z: np.ndarray, resolution_m: float = 10.0) -> dict[str
         "dem_fast_hs_range": hs_range,
         "dem_fast_dog_s60": dog,
     }
-    # 3 sigma safety margin protects missing-data/tile edges, but retains
-    # interior evidence. The 150 m DoG requires the largest edge exclusion.
+    # Edge guard = the full support of every operator (scipy truncates Gaussians at 4 sigma): beyond it no missing
+    # pixel and no tile edge influences the value, so a tile boundary cannot become a feature line. At 3 sigma a
+    # one-sided kernel still bends the smoothed surface by ~1 % of the slope. Coherence smooths the 60 m gradients
+    # again over 60 m: 8 sigma in total. Derivatives reach 2 more pixels.
     dist = ndimage.distance_transform_edt(valid)
     px_guard = {
-        "dem_fast_slope_s30": int(np.ceil(3*p30)) + 2,
-        "dem_fast_scarp_s60": int(np.ceil(3*p150)) + 2,
-        "dem_fast_curv_s60": int(np.ceil(3*p60)) + 2,
-        "dem_fast_rough_s60": int(np.ceil(3*p60)) + 2,
-        "dem_fast_dircoh_s60": int(np.ceil(4*p60)) + 2,
-        "dem_fast_hs_range": int(np.ceil(3*p30)) + 2,
-        "dem_fast_dog_s60": int(np.ceil(3*p150)) + 2,
+        "dem_fast_slope_s30": int(np.ceil(4*p30)) + 2,
+        "dem_fast_scarp_s60": int(np.ceil(4*p150)) + 2,
+        "dem_fast_curv_s60": int(np.ceil(4*p60)) + 2,
+        "dem_fast_rough_s60": int(np.ceil(4*p60)) + 2,
+        "dem_fast_dircoh_s60": int(np.ceil(8*p60)) + 2,
+        "dem_fast_hs_range": int(np.ceil(4*p30)) + 2,
+        "dem_fast_dog_s60": int(np.ceil(4*p150)) + 2,
     }
     for name, x in out.items():
         out[name] = np.where(valid & (dist > px_guard[name]) & np.isfinite(x), x, np.nan).astype(np.float32)

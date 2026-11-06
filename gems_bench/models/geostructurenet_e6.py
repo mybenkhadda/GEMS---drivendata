@@ -65,6 +65,8 @@ class GeoStructureNetE6(nn.Module):
             raise ValueError("Coverage cannot enter a prediction encoder")
         if set(terrain) & set(potential) or set(terrain) & set(dem) or set(potential) & set(dem):
             raise ValueError("E6 modality groups must be disjoint")
+        self._group_names = {"terrain": terrain, "potential": potential, "dem": dem}
+        self._widths = (int(enc_width), int(dec_width), str(long_range))
         base_names = list(dict.fromkeys([*terrain, *potential]))
         self.register_buffer("base_idx", torch.tensor([channels.index(n) for n in base_names], dtype=torch.long),
                              persistent=False)
@@ -90,6 +92,7 @@ class GeoStructureNetE6(nn.Module):
     def warm_start(self, checkpoint, device="cpu"):
         """Load genuine E1 fold checkpoint, not a different fold's model."""
         ck = torch.load(checkpoint, map_location=device, weights_only=False)
+        self._check_e1_schema(ck.get("spec") if isinstance(ck, dict) else None, checkpoint)
         state = ck.get("state_dict", ck.get("model", ck.get("model_state_dict", ck)))
         if any(k.startswith("module.") for k in state):
             state = {k.removeprefix("module."): v for k, v in state.items()}
@@ -104,6 +107,30 @@ class GeoStructureNetE6(nn.Module):
         self._warm_started = True
         return {"checkpoint": str(checkpoint), "matched_e1": True,
                 "new_auxiliary_head_keys": loaded.missing_keys}
+
+    def _check_e1_schema(self, spec: dict | None, checkpoint) -> None:
+        """Refuse an E1 checkpoint whose encoders would receive other channels. Matching tensor shapes are not enough:
+        two groups of equal size in another order, or one channel replaced by another, load without any error."""
+        if not spec:
+            raise RuntimeError(f"{checkpoint}: no spec stored with the E1 model; its channel order cannot be verified")
+        groups = {k: list(v) for k, v in (spec.get("gsn_groups") or spec.get("groups") or {}).items() if k != "context"}
+        ordered = list(groups.values())
+        want = [self._group_names["terrain"], self._group_names["potential"]]
+        problems = []
+        if ordered != want:
+            problems.append(f"encoder groups {list(groups)} with {[len(g) for g in ordered]} channels differ from E6 "
+                            f"terrain / potential ({[len(g) for g in want]}) or their order")
+        if spec.get("model") not in ("geostructurenet", None):
+            problems.append(f"model {spec.get('model')} is not a GeoStructureNet")
+        if (spec.get("gsn_groups") or {}).get("context"):
+            problems.append("E1 checkpoint has a context branch; E6 baseline has none")
+        enc, dec, lr = self._widths
+        if int(spec.get("enc_width", enc)) != enc or int(spec.get("dec_width", dec)) != dec:
+            problems.append(f"widths {spec.get('enc_width')}/{spec.get('dec_width')} != {enc}/{dec}")
+        if str(spec.get("gsn_long_range", lr)) != lr or str(spec.get("gsn_fusion", "gated")) != "gated":
+            problems.append(f"fusion {spec.get('gsn_fusion')} / long_range {spec.get('gsn_long_range')} != gated / {lr}")
+        if problems:
+            raise RuntimeError(f"E1 warm start refused ({checkpoint}): " + "; ".join(problems))
 
     def freeze_baseline(self):
         self._frozen = True

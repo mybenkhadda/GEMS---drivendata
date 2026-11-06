@@ -422,7 +422,7 @@ def merge_coarse_parts(parts: list, coarse_res_m: float, out_path, crs: str) -> 
 
         atomic_save(out_path, writer)
     finally:
-        mm = None                                 # closes the memmap before its file goes
+        mm = None                                 # noqa: F841 - closes the memmap before its file goes
         tmp_arr.unlink(missing_ok=True)
     return out_path
 

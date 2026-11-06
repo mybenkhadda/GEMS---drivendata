@@ -54,9 +54,23 @@ def prepare_stack5(ctx, spec, rd: RunDir | None = None):
     if spec.model == "geostructurenet_e6":
         # Normalisation would alter 0..1 coverage and break the exact masked gate.
         # Restore the original coverage band after normalising other features.
+        # normalise_stack writes 0 (= the robust median) wherever a feature is NaN; a cell whose DEM features are
+        # missing (tile-edge guard, partial tile) would then enter the DEM encoder as a plausible measurement.
+        # Such cells are therefore NOT covered: the gate gives them weight 0 and the baseline prediction.
         j = spec.channels.index("dem:dem_coverage")
         raw = np.asarray(ctx.store.get("dem:dem_coverage"), dtype=np.float32)
-        stack[j] = np.clip(np.nan_to_num(raw, nan=0, posinf=0, neginf=0), 0, 1).astype(np.float16)
+        cov = np.clip(np.nan_to_num(raw, nan=0, posinf=0, neginf=0), 0, 1)
+        dem_names = list((spec.gsn_groups or {}).get("dem") or [])
+        if not dem_names:
+            raise ValueError("E6 spec has no 'dem' group")
+        finite = np.ones(cov.shape, bool)
+        for n in dem_names:
+            finite &= np.isfinite(np.asarray(ctx.store.get(n), dtype=np.float32))
+        stack[j] = np.where(finite & ctx.data.valid, cov, 0.0).astype(np.float16)
+        stats = {**stats, "e6_coverage": {"covered_px": int((stack[j] > 0).sum()),
+                                          "raw_covered_px": int((cov > 0).sum()),
+                                          "removed_missing_dem_px": int(((cov > 0) & ~finite).sum()),
+                                          "rule": "coverage 0 wherever any DEM feature is not finite"}}
     if rd is not None:
         rd.save_json({"channels": spec.channels, **stats}, "normalisation", sub="checkpoints")
     return stack

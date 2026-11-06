@@ -76,6 +76,7 @@ def train5(spec, gstack, gaux, aux_names: list[str], allowed, positives, valid, 
 
     cnn3._seed_all(spec.seed, spec.cudnn_benchmark and device.type == "cuda")
     model = build_model5(spec)
+    warm_info = None
     if spec.model == "geostructurenet_e6":
         from pathlib import Path
         # Each fold may only warm start from its OWN E1 fold checkpoint.
@@ -83,9 +84,11 @@ def train5(spec, gstack, gaux, aux_names: list[str], allowed, positives, valid, 
         # never leak a CV model trained on the withheld discovery systems.
         warm = Path(spec.e6_warm_dir) / f"{ckpt.unit}_model.pt" if (ckpt and spec.e6_warm_dir) else None
         if warm is not None and warm.is_file():
-            model.warm_start(warm, device="cpu")
-            print(f"{log_prefix} E6 warm start: {warm.name} (fold/split isolated)")
+            warm_info = model.warm_start(warm, device="cpu")       # refuses a mismatched E1 schema / group order
+            print(f"{log_prefix} E6 warm start: {warm.name} (fold/split isolated; baseline "
+                  f"{'fine-tuned' if spec.e6_finetune_baseline else 'frozen: exact E1 parity without DEM'})")
         else:
+            warm_info = {"checkpoint": None, "matched_e1": False}
             print(f"{log_prefix} E6 baseline training from scratch (no isolated checkpoint)")
     if pretrained_path and spec.model == "geounet":
         from ..geological_encoders import load_encoder_weights
@@ -120,10 +123,15 @@ def train5(spec, gstack, gaux, aux_names: list[str], allowed, positives, valid, 
     it, iw = aux_names.index("target"), aux_names.index("weight")
 
     st = {"epoch": 0, "best": -1.0, "best_ep": 0, "best_state": None, "stale": 0, "hist": [],
-          "batch_size": spec.batch_size, "grad_accum": max(int(spec.grad_accum), 1), "oom_events": 0}
+          "batch_size": spec.batch_size, "grad_accum": max(int(spec.grad_accum), 1), "oom_events": 0,
+          "e6_warm": bool(getattr(model, "_warm_started", False))}
     if ckpt is not None:
         s = ckpt.latest()
         if s is not None:
+            if spec.model == "geostructurenet_e6" and "e6_warm" in s and bool(s["e6_warm"]) != st["e6_warm"]:
+                raise RuntimeError(f"{log_prefix} resume state was {'warm' if s['e6_warm'] else 'cold'}-started but "
+                                   f"the E1 checkpoint is now {'present' if st['e6_warm'] else 'absent'}: restore "
+                                   f"{spec.e6_warm_dir} as it was, or delete this unit's resume files")
             model.load_state_dict(s["model"])
             opt.load_state_dict(s["optimizer"])
             sched.load_state_dict(s["scheduler"])
@@ -146,7 +154,8 @@ def train5(spec, gstack, gaux, aux_names: list[str], allowed, positives, valid, 
         torch.cuda.reset_peak_memory_stats()
     for ep in range(st["epoch"], epochs):
         if spec.model == "geostructurenet_e6":
-            frozen = model._warm_started and ep < spec.e6_freeze_epochs
+            # warm-started baseline: frozen for the whole unit unless fine-tuning is explicitly requested
+            frozen = model._warm_started and (not spec.e6_finetune_baseline or ep < spec.e6_freeze_epochs)
             if frozen:
                 model.freeze_baseline()
             else:
@@ -247,7 +256,8 @@ def train5(spec, gstack, gaux, aux_names: list[str], allowed, positives, valid, 
     if ckpt is not None:
         ckpt.save_final({"state_dict": model.state_dict(), "spec": asdict(spec), "best_inner": st["best"],
                          "best_epoch": best_ep, "n_params": count_params(model), "epochs_run": len(st["hist"]),
-                         "run_batch_size": st["batch_size"], "run_grad_accum": st["grad_accum"]})
+                         "run_batch_size": st["batch_size"], "run_grad_accum": st["grad_accum"],
+                         "e6_warm_start": warm_info})
         ckpt.clear_resume()
     return model, pd.DataFrame(st["hist"]), best_ep
 
