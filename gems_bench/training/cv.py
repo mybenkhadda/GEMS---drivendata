@@ -51,6 +51,12 @@ def ensure_channels(ctx, spec) -> None:
 def prepare_stack5(ctx, spec, rd: RunDir | None = None):
     ensure_channels(ctx, spec)
     stack, stats = cnn3.prepare_stack(spec, ctx)
+    if spec.model == "geostructurenet_e6":
+        # Normalisation would alter 0..1 coverage and break the exact masked gate.
+        # Restore the original coverage band after normalising other features.
+        j = spec.channels.index("dem:dem_coverage")
+        raw = np.asarray(ctx.store.get("dem:dem_coverage"), dtype=np.float32)
+        stack[j] = np.clip(np.nan_to_num(raw, nan=0, posinf=0, neginf=0), 0, 1).astype(np.float16)
     if rd is not None:
         rd.save_json({"channels": spec.channels, **stats}, "normalisation", sub="checkpoints")
     return stack
