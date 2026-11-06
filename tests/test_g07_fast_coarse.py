@@ -28,7 +28,7 @@ def test_fast_features_do_not_create_fault_edges_from_nodata():
     for name, a in f.items():
         assert np.isnan(a[127, 127]), name
         assert np.isnan(a[119, 127]), name  # guard the gap boundary
-        assert np.isfinite(a[30, 30]), name
+        assert np.isfinite(a[60, 60]), name
 
 
 def test_soft_target_uses_only_training_visible_fault_labels():
