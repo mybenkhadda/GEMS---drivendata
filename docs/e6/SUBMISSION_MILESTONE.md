@@ -1,148 +1,117 @@
-# E6 deadline milestone — production submission first
+# E6 Production — fully connected GPU training to NEW GEMS submission
 
-Status: code-authored only. No Colab training, unit tests, synthetic tests,
-model inference, DEM extraction, or uploads were performed while preparing
-these changes.
+**Implemented** on \`e6-submission-fasttrack\`; the old W2 champion fallback
+was REMOVED. This milestone writes a NEW E6 prediction GeoTIFF from
+trained three-way GeoStructureNet models.
 
-## 1. Today: a real submission candidate
+**Run:** \`notebooks/colab/GEMS_E6_SUBMISSION_MILESTONE.ipynb\`
 
-Open the dedicated notebook:
-\`notebooks/colab/GEMS_E6_SUBMISSION_MILESTONE.ipynb\`
+## Execution order, single pipeline
 
-Configuration defaults:
-
-\`\`\`python
-PREPARE_SUBMISSION_TODAY = True
-TRAIN_E6 = False
-RUN_TESTS = False
-CREATE_MIRRORS = False
-AUTO_UPLOAD = False
-DOWNLOAD_TIF_TO_BROWSER = True
-\`\`\`
-
-The notebook mounts Drive, checks out only source code from the
-\`e6-submission-fasttrack\` branch, then **reuses the frozen W2 champion**:
+1. Mount Google Drive; clone pinned GitHub branch into /content/GEMS_E6.
+2. Stage only required raw numerical features/labels, folds/splits and EDA
+   metadata. Do NOT stage the whole historical 7GB feature cache.
+3. \`Experiment.from_yaml(configs/experiments/e6_masked_threeway_full.yaml)\`;
+   \`EXP.prepare()\`. This creates an immutable cache ID from existing
+   10m coarse-part GeoTIFFs, builds seven compact 100m E6 feature channels
+   and registers them with Phase5FeatureStore. A separate 0–1
+   \`dem:dem_coverage\` mask stays unnormalised and never enters an encoder.
+   Existing field and terrain features are lazily loaded from their caches.
+4. \`EXP.train()\`: **actual** 3-fold geographic CV and three withheld-fault
+   discovery fits, using the Phase5 CheckpointManager, nnPU + 300m
+   soft-Tversky + auxiliary proximity/orientation losses, BF16/FP16 GPU,
+   AMP/gradient accumulation, saved per-epoch checkpoint and per-unit
+   prediction. Resuming skips completed folds and reopens interrupted units.
+5. \`EXP.evaluate()\`: DTI for E6 only, geographic and withheld-system
+   with pooled TP/FP/FN, saved as \`metrics/e6_dti.csv\`. No R&D comparisons.
+6. \`EXP.export()\`: fold-average trained E6 predictions over the whole
+   GeoDAWN valid footprint, saving each \`e6_full_fold<k>.tif\` to reuse
+   after a disconnect. One predeclared top 1% eligible-cell selection
+   (no threshold search) is applied, validated against the actual
+   competition template, and atomically exported as:
 
 \`\`\`text
-GEMS_2/
-  outputs/leaderboard_focus/submission_factory/submissions/
-    submission_w2_champion_0a8692b2ab.tif
-    submission_w2_champion_0a8692b2ab.json
-    submission_w2_champion_0a8692b2ab_validation.json
-    submission_sha256.txt
+GEMS_2/experiments/e6_masked_threeway_full__<config_hash>/
+  submissions/submission_e6_geostructurenet.tif
+  submissions/submission_e6_geostructurenet.json
+  reports/e6_submission_manifest.json
 \`\`\`
 
-The independently recorded frozen SHA256 is
-\`c634d321060f702720f37c82b5c692dcb84030d01af0f23ec130473273e3019b\`.
+This is a **new E6 model output**, not the prior W2 score map.
+No automatic DrivenData upload; only the user can upload the finished TIFF.
 
-**No TIFF is copied on Drive.** Required integrity validation consists of:
-matching the frozen SHA256, checking the previously recorded hard validation
-checks (all must be true), a blockwise GeoTIFF readback for EPSG:32611, one
-float32 100 m band, finite range [0,1], and 24,322 positive pixels.
-These are mandatory artifact validity checks, NOT a model test suite.
+## Actual E6 architecture
 
-One output folder is used:
-\`GEMS_2/outputs/e6_submission_milestone/\`
+Source: \`gems_bench/models/geostructurenet_e6.py\`.
 
-Small persisted files:
-- \`ready_for_manual_upload.json\`
-- \`submission_inventory.csv\`
-- \`e6_readiness.json\`
+- Uses the current \`GeoStructureNet\` class with two original
+  terrain/subsurface Encoders, every E1 gated fuse and decoder; optional
+  dilated/context branch remains supported. Full pretrained E1
+  checkpoint loading uses the **matching CV fold only**. The original E1
+  fold0 and fold1 checkpoints are already saved; E1 fold2 is unavailable.
+  Fold2 and discovery runs consequently train the baseline from scratch:
+  **no leak from another held-out fold or discovery split**.
+- Adds a lightweight third Encoder (width=16), with one
+  \`MaskedThreeWayGate\` at each of the five levels. Gating uses
+  \`softmax([old terrain logit, old field logit, dem_logit + log(m)])\`,
+  setting DEM logit to negative infinity when \`m == 0\`.
+- The mask is not a learnable prediction input. It controls only
+  availability, and at exactly missing DEM pixels an explicit final
+  \`torch.where\` returns the original 2-way decoder's logits.
+  This eliminates decoder cross-boundary contamination on uncovered
+  pixels. DEM dropout=30% is applied per training patch only.
+- E1 warm-start strict load allows *only* the new E6 auxiliary head
+  parameters to initialize anew; other unexpected/missing backbone
+  parameters fail. Warm stages freeze the base for two epochs, then
+  fine-tune base at one-fifth the DEM adapter learning rate.
+- The nnPU positive prior is currently 0.01. The Tversky term
+  uses 0.2 FP / 0.8 FN and a training-only soft kernel from mapped
+  *visible* faults within 300m. Proximity and orientation losses
+  are training-time auxiliary heads only. At inference only seg
+  probabilities are used.
+- Exact baselines' two-branch architecture is retained outside DEM
+  support, although base weights are allowed to fine-tune after warm-up
+  (so they need not numerically equal the historical E1 weights).
 
-The notebook can download the original TIFF to the browser. Upload it
-**manually** on DrivenData; no connector/code makes a competition submission.
-The previously recorded discovery DTI of this W2 champion is a proxy metric,
-not a claim about the current leaderboard.
+## DEM resolution optimization and temporary caching
 
-## 2. E6 masked three-way architecture: implemented, not trained
+The already saved G07 feasibility pilot generated roughly 10
+**10 m coarse-part** DEM rasters. Instead of opening hundreds of 1m
+GeoTIFFs or processing 2m/100 windows for every tile, E6 computes
+slope, slope-break, curvature, roughness, 60m directional coherence,
+four-azimuth hillshade range and multiscale DoG at 10m on those
+completed parts. It explicitly masks small-footprint edge support,
+then averages into the 100m competition grid.
 
-File: \`gems_bench/models/geostructurenet_e6.py\`
+- \`outputs/e6_pipeline/cache/<input_hash>/tiles/\`: each completed
+  100m feature tile, with JSON and retry-safe reuse.
+- \`outputs/e6_pipeline/cache/<input_hash>/dem_features_100m.tif\`:
+  cached, tile-mosaicked feature raster. Source originals are
+  **never mirrored or overwritten**.
+- \`outputs/e6_pipeline/features/<input_hash>/\`: one .npy channel
+  cache; only the exact E6 channels are staged to Colab.
+- \`experiments/<e6_id>/checkpoints/\`: actual fold/split resume
+  checkpoints; \`predictions/\`: all fold, split and full-region scores.
+- \`metrics/e6_dti.csv\`: DTI-only result, saved for continuation.
 
-Actual classes reused from the repository:
-- \`GeoStructureNet\` from \`gems_bench/models/geostructurenet.py\`
-- \`Encoder\` / \`GatedFuse\` blocks from \`gems_bench/geological_encoders.py\`
-- existing baseline decoder, score/dist/orientation heads, context, and
-  optional dilated long-range branch.
+This approach uses only the coverage of cached 10m parts, **not**
+the full 37.9% high-resolution DEM footprint. That limits the maximum
+possible DEM contribution until more 10m caches exist, but it avoids
+another multi-hour native-resolution DEM pilot. The experiment still
+makes full-footprint predictions because its base terrain/field
+branches cover the original numerical dataset everywhere.
 
-At every encoder level, E6 adds one smaller DEM encoder and one
-\`MaskedThreeWayGate\`:
-- Original terrain/field logits and projected features remain unchanged.
-- DEM score uses the learned logit plus log(coverage), with exact minus
-  infinity where coverage=0.
-- Softmax is over terrain/potential/DEM.
-- Model-wide DEM dropout is 30% *during training only*.
-- The final output uses a hard uncovered-pixel fallback to the original
-  two-branch decoder logits. This is necessary because convolution kernels
-  can otherwise leak DEM information into adjacent uncovered pixels.
-- Loading the E1 checkpoint uses a strict state_dict match; incorrect
-  checkpoints are not silently tolerated.
-- The first-stage trainable parameters are the DEM encoder and gates only.
+## Boundary and claims
 
-**No evidence of E6 improvement is claimed.** The module is not yet
-integrated into the old P5 trainer, whose \`_forward(model, x, ctx)\` does
-not accept the separate DEM raster or coverage mask. The optional E6
-training flow is consequently **not enabled** in this submission milestone.
-
-Also, the saved E1 manifest examined on 2026-11-06 has only completed
-cv_fold0 and cv_fold1. cv_fold2 is missing, so there is no complete
-three-fold warm-start for E6. E6 may not be promoted until the missing
-checkpoint, spatially isolated DEM datasets and full validation exist.
-
-## 3. E6 inputs and efficient data choices
-
-The supplied E6 design is retained as the *next* research route, but
-does not block the current frozen W2 submission.
-
-- Terrain branch: existing raw/100 m profile channels and pretrained
-  E1 encoder unchanged.
-- Potential field: **reuse** G06 magnetic/gravity derivatives when already
-  present; avoid FFT duplication until the registry identifies missing
-  families. Any new FFT derivatives must use padding/edge taper and robust
-  quantile normalization.
-- DEM branch: prefer the cached 10 m \`fast_coarse\` G07 features as the
-  initial low-compute feature bank. True 2 m summaries are deferred because
-  observed processing of a single 2 m tile took about 50 minutes. The
-  existing G07 fast bank supplies slope, curvature, scarp proxy,
-  multiazimuth hillshade, coherence, roughness and DoG.
-- Input alignment: keep DEM data and coverage *separate* from the base
-  terrain/field tensor. The coverage mask is a gate constraint, never a
-  geologic evidence channel.
-- Treat missing DEM as zero coverage, not zero elevation or a known-negative
-  label.
-- No training against withheld V1 fault systems or V3 geographic targets.
-- Do not choose an E6 candidate using held-out DTI then claim that same
-  score independent.
-
-## 4. E6 training roadmap after today (not implemented as a runnable stage)
-
-1. Complete the E1 third fold or choose another complete, strict
-   two-branch gated reference checkpoint family.
-2. Build the cached 100 m DEM feature tensor aligned to each baseline
-   patch and register reproducible robust-normalization statistics.
-3. Add \`dem\` and \`dem_mask\` support to the P5 batched trainer and
-   inference loader. Use modality dropout and strict training-visible
-   masks; check orientation-aware augmentation transforms.
-4. Warm-start E6, freeze the base path, train only the DEM adapter/gates,
-   and save resumable per-fold checkpoints (do not bulk-mirror datasets).
-   Later unfreezing the base changes the original baseline and requires
-   a separate frozen parity reference or explicit revalidation.
-5. Score with full canonical 300 m DTI across V1/V3, covered and
-   uncovered regions, and fault-system recall. Require full-fold
-   coverage. Promote only with independently validated incremental gain.
-6. Only after promotion, produce E6 full-region predictions and
-   independently validated GeoTIFFs.
-
-No naive masked 3-way concatenation, no DEM-coverage-as-evidence input,
-no unverified claims from local AUC, no separate E6 submission until
-all gates pass.
-
-## 5. What is and is not meant by 'full pipeline' today
-
-**Complete today:** cached model artifact -> checksum and strict format
-validation -> durable readiness manifest -> browser download -> manual
-competition upload.
-
-**Not yet complete:** E6 custom model training, three-fold validation,
-full-region E6 inference, or E6 leaderboard claim. Those are intentionally
-blocked to prevent missing DEM / incomplete warm-start artifacts from
-making the deadline submission fail.
+- No unit tests, synthetic experiments, ablation ladder or research
+  comparisons are performed in the notebook.
+- No original USGS raster is downloaded, modified or mirrored.
+- No old W2 submission is copied or substituted.
+- All training and features remain resumable and persisted to Drive.
+- The implementation is authored and checked by GitHub readback only;
+  it has **not yet been run in Colab**. Runtime completion and new
+  leaderboard DTI are unmeasured. The code will fail clearly if the
+  saved 10m coarse-part inputs or expected raw data are absent.
+- External DEM sources are allowed by the GEMS competition provided
+  their license permits use and sharing with the sponsor; preserve
+  the original USGS source manifests and processing code.
