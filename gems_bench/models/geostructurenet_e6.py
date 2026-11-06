@@ -1,107 +1,137 @@
-"""Warm-started E6 masked 3-way extension of the actual GEMS GeoStructureNet.
+"""E6 masked three-encoder GeoStructureNet.
 
-With missing DEM, predictions are pixelwise identical to the baseline even
-when neighboring pixels have coverage. DEM mask enters gates only.
+Runs under the existing Phase-5 trainer/inference API: forward(x, ctx=None).
+The last input channels are 100 m DEM summaries and a raw coverage mask.
+The original terrain/potential channel indices and two-way gate remain intact.
+At missing DEM pixels, the output is exactly the baseline output.
 """
 from __future__ import annotations
+
 import torch
 from torch import nn
 import torch.nn.functional as F
+
 from ..geological_encoders import Encoder
+from .geostructurenet import GeoStructureNet
 
 
 class MaskedThreeWayGate(nn.Module):
-    def __init__(self, n_dem, out_channels):
+    def __init__(self, in_dem: int, out_c: int, initial_bias=-2.0):
         super().__init__()
-        self.project = nn.Sequential(nn.Conv2d(n_dem, out_channels, 1, bias=False),
-                                     nn.BatchNorm2d(out_channels))
-        self.logit = nn.Conv2d(n_dem, 1, 1)
-        nn.init.zeros_(self.logit.weight)
-        nn.init.constant_(self.logit.bias, -2.0)
+        self.proj = nn.Sequential(nn.Conv2d(in_dem, out_c, 1, bias=False),
+                                  nn.BatchNorm2d(out_c))
+        self.score_dem = nn.Conv2d(in_dem, 1, 1)
+        nn.init.zeros_(self.score_dem.weight)
+        nn.init.constant_(self.score_dem.bias, initial_bias)
         self.last_gate = None
 
-    def forward(self, terrain, field, dem, coverage, original):
-        scores2 = original.gate(torch.cat((terrain, field), dim=1))
-        m = F.interpolate(coverage.float(), size=scores2.shape[-2:], mode="area").clamp(0, 1)
-        log_dem = self.logit(dem).float() + torch.log(m.clamp_min(1e-12))
-        log_dem = log_dem.masked_fill(m == 0, float("-inf"))
-        weights = torch.softmax(torch.cat((scores2.float(), log_dem), dim=1), dim=1)
+    def forward(self, terrain, potential, dem, coverage, original):
+        scores2 = original.gate(torch.cat((terrain, potential), dim=1))
+        m = F.interpolate(coverage.float(), size=scores2.shape[-2:], mode="area").clamp_(0, 1)
+        dem_logit = self.score_dem(dem).float() + m.clamp_min(1e-12).log()
+        dem_logit = dem_logit.masked_fill(m <= 0, float("-inf"))
+        weights = torch.softmax(torch.cat((scores2.float(), dem_logit), dim=1), dim=1)
         if not self.training:
             self.last_gate = weights.detach()
-        terrain_p = original.proj[0](terrain)
-        field_p = original.proj[1](field)
-        dem_p = self.project(dem)
-        return F.relu((weights[:, 0:1] * terrain_p.float() +
-                       weights[:, 1:2] * field_p.float() +
-                       weights[:, 2:3] * dem_p.float()).to(terrain_p.dtype))
+        ft = original.proj[0](terrain)
+        fp = original.proj[1](potential)
+        fd = self.proj(dem)
+        return F.relu((weights[:, :1] * ft.float() +
+                       weights[:, 1:2] * fp.float() +
+                       weights[:, 2:3] * fd.float()).to(ft.dtype))
 
 
 class GeoStructureNetE6(nn.Module):
-    """Three-way DEM specialist with an unchanged E1/B0 two-way baseline."""
+    """E6 accepts a full P5 input stack: original channels, DEM features, coverage."""
 
-    def __init__(self, baseline, n_dem_channels, dem_width=16, modality_dropout=.30):
+    def __init__(self, channels: list[str], groups: dict[str, list[str]], *,
+                 enc_width=24, dec_width=32, dem_width=16, long_range="none",
+                 aux_dist=True, aux_orient=True, dem_dropout=0.30,
+                 freeze_warm_epochs=3):
         super().__init__()
-        if getattr(baseline, "fusion", None) != "gated" or len(baseline.encoders) != 2:
-            raise ValueError("E6 requires a two-branch GeoStructureNet with gated fusion")
-        if not 0 <= modality_dropout < 1:
-            raise ValueError("modality_dropout must be in [0,1)")
-        if int(n_dem_channels) < 1:
-            raise ValueError("n_dem_channels must be positive")
-        self.baseline = baseline
-        self.n_dem_channels = int(n_dem_channels)
-        self.modality_dropout = float(modality_dropout)
-        self.dem_encoder = Encoder(n_dem_channels, dem_width, depth=len(baseline.fuse))
-        self.dem_fuse = nn.ModuleList([
-            MaskedThreeWayGate(self.dem_encoder.widths[i], baseline.head.in_channels * 2 ** i)
-            for i in range(len(baseline.fuse))
-        ])
+        if not 0 <= dem_dropout < 1:
+            raise ValueError("Invalid E6 DEM modality dropout")
+        if len(set(channels)) != len(channels):
+            raise ValueError("Duplicate E6 stack channels")
+        terrain = list(groups.get("terrain") or [])
+        potential = list(groups.get("potential") or groups.get("subsurface") or [])
+        dem = list(groups.get("dem") or [])
+        mask_name = "dem:dem_coverage"
+        if not terrain or not potential or not dem or mask_name not in channels:
+            raise ValueError("E6 needs terrain, potential, dem and dem:dem_coverage")
+        if any(n not in channels for n in [*terrain, *potential, *dem]):
+            raise ValueError("E6 group includes unregistered channel")
+        if mask_name in [*terrain, *potential, *dem]:
+            raise ValueError("Coverage cannot enter a prediction encoder")
+        if set(terrain) & set(potential) or set(terrain) & set(dem) or set(potential) & set(dem):
+            raise ValueError("E6 modality groups must be disjoint")
+        base_names = list(dict.fromkeys([*terrain, *potential]))
+        self.register_buffer("base_idx", torch.tensor([channels.index(n) for n in base_names], dtype=torch.long),
+                             persistent=False)
+        self.register_buffer("dem_idx", torch.tensor([channels.index(n) for n in dem], dtype=torch.long),
+                             persistent=False)
+        self.coverage_idx = channels.index(mask_name)
+        group_idx = [[base_names.index(n) for n in terrain],
+                     [base_names.index(n) for n in potential]]
+        self.baseline = GeoStructureNet(group_idx, len(base_names), enc_width=enc_width,
+                                        dec_width=dec_width, fusion="gated",
+                                        long_range=long_range, aux_dist=bool(aux_dist),
+                                        aux_orient=bool(aux_orient))
+        depth = len(self.baseline.fuse)
+        self.dem_encoder = Encoder(len(dem), dem_width, depth=depth)
+        self.dem_fuse = nn.ModuleList(
+            [MaskedThreeWayGate(self.dem_encoder.widths[i], dec_width * 2**i)
+             for i in range(depth)])
+        self.modality_dropout = float(dem_dropout)
+        self.freeze_warm_epochs = int(freeze_warm_epochs)
+        self._frozen = False
+        self._warm_started = False
 
-    def warm_start(self, path, device="cpu"):
-        state = torch.load(path, map_location=device, weights_only=False)
-        weights = state.get("model", state.get("model_state_dict", state))
-        if not isinstance(weights, dict):
-            raise ValueError("Checkpoint missing a model state_dict")
-        if any(k.startswith("module.") for k in weights):
-            weights = {k.removeprefix("module."): v for k, v in weights.items()}
-        self.baseline.load_state_dict(weights, strict=True)
-        return {"source_checkpoint": str(path), "strict_load": True}
+    def warm_start(self, checkpoint, device="cpu"):
+        """Load genuine E1 fold checkpoint, not a different fold's model."""
+        ck = torch.load(checkpoint, map_location=device, weights_only=False)
+        state = ck.get("state_dict", ck.get("model", ck.get("model_state_dict", ck)))
+        if any(k.startswith("module.") for k in state):
+            state = {k.removeprefix("module."): v for k, v in state.items()}
+        self.baseline.load_state_dict(state, strict=True)
+        self._warm_started = True
+        return {"checkpoint": str(checkpoint), "strict": True}
 
     def freeze_baseline(self):
+        self._frozen = True
         for p in self.baseline.parameters():
             p.requires_grad_(False)
-        for p in self.dem_encoder.parameters():
-            p.requires_grad_(True)
-        for p in self.dem_fuse.parameters():
-            p.requires_grad_(True)
         self.baseline.eval()
 
     def unfreeze_all(self):
+        self._frozen = False
         for p in self.parameters():
             p.requires_grad_(True)
 
     def train(self, mode=True):
         super().train(mode)
-        if mode and not any(p.requires_grad for p in self.baseline.parameters()):
+        if mode and self._frozen:
             self.baseline.eval()
         return self
 
     def encoder_parameters(self):
-        return list(self.dem_encoder.parameters())
+        return [p for e in self.baseline.encoders for p in e.parameters()] + \
+               list(self.dem_encoder.parameters())
 
     def gates(self):
-        return [g.last_gate for g in self.dem_fuse]
+        return [f.last_gate for f in self.dem_fuse]
 
     def context_weight(self):
         return self.baseline.context_weight()
 
-    def _decode(self, levels, ctx):
-        feats = list(levels)
+    def _decode(self, features, ctx):
         b = self.baseline
+        feats = list(features)
         if b.long_range is not None:
             feats[-1] = b.long_range(feats[-1])
         if b.context is not None:
             if ctx is None:
-                raise ValueError("Baseline uses E5 context; pass the original context tensor")
+                raise ValueError("E6 context tensor missing")
             z = b.context(ctx.index_select(1, b.ctx_idx), feats[-1].shape[-2:])
             feats[-1] = feats[-1] + torch.sigmoid(b.context_gate) * z
         y = b.decoder(feats)
@@ -112,32 +142,28 @@ class GeoStructureNetE6(nn.Module):
             out["orient"] = b.orient_head(y)
         return out
 
-    def forward(self, x, ctx=None, dem=None, dem_mask=None):
-        b = self.baseline
-        branches = [enc(x.index_select(1, getattr(b, f"idx{i}")))
-                    for i, enc in enumerate(b.encoders)]
-        original = [fuser([branches[0][i], branches[1][i]])
-                    for i, fuser in enumerate(b.fuse)]
-        base_output = self._decode(original, ctx)
-        if dem is None or dem_mask is None:
-            return base_output
-        if dem.ndim != 4 or dem.shape[1] != self.n_dem_channels or dem.shape[0] != x.shape[0]:
-            raise ValueError("DEM shape must be B x n_dem_channels x H x W")
-        if dem_mask.shape != (x.shape[0], 1, *x.shape[-2:]) or dem.shape[-2:] != x.shape[-2:]:
-            raise ValueError("DEM coverage and data must match base 100 m patch size")
-        m = torch.nan_to_num(dem_mask, nan=0, posinf=0, neginf=0).clamp(0, 1).to(x.dtype)
+    def forward(self, x, ctx=None):
+        if x.shape[1] <= self.coverage_idx:
+            raise ValueError("E6 stack missing DEM coverage channel")
+        base = x.index_select(1, self.base_idx)
+        m = torch.nan_to_num(x[:, self.coverage_idx:self.coverage_idx+1], nan=0,
+                             posinf=0, neginf=0).clamp(0, 1)
         if self.training and self.modality_dropout:
-            dropped = (torch.rand((x.shape[0], 1, 1, 1), device=x.device) < self.modality_dropout)
-            m = m * (~dropped).to(m.dtype)
+            keep = (torch.rand((len(x), 1, 1, 1), device=x.device) >= self.modality_dropout)
+            m = m * keep.to(m.dtype)
+        # Only a gate/availability constraint; NEVER passed to an encoder.
+        branch = [enc(base.index_select(1, getattr(self.baseline, f"idx{i}")))
+                  for i, enc in enumerate(self.baseline.encoders)]
+        original = [f([branch[0][i], branch[1][i]]) for i, f in enumerate(self.baseline.fuse)]
+        baseline_out = self._decode(original, ctx)
         if not torch.any(m > 0):
-            return base_output
-        dem_clean = torch.nan_to_num(dem, nan=0, posinf=0, neginf=0) * m
-        dem_feats = self.dem_encoder(dem_clean)
-        fusion = [gate(branches[0][i], branches[1][i], dem_feats[i], m, b.fuse[i])
-                  for i, gate in enumerate(self.dem_fuse)]
-        dem_output = self._decode(fusion, ctx)
-        # Decoder receptive fields cross tile/coverage borders. The final
-        # hard fallback enforces exact per-pixel baseline parity at m=0.
-        on_dem = m > 0
-        return {key: torch.where(on_dem, dem_output[key], base_output[key])
-                for key in base_output}
+            return baseline_out
+        dem = torch.nan_to_num(x.index_select(1, self.dem_idx), nan=0, posinf=0, neginf=0) * m
+        dem_parts = self.dem_encoder(dem)
+        fused = [gate(branch[0][i], branch[1][i], dem_parts[i], m, self.baseline.fuse[i])
+                 for i, gate in enumerate(self.dem_fuse)]
+        enhanced = self._decode(fused, ctx)
+        # Enforce pixelwise parity even where the fused decoder receptive field
+        # crosses a DEM boundary. No probability calibration at missing pixels.
+        on = m > 0
+        return {k: torch.where(on, enhanced[k], baseline_out[k]) for k in baseline_out}
