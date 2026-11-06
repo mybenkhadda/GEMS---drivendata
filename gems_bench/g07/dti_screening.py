@@ -85,6 +85,8 @@ def run_feature_dti(
     fracs: tuple[float, ...] = (0.005, 0.01, 0.02),
     fusion_weights: tuple[float, ...] = (0.15, 0.35),
     scenarios: tuple[str, ...] = ("V1", "V3"),
+    store=None,
+    output_subdir: str = "evaluation/dti_screening",
 ) -> dict:
     """Compare DEM vs W2 on identical local cells, and W2+DEM vs W2 full-region.
 
@@ -98,9 +100,11 @@ def run_feature_dti(
     if any(not (0 <= float(a) <= 1) for a in fusion_weights):
         raise ValueError("fusion_weights must be in [0,1]")
 
-    st = P.dem_store()
+    st = store if store is not None else P.dem_store()
     if st is None:
-        raise FileNotFoundError("DEM feature store missing: run DEM_FEATURES first")
+        raise FileNotFoundError("DEM feature store missing: use cached FAST_COARSE or run DEM_FEATURES first")
+    if not output_subdir.startswith("evaluation/dti_") or ".." in output_subdir:
+        raise ValueError("output_subdir must be a safe evaluation/dti_* relative directory")
     features = dict(FEATURE_DIRECTIONS if features is None else features)
     features = {f: d for f, d in features.items() if f in st.names}
     if not features:
@@ -235,7 +239,7 @@ def run_feature_dti(
         full_sum["delta_dti"] = full_sum.dti - full_sum.w2_dti
         full_sum["usable_for_promotion"] = False  # labels used post-hoc; fixed settings not nested-selected
         full_sum["protocol_note"] = "Original V1/V3 unit; post-hoc fixed-policy screening only."
-    out = "evaluation/dti_screening"
+    out = output_subdir
     for name, frame in [
         ("coverage.csv", coverage_df), ("feature_local_rows.csv", local),
         ("feature_local_summary.csv", local_sum), ("fusion_full_rows.csv", full),
