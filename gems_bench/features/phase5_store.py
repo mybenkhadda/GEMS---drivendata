@@ -25,7 +25,7 @@ from ..phase4_context import Phase4FeatureStore
 from . import _fname, profiles
 
 DEM_MOSAIC = "dem_features_100m.tif"
-DEM_UNSTANDARDIZED = ("coverage", "source_project", "n_tiles")
+DEM_UNSTANDARDIZED = ("coverage", "dem_coverage", "source_project", "n_tiles")
 
 
 def load_profile_specs(band_names: list[str], path: Path | None = None) -> list:
