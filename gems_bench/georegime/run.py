@@ -46,6 +46,41 @@ def _write_tif(path,array,profile,valid):
  os.replace(tmp,path)
  return path
 
+def _write_submission_masked(path,prob,profile,template_mask):
+ """Competition TIFF: float32 [0,1] stored EVERYWHERE, explicit internal valid-data mask.
+
+ The historical exporter stored NaNs outside the eligible pixels. Some
+ upload validators evaluate raw array range before honoring GDAL_NODATA;
+ an internal validity mask retains the official footprint without raw NaNs.
+ """
+ path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
+ clean=np.clip(np.nan_to_num(np.asarray(prob,np.float32),
+                              nan=0.,posinf=1.,neginf=0.),0.,1.)
+ mask=np.asarray(template_mask,bool)
+ if clean.shape!=mask.shape:raise ValueError("Submission value/mask shape mismatch")
+ clean[~mask]=0.
+ prof=profile.copy()
+ prof.update(driver="GTiff",count=1,dtype="float32",nodata=None,
+             tiled=True,blockxsize=256,blockysize=256,
+             compress="deflate",predictor=3)
+ tmp=path.with_name(path.stem+".partial.tif")
+ with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=True):
+  with rasterio.open(tmp,"w",**prof) as dst:
+   dst.write(clean,1)
+   dst.write_mask(mask.astype(np.uint8)*255)
+   dst.set_band_description(1,"georegime_fault_confidence")
+ with rasterio.open(tmp) as ds:
+  v=ds.read(1)
+  if (ds.count!=1 or ds.dtypes[0]!="float32"
+      or ds.transform!=prof["transform"] or ds.crs!=prof["crs"]
+      or not np.isfinite(v).all()
+      or not ((v>=0)&(v<=1)).all()
+      or not np.array_equal(ds.dataset_mask()>0,mask)):
+   raise RuntimeError(f"Submission readback/mask/range validation failed: {tmp}")
+ os.replace(tmp,path)
+ return path
+
+
 def _orient(positive):
  """Axial strike targets constructed from TRAIN-VISIBLE mapped labels only."""
  from skimage.morphology import skeletonize
@@ -368,16 +403,16 @@ class GeoRegimeExperiment:
   proposals=self.candidate_proposals(p)
   dest=self.run_root/"submissions"/"submission_georegime_v1.tif"
   eligible=self.bank.valid&self.bank.template_valid
-  _write_tif(dest,np.clip(np.nan_to_num(p,nan=0),0,1),self.bank.profile,eligible)
+  _write_submission_masked(dest,p,self.bank.profile,self.bank.template_valid)
   with rasterio.open(dest) as ds:
    output=ds.read(1)
    checks={"one_band":ds.count==1,"dtype":ds.dtypes[0]=="float32",
            "crs":ds.crs.to_epsg()==32611,
            "shape":ds.shape==self.bank.shape,
            "transform":ds.transform==self.bank.transform,
-           "finite_inside":bool(np.isfinite(output[eligible]).all()),
-           "nan_outside":bool(np.isnan(output[~eligible]).all()),
-           "range":bool(((output[eligible]>=0)&(output[eligible]<=1)).all()),
+           "finite_all":bool(np.isfinite(output).all()),
+           "mask_matches_template":bool(np.array_equal(ds.dataset_mask()>0,self.bank.template_valid)),
+           "range_all":bool(((output>=0)&(output<=1)).all()),
            "full_checkpoint":self._ckpt("full").is_file()}
   if not all(checks.values()):raise RuntimeError(f"Submission validation failed: {checks}")
   manifest={"status":"READY_FOR_MANUAL_UPLOAD","file":str(dest),"sha256":file_sha256(dest),
