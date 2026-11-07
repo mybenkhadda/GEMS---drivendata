@@ -142,16 +142,28 @@ class Bank:
   # supplies very long range context to the 25.6 km local encoder.
   raw=np.asarray(self.array[self.names.index("iso_grav_anom")],np.float32)
   ok=np.isfinite(raw)&self.valid
-  numer=np.where(ok,raw,0.0)
+  h,w=self.shape
+  # Reduce to 1 km BEFORE wide smoothing: sigma 5/15/30 pixels rather
+  # than 50/150/300 at 100 m. Weighted block aggregation preserves nodata.
+  fac=10
+  nh,nw=(h+fac-1)//fac,(w+fac-1)//fac
+  pad=((0,nh*fac-h),(0,nw*fac-w))
+  numerator=np.pad(np.where(ok,raw,0.0),pad,constant_values=0)
+  denominator=np.pad(ok.astype(np.float32),pad,constant_values=0)
+  coarse_n=numerator.reshape(nh,fac,nw,fac).sum(axis=(1,3))
+  coarse_d=denominator.reshape(nh,fac,nw,fac).sum(axis=(1,3))
   target=self.aux_local.with_name(self.aux_local.name+".partial")
   out=np.lib.format.open_memmap(target,mode="w+",dtype="float16",shape=(3,*self.shape))
-  for i,sigma in enumerate((50.,150.,300.)):
-   numerator=ndimage.gaussian_filter(numer,sigma,mode="nearest")
-   denominator=ndimage.gaussian_filter(ok.astype(np.float32),sigma,mode="nearest")
-   sm=np.divide(numerator,denominator,out=np.zeros_like(numerator),where=denominator>0.1)
+  for i,sigma in enumerate((5.,15.,30.)):
+   smooth_n=ndimage.gaussian_filter(coarse_n,sigma,mode="nearest")
+   smooth_d=ndimage.gaussian_filter(coarse_d,sigma,mode="nearest")
+   small=np.divide(smooth_n,smooth_d,out=np.zeros_like(smooth_n),where=smooth_d>1)
+   sm=ndimage.zoom(small,(h/nh,w/nw),order=1)
+   if sm.shape!=self.shape:
+    raise RuntimeError(f"Context upsampling produced {sm.shape}, expected {self.shape}")
    sm[~self.valid]=np.nan
    out[i]=sm.astype(np.float16);out.flush()
-   print(f"[gravity context] sigma={sigma*100/1000:g} km")
+   print(f"[gravity context] sigma={sigma:g} km, coarsened at 1 km")
   del out;os.replace(target,self.aux_local)
 
  def _ensure(self,drive,local,producer):
