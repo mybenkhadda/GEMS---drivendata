@@ -1,0 +1,189 @@
+# G11 multiresolution fault discovery (gems_bench/g11). Docs: docs/g11/.
+# Every path is an EXPECTED location; the audit (mode AUDIT) verifies it and records ABSENT sources.
+repository:
+  name: mybenkhadda/GEMS---drivendata
+  ref: main
+  checkout_candidates: [/content/GEMS, /content/GEMS---drivendata, /content/GEMS_G11]
+
+data_root: /content/drive/MyDrive/GEMS_2
+output_root: outputs/G11_MULTISCALE_FAULT_DISCOVERY      # relative to data_root
+scratch_root: /content/g11_scratch                         # local VM disk, never Drive
+
+source_artifacts:
+  search_roots: [data, outputs, GEMS_GEOLOGICAL_DATA_ATLAS_V1, GEMS_GEOREGIME_V1]
+  max_depth: 7
+  geodawn_raster: [data/raw/gems-geodawn-numerical-features.tif, data/raw/geodawn/gems-geodawn-numerical-features.tif,
+                   gems-geodawn-numerical-features.tif]
+  fault_raster: [data/raw/existing_faults.tif, data/raw/faults/existing_faults.tif, existing_faults.tif]
+  fault_vectors: ["data/raw/**/*fault*.gpkg", "data/raw/**/*fault*.shp", "data/raw/**/*fault*.geojson"]
+  template: [data/raw/example_submission.tif, data/raw/**/example_submission.tif,
+             GEMS_GEOLOGICAL_DATA_ATLAS_V1/00_raw_snapshot/official_template/example_submission.tif]
+  dem_dirs: [data/dem_1m, data/raw/dem_1m]
+  dem_report: data/dem_1m/fast_download_report.csv
+  # optional evidence: discovered by pattern; skipped (and recorded) when absent
+  optional_patterns:
+    g06_store: ["outputs/**/g06*/**/feature_registry*.parquet", "outputs/**/G06*/**/*.parquet"]
+    g07_arrays: ["outputs/G07*/**/*.npy", "outputs/G07*/*.npy", "outputs/**/*foldmasked*.npy"]   # placed via manifest.json
+    g07_prediction: ["outputs/G07*/**/*.tif", "outputs/G07*/*.tif", "outputs/**/g07*/**/*prediction*.tif"]
+    g09_dem: ["outputs/**/G09*/**/*.tif", "outputs/**/g09*/**/*.parquet"]
+    g10: ["outputs/G10_UNIFIED/**/*"]
+    m9: ["outputs/**/m9*/**/*.tif", "outputs/**/M9*/**/*.tif"]
+    p6: ["outputs/**/p6*/**/*.tif", "outputs/**/P6*/**/*.tif"]
+    georegime: ["GEMS_GEOREGIME_V1/runs/*/predictions/*_prediction.tif"]
+    atlas_features: ["GEMS_GEOLOGICAL_DATA_ATLAS_V1/03_features/feature_registry/feature_registry.parquet"]
+
+geophysical_grid:
+  expected_epsg: 32611
+  expected_res_m: 100.0
+  expected_shape: [3730, 3292]
+  expected_band_count: 19         # validated at ingestion (strict_integrity stops on a mismatch)
+  valid_min_band_share: 0.5
+  nodata_abs: 1.0e+30             # (YAML 1.1 needs the exponent sign, otherwise this is read as a string)
+
+dem:
+  native_res_range_m: [0.25, 3.0]
+  priority: [valid_fraction_desc, year_desc, resolution_asc, tile_id]   # deterministic overlap rule
+  window_cache_items: 32
+  seam_tolerance_m: 0.5           # elevation step across a source boundary flagged as a seam
+  aggregate_chunk_cells: 64       # 100 m cells per chunk side (6.4 km)
+  context_scales_m: [25, 50, 100, 250, 500]
+  stats_resolution_m: 2.0         # DEM work resolution for 100 m aggregation (1 m is read, averaged to 2 m)
+  max_window_mpix: 64.0           # refuse a single window above this many native pixels (memory guard)
+  allow_unknown_vertical: false   # tiles without a documented vertical unit are excluded (true = assume metres, flagged)
+
+faults:
+  min_label_value: 1
+  min_segment_length_m: 300.0
+  simplify_m: 50.0
+
+labels:
+  buffers_m: [100, 200, 500, 1000]
+  near_band_m: 300.0
+  training_target: Y_BUFFER_200M  # pixel / patch training target (labels are an incomplete map: PU weighting)
+  states: {OUTSIDE: 0, BACKGROUND: 1, NEAR: 2, FAULT: 3, EXCLUDED: 4}
+
+spatial_splits:
+  block_km: 20.0
+  fractions: {train: 0.55, validation: 0.15, stack: 0.15, test: 0.15}
+  embargo_candidates_m: [1000, 2000, 3000]
+  embargo_m: null                 # null -> max(receptive field, DEM halo, patch context, link radius, autocorr range)
+  autocorrelation_range_m: 2000.0
+  seed: 2026
+
+feature_engineering:
+  geophysics:
+    bands: {magnetic: rtp, gravity: iso_grav_anom, elevation: det_elev}
+    scales_m: [100, 200, 400, 800, 1600, 3200]
+    structure_rho_factor: 2.0
+    wavelet_bands_m: [[100, 400], [400, 1600], [1600, 6400]]
+    persistence_quantile: 0.9
+  terrain:
+    scales_m: [5, 10, 25, 50, 100, 250]
+    hillshade_azimuths: [315, 45, 135, 225]
+    hillshade_altitude: 30.0
+    min_scale_res_ratio: 2.0
+    edge_guard_sigma: 3.0
+  cross_fault:
+    offsets_m: [-150, -100, -60, -40, -20, -10, 10, 20, 40, 60, 100, 150]
+    spacing_m: 50.0
+    inner_m: 10.0
+    resolution_m: 1.0
+
+eda:
+  sample_block_px: 10
+  n_bootstrap: 500
+  bootstrap_block_km: 10.0
+  max_samples: 80000
+  redundancy_rho: 0.9
+  atlas_sites: 24                 # >= 20 geographically diverse review sites where coverage permits
+  atlas_half_km: 2.0
+
+sampling:
+  patch_px: 128
+  mix: {positive: 0.35, near: 0.15, background: 0.25, hard_geophysics: 0.1, hard_terrain: 0.1, disagreement: 0.05}
+  pixel_samples_per_split: 400000
+  patches_train: 4000             # patch centres sampled per epoch pool (train split)
+  patches_validation: 1500
+  balance_block_km: 10.0
+
+models:
+  xgb: {n_estimators: 600, max_depth: 6, learning_rate: 0.05, subsample: 0.8, colsample_bytree: 0.8,
+        tree_method: hist, pu_unlabeled_weight: 0.3}
+  segformer: {in_channels: null, dims: [32, 64, 160, 256], depths: [2, 2, 2, 2], heads: [1, 2, 5, 8],
+              decoder_dim: 128, drop_path: 0.1}
+  terrain_encoder: {channels: [16, 32, 64], embed_dim: 64, dem_res_m: 25.0, dem_px: 256}   # 12.8 km patch -> 512 px at 25 m, resized to 256
+  gated_fusion: {geo_dim: 128, dem_dim: 64, mode: gated,    # geo_only | dem_only | concat | gated | cross_attention
+                 mode_ablation: [geo_only, dem_only, concat]}   # extra E4 variants E4__<mode>
+  # models.segformer.pretrained_path: path of compatible G07 T1 weights -> extra E3__finetune (coverage reported)
+  segment_ranker: {objective: binary, n_estimators: 500, learning_rate: 0.03, num_leaves: 31}
+
+training:
+  epochs: 30
+  batch_size: 16
+  grad_accum: 2
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  clip_norm: 1.0
+  amp: true
+  patience: 6
+  scheduler: cosine
+  loss: weighted_bce            # weighted_bce | bce_dice | focal | bce_boundary
+  loss_ablation: [bce_dice, focal, bce_boundary]   # extra E3 variants E3__<loss>, chosen on validation ([] = none)
+  pos_weight: 5.0
+  selection_metric: val_pr_auc
+
+calibration:
+  methods: [none, platt, isotonic]
+  region: stack
+
+inference:
+  tile_px: 256
+  overlap_px: 64
+  batch_size: 8
+
+candidate_generation:
+  generators: [threshold, hysteresis, ridge_nms, skeleton]
+  threshold_quantile: 0.98
+  hysteresis_quantiles: [0.97, 0.995]
+  ridge_sigma_m: 150.0
+  min_length_m: 500.0
+  link_radius_m: 600.0
+  link_max_angle_deg: 30.0
+  dedup_overlap: 0.6
+  dedup_angle_deg: 20.0
+
+ranking:
+  length_budgets_km: [500, 1000, 2000, 4000]
+  label_overlap_m: 300.0
+
+evaluation:
+  pixel_tolerance_m: 300.0
+  area_fractions: [0.005, 0.01, 0.02, 0.05]
+  bootstrap_block_km: 20.0
+  n_bootstrap: 500
+
+official_submission:
+  format: "single-band float32 GeoTIFF on the official template grid, values in [0,1]"   # DrivenData problem description
+  evaluator_command: null       # path/command of an installed official evaluator; null -> UNAVAILABLE (never invented)
+  require_template: true
+  out_name: submission_g11.tif
+
+hardware:
+  device: auto
+  max_ram_gb: 12.0
+  workers: 2
+
+reproducibility:
+  seed: 2026
+  deterministic: true
+
+reporting:                         # set by the master notebook adapter (notebook_config.build_plan)
+  figures: true
+  html: true
+  save_intermediate: true
+  strict_integrity: true
+  failure_policy: STOP_REQUIRED_SKIP_OPTIONAL
+
+smoke:                             # LEVEL 2 real-data smoke test: geographic subset with faults AND DEM coverage
+  enabled: false
+  window_km: 30.0

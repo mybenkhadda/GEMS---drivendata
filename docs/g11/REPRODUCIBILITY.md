@@ -1,0 +1,25 @@
+# Reproducibility and leakage protocol
+
+- **Identity.**
+  - `config_hash` is a stable hash of the config, excluding `data_root` and `scratch_root`.
+  - `code_commit` comes from `git rev-parse HEAD`, or is null; it is never fabricated.
+  - `source_hashes` are the sha256 of the GeoDAWN raster, the fault raster and the template.
+  - These three values and a UTC timestamp are stamped into every manifest.
+- **Idempotence.** A stage record is valid only if its fingerprint (stage, config hash, source hashes, upstream fingerprints) matches and every output still has its recorded size and sha256. All writes are atomic (`.partial` followed by `os.replace`).
+- **Seeds.** Seeds come from `reproducibility.seed`. Sampling, splits, bootstraps and models are seeded, and `deterministic: true` sets cuDNN to deterministic.
+- **Splits.**
+  - Splits are geographic blocks (`block_km`) merged with every fault system they touch, so one system never spans two splits.
+  - The embargo is the maximum of: feature receptive field, DEM halo, patch context, link radius and autocorrelation range. It is fixed before any test result.
+  - Patches never span splits.
+  - The normaliser is fitted on train pixels only (`TrainOnlyNormalizer`).
+  - Calibration is fitted on the stack split only.
+  - Checkpoint, ranker-objective and budget selection use the validation split only.
+  - Test metrics require `selection.json` to exist first.
+- **Label semantics.**
+  - Unlabeled pixels are background, not confirmed negatives; pixel models weight them with `pu_unlabeled_weight`, and a non-negative PU loss is available.
+  - Label-derived layers (`Y_*`, distances) are registered `label_derived=True` and can never be predictors.
+  - Fault distance is used only for targets, sampling categories and evaluation.
+- **Metrics.**
+  - Pixel metrics use block-sampled pixels with block-bootstrap CIs.
+  - Every DTI computed here is `gems_bench.metric` and is labelled "offline DTI proxy".
+  - The official DTI comes only from an installed evaluator or the leaderboard.
