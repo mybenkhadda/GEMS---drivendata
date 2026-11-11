@@ -85,6 +85,21 @@ def train_pixel_model(train, val, params: dict, seed: int = 2026, rounds: int | 
         return PixelModel("lightgbm", bst, train.feature_names, hp, json.loads(json.dumps(rec, default=float)))
 
 
+def load_pixel_model(model_dir) -> PixelModel:
+    """Reload a saved pixel model (``model.json`` xgboost or ``model.txt`` lightgbm + ``feature_schema.json``)."""
+    d = Path(model_dir)
+    sch = json.loads((d / "feature_schema.json").read_text())
+    if sch.get("backend") == "xgboost":
+        import xgboost as xgb
+
+        bst = xgb.Booster()
+        bst.load_model(str(d / "model.json"))
+        return PixelModel("xgboost", bst, sch["features"], sch.get("params", {}))
+    import lightgbm as lgb
+
+    return PixelModel("lightgbm", lgb.Booster(model_file=str(d / "model.txt")), sch["features"], sch.get("params", {}))
+
+
 def predict_full_grid(model: PixelModel, store, valid: np.ndarray, chunk_rows: int = 256) -> np.ndarray:
     """Predict every valid pixel in row chunks (memory-bounded); NaN outside ``valid``."""
     H, W = valid.shape

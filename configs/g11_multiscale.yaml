@@ -47,7 +47,10 @@ dem:
   seam_tolerance_m: 0.5           # elevation step across a source boundary flagged as a seam
   aggregate_chunk_cells: 64       # 100 m cells per chunk side (6.4 km)
   context_scales_m: [25, 50, 100, 250, 500]
-  stats_resolution_m: 2.0         # DEM work resolution for 100 m aggregation (1 m is read, averaged to 2 m)
+  stats_resolution_m: 10.0        # DEM work resolution for the 100 m statistics (part of the DEM feature spec + layer id)
+  engine_chunk_cells: 128         # dem_engine spatial chunk side in 100 m cells (12.8 km); one committed file per chunk
+  engine_use_overviews: false     # false: tiles are decimated from full resolution (exact area average), read once
+  save_every_chunk: true          # commit each chunk to Drive as soon as it is validated (resume loses <= 1 chunk)
   max_window_mpix: 64.0           # refuse a single window above this many native pixels (memory guard)
   allow_unknown_vertical: false   # tiles without a documented vertical unit are excluded (true = assume metres, flagged)
 
@@ -62,7 +65,25 @@ labels:
   training_target: Y_BUFFER_200M  # pixel / patch training target (labels are an incomplete map: PU weighting)
   states: {OUTSIDE: 0, BACKGROUND: 1, NEAR: 2, FAULT: 3, EXCLUDED: 4}
 
+features:                          # recovery-first feature datasets (docs/g11/RECOVERY_FIRST.md)
+  policy: REUSE_VERIFIED          # REUSE_VERIFIED | RESUME_MISSING | FORCE_NEW_VERSION (never the default)
+  version: g11_features_v1        # 03_features/datasets/<version>/ (immutable once COMPLETE.json exists)
+  legacy_version: g11_features_legacy_r2m   # verified layers of the interrupted 2 m run, kept as their own version
+  recovery_verify: AUTO           # AUTO: full read only for layers without a completion manifest | FULL
+
+recovery:
+  legacy_dem_statistics_resolution_m: 2.0   # YAML + notebook default at the legacy commit 1618b0e (not stored in the files)
+  accept_unverified_legacy_config: false    # true = adopt legacy layers when the legacy config cannot be read from git
+
 spatial_splits:
+  version: v2                     # 05_splits/<version>/ ; v1 = legacy root-level split (marked INVALID)
+  v2:
+    n_regions: 24                 # compact regions (weighted k-means of block groups)
+    n_candidates: 2000            # seeded region -> split assignments scored after a coarse embargo
+    n_exact: 12                   # best candidates recomputed exactly; the first passing every gate is used
+    gates: {min_area_share_of_target: 0.5, min_fault_share_of_target: 0.4, min_positive_px: 200, min_blocks: 3,
+            min_block_fraction: 0.25, require_patch_windows: true, min_patch_windows: {train: 20, validation: 4},
+            require_dem_each_split: true, min_dem_fault_px: 1}
   block_km: 20.0
   fractions: {train: 0.55, validation: 0.15, stack: 0.15, test: 0.15}
   embargo_candidates_m: [1000, 2000, 3000]

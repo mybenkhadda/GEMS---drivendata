@@ -1,35 +1,49 @@
-"""Experiment matrix E0-E7 (Part 11). Each entry fixes the inputs, model, target and objective BEFORE any test result.
+"""Experiment matrix (fixed BEFORE any test result). Numbering follows the recovery-first brief:
 
-``feature_selector(store)`` returns the predictor names for an experiment (label-derived layers are never
-returned - ``FeatureStore.predictors`` excludes them).
+========  ===================================================  ============  ===========================
+id        inputs                                               model         kind
+========  ===================================================  ============  ===========================
+B0        raw 100 m GeoDAWN bands only (reference baseline)    xgboost       pixel (optional)
+E0        100 m geophysics: raw + multiscale + G06 indices     xgboost       pixel
+E1        E0 + validated DEM 100 m summaries + geo x DEM       xgboost       pixel (requires DEM)
+E2        top-k E0 channels                                    segformer     patch  (+ E2__<loss>, E2__finetune)
+E3        top-k E0 channels + DEM patches + modality masks     gated fusion  multires (+ E3__<mode>)
+E4        candidate segments: geophysics, DEM morphology,      lightgbm      segment ranker (INFER stage)
+          topology
+E5        pixel ensemble of the G11 maps (fit stack, select    fusion        fusion
+          validation)
+========  ===================================================  ============  ===========================
+
+``feature_selector(store, exp)`` returns predictor names; label-derived layers are never returned.
 """
 from __future__ import annotations
 
+GEO_FAMILIES = ["raw", "geo_magnetic", "geo_gravity", "geo_elevation", "geo_cross", "g06"]
+
 EXPERIMENTS = {
-    "E0": {"geophysics": "raw 100 m bands", "dem": "no", "model": "xgboost", "objective": "baseline",
+    "B0": {"geophysics": "raw 100 m bands", "dem": "no", "model": "xgboost", "objective": "reference baseline",
            "families": ["raw"], "kind": "pixel"},
-    "E1": {"geophysics": "G11 multiscale geophysics (+ G06 store when present)", "dem": "no", "model": "xgboost",
-           "objective": "physical indices", "families": ["raw", "geo_magnetic", "geo_gravity", "geo_elevation",
-                                                         "geo_cross", "g06"], "kind": "pixel"},
-    "E2": {"geophysics": "as E1", "dem": "100 m summaries of the 1 m DEM", "model": "xgboost",
-           "objective": "coarse DEM benefit", "families": ["raw", "geo_magnetic", "geo_gravity", "geo_elevation",
-                                                           "geo_cross", "g06", "dem_100m", "multimodal"],
-           "kind": "pixel", "requires_dem": True},
-    "E3": {"geophysics": "top-k E1 channels", "dem": "no", "model": "segformer", "objective": "deep baseline",
+    "E0": {"geophysics": "100 m geophysics + G06 indices", "dem": "no", "model": "xgboost",
+           "objective": "geophysical baseline", "families": GEO_FAMILIES, "kind": "pixel"},
+    "E1": {"geophysics": "as E0", "dem": "validated DEM 100 m summaries + geo x DEM", "model": "xgboost",
+           "objective": "DEM benefit", "families": GEO_FAMILIES + ["dem_100m", "multimodal"], "kind": "pixel",
+           "requires_dem": True},
+    "E2": {"geophysics": "top-k E0 channels", "dem": "no", "model": "segformer", "objective": "deep segmentation",
            "kind": "patch", "requires_torch": True},
-    "E4": {"geophysics": "top-k E1 channels", "dem": "native DEM patches", "model": "gated_fusion",
-           "objective": "native DEM benefit", "kind": "multires", "requires_torch": True, "requires_dem": True},
-    "E5": {"geophysics": "ensemble of E0-E4 OOF-valid maps", "dem": "no", "model": "fusion",
+    "E3": {"geophysics": "top-k E0 channels", "dem": "DEM patches + modality masks", "model": "gated_fusion",
+           "objective": "multiresolution fusion", "kind": "multires", "requires_torch": True, "requires_dem": True},
+    "E4": {"geophysics": "selected pixel map + geophysical support", "dem": "candidate DEM morphology",
+           "model": "lightgbm / xgboost ranker", "objective": "candidate ranking with topology", "kind": "segment"},
+    "E5": {"geophysics": "ensemble of the G11 pixel maps", "dem": "-", "model": "fusion",
            "objective": "model complementarity", "kind": "fusion"},
-    "E6": {"geophysics": "best pixel map", "dem": "segment cross-fault profiles", "model": "lightgbm ranker",
-           "objective": "candidate ranking", "kind": "segment"},
-    "E7": {"geophysics": "best pixel map", "dem": "segment DEM", "model": "topology + ranker",
-           "objective": "full system", "kind": "segment", "topology": True},
 }
+PIXEL_DEFAULT = ["E0", "E1"]
+DEEP_PATCH, DEEP_MULTIRES = "E2", "E3"
+CHANNEL_SOURCE = "E0"              # deep-model channels = top-k features of this experiment's importance
 
 
 def feature_selector(store, exp: str) -> list[str]:
-    fam = EXPERIMENTS[exp].get("families")
+    fam = EXPERIMENTS[exp.split("__")[0]].get("families")
     return store.predictors(fam) if fam else store.predictors()
 
 

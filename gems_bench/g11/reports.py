@@ -20,9 +20,9 @@ def _dir_size(p: Path) -> int:
 
 def stage_table(P) -> pd.DataFrame:
     rows = []
-    for f in sorted((P.ctx.root / "manifests").glob("*.json")):
+    for f in sorted((P.ctx.root / "manifests").rglob("*.json")):
         r = read_json(f) or {}
-        rows.append({"stage": r.get("stage", f.stem), "status": r.get("status"), "started": r.get("started_utc"),
+        rows.append({"stage": str(f.relative_to(P.ctx.root / "manifests").with_suffix("")).replace("\\", "/"), "status": r.get("status"), "started": r.get("started_utc"),
                      "completed": r.get("completed_utc"), "outputs": len(r.get("outputs", [])),
                      "error": r.get("error", "")})
     return pd.DataFrame(rows, columns=["stage", "status", "started", "completed", "outputs", "error"])
@@ -31,14 +31,14 @@ def stage_table(P) -> pd.DataFrame:
 def summaries(P, plan=None, runtime_info=None) -> dict:
     tr = pd.DataFrame(P.tracker.records)
     st = stage_table(P)
-    ev = P.ctx.d("evaluate")
+    ev = P.d("evaluate")
     lb = pd.read_csv(ev / "leaderboard.csv") if (ev / "leaderboard.csv").is_file() else pd.DataFrame()
     lbf = pd.read_csv(ev / "leaderboard_final.csv") if (ev / "leaderboard_final.csv").is_file() else pd.DataFrame()
     sel = read_json(ev / "selection.json") or {}
     cov = read_json(P.ctx.d("ingest") / "coverage_report.json") or {}
-    feats = read_json(P.ctx.root / "manifests" / "features.json") or {}
-    sub = read_json(P.ctx.d("submit") / "submission_record.json") or {}
-    inf = read_json(P.ctx.d("infer") / "inference_manifest.json") or {}
+    feats = read_json(P.ctx.root / "manifests" / f"features_{P.feature_version}.json") or {}
+    sub = read_json(P.d("submit") / "submission_record.json") or {}
+    inf = read_json(P.d("infer") / "inference_manifest.json") or {}
     gpu_s = float(tr[tr.peak_gpu_gb.notna()].seconds.sum()) if len(tr) and "peak_gpu_gb" in tr else 0.0
     exec_s = {
         "completed_stages": st[st.status == "COMPLETE"].stage.tolist(),
@@ -95,10 +95,11 @@ def _md_kv(d: dict) -> str:
 
 def build_final_report(P, plan=None, runtime_info=None) -> dict:
     s = summaries(P, plan, runtime_info)
-    d = P.ctx.d("reports")
+    d = P.d("reports")
     lb_path = atomic_write_text(d / "G11_EXPERIMENT_LEADERBOARD.csv", s["leaderboard"].to_csv(index=False))
     md = ["# G11 final execution report", "",
           f"Config hash `{P.ctx.cfg_hash}` · code commit `{P.ctx.commit}` · output `{P.ctx.root}`", "",
+          f"Feature dataset `{P.feature_version}` · split `{P.split_version}` · run namespace `{P.ns}`", "",
           "All DTI values are the repository OFFLINE DTI proxy (`gems_bench.metric`), not the official leaderboard DTI.",
           "", "## Execution summary", "", _md_kv(s["execution"]), "", "## Data summary", "", _md_kv(s["data"]), "",
           "## Model summary", "", _md_kv(s["models"]), "", "## Submission summary", "", _md_kv(s["submission"]), "",

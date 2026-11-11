@@ -263,73 +263,111 @@ def block_stats(z: np.ndarray, valid: np.ndarray, layers: dict, f: int, min_supp
     return out
 
 
-def aggregate_dem_to_master(reader: DEMReader, grid, covered: np.ndarray, cfg: dict, store=None, progress=print,
-                            chunk_cells: int | None = None) -> dict:
-    """Per-100 m-cell DEM statistics + context statistics at ``dem.context_scales_m``.
+def dem_stat_names(cfg: dict) -> list[str]:
+    """Names (without the ``dem100_`` prefix) of every DEM 100 m statistic the configuration produces."""
+    ctx_scales = [float(s) for s in cfg["dem"]["context_scales_m"]]
+    return list(BASE_STATS) + [f"{k}_ctx{int(s)}m" for s in ctx_scales for k in ("relief", "roughness", "tpi", "slope")]
 
-    Work resolution ``dem.stats_resolution_m`` (default 2 m: the 1 m tiles are read with average resampling);
-    windows nest exactly in master cells (f = 100 / res pixels per cell side). Chunks of ``chunk_cells`` cells with
-    a halo of the largest context scale; only chunks containing covered cells are read. Results are full-grid
-    float32 arrays (NaN outside DEM coverage); with ``store`` they are written to the feature store.
-    """
+
+def stats_factor(grid, res: float) -> int:
+    cell = grid.res[0]
+    f = int(round(cell / res))
+    if f < 1 or abs(f * res - cell) > 1e-6:
+        raise DEMWindowError(f"DEM statistics resolution {res} m does not divide the {cell} m master cell")
+    return f
+
+
+def halo_cells_for(cfg: dict, grid) -> int:
+    cell = grid.res[0]
+    return int(np.ceil(max([float(s) for s in cfg["dem"]["context_scales_m"]] + [cell]) * 2 / cell))
+
+
+def dem_chunk_stats(reader, grid, r0: int, r1: int, q0: int, q1: int, cfg: dict, res: float) -> dict | None:
+    """DEM statistics of the master cells [r0:r1, q0:q1] (dict name -> float32 (r1-r0, q1-q0)), or None when the
+    window holds no valid DEM pixel. The window carries a halo of the largest context scale, so the values of a chunk
+    do not depend on how the grid is cut into chunks."""
+    import warnings
+
     from .features.terrain import compute_terrain_features, curvatures, derivatives_m, slope_aspect
 
     from gems_bench.g06.feature_physics import masked_smooth
 
-    res = float(cfg["dem"]["stats_resolution_m"])
-    cell = grid.res[0]
-    f = int(round(cell / res))
-    if abs(f * res - cell) > 1e-6:
-        raise DEMWindowError(f"stats_resolution_m {res} does not divide the {cell} m master cell")
-    C = int(chunk_cells or cfg["dem"]["aggregate_chunk_cells"])
+    f = stats_factor(grid, res)
     ctx_scales = [float(s) for s in cfg["dem"]["context_scales_m"]]
-    halo_cells = int(np.ceil(max(ctx_scales + [cell]) * 2 / cell))
+    halo = halo_cells_for(cfg, grid)
     H, W = grid.shape
-    names = list(BASE_STATS) + [f"{k}_ctx{int(s)}m" for s in ctx_scales for k in ("relief", "roughness", "tpi", "slope")]
-    full = {n: np.full((H, W), np.nan, np.float32) for n in names}
     a, _, c0, _, e, f0 = grid.transform[:6]
+    hr0, hq0 = max(r0 - halo, 0), max(q0 - halo, 0)
+    hr1, hq1 = min(r1 + halo, H), min(q1 + halo, W)
+    bounds = (c0 + a * hq0, f0 + e * hr1, c0 + a * hq1, f0 + e * hr0)
+    win = reader.read_dem_window(bounds, grid.crs, resolution=res, resampling="average", snap=False)
+    try:
+        reader._last_tiles = list(win.source_tiles)          # provenance for the chunk sidecar
+    except AttributeError:
+        pass
+    z, v = win.elevation, win.valid
+    if not v.any():
+        return None
+    S, _ = masked_smooth(z, 0.5, 0.5)
+    d = derivatives_m(S, res)
+    slope, aspect = slope_aspect(d)
+    cv = curvatures(d)
+    S3, _ = masked_smooth(z, 2.5, 0.5)
+    layers = {"slope": np.where(v, slope, np.nan), "aspect_c": np.where(v, np.cos(np.radians(aspect)), np.nan),
+              "aspect_s": np.where(v, np.sin(np.radians(aspect)), np.nan),
+              "roughness": np.where(v, np.abs(z - S3), np.nan), "tri": np.where(v, np.abs(z - S), np.nan),
+              "tpi": np.where(v, z - S3, np.nan), "profile_curvature": np.where(v, cv["profile_curvature"], np.nan),
+              "plan_curvature": np.where(v, cv["plan_curvature"], np.nan), "seam": win.seam_mask}
+    nh, nw = (hr1 - hr0) * f, (hq1 - hq0) * f
+    z, v = z[:nh, :nw], v[:nh, :nw]
+    layers = {k: x[:nh, :nw] for k, x in layers.items()}
+    st = block_stats(z, v, layers, f)
+    ctx = compute_terrain_features(z, v, res, ctx_scales, cfg, families=("first_order",)).arrays
+    for s in ctx_scales:
+        k = f"{int(s)}m"
+        for nm, src in (("relief", f"relief_{k}"), ("roughness", f"roughness_{k}"), ("tpi", f"tpi_{k}"),
+                        ("slope", f"slope_{k}")):
+            if src in ctx:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    st[f"{nm}_ctx{int(s)}m"] = np.nanmean(_blocks(ctx[src], f), -1).astype(np.float32)
+    ir0, iq0 = r0 - hr0, q0 - hq0
+    out = {}
+    for n in dem_stat_names(cfg):
+        blk = np.full((r1 - r0, q1 - q0), np.nan, np.float32)
+        if n in st:
+            src = st[n][ir0:ir0 + (r1 - r0), iq0:iq0 + (q1 - q0)]
+            blk[: src.shape[0], : src.shape[1]] = src
+        out[n] = blk
+    return out
+
+
+def aggregate_dem_to_master(reader: DEMReader, grid, covered: np.ndarray, cfg: dict, store=None, progress=print,
+                            chunk_cells: int | None = None) -> dict:
+    """Per-100 m-cell DEM statistics + context statistics at ``dem.context_scales_m`` (in-memory, full grid).
+
+    Work resolution ``dem.stats_resolution_m``; windows nest exactly in master cells (f = 100 / res pixels per cell
+    side). Chunks of ``chunk_cells`` cells with a halo of the largest context scale; only chunks containing covered
+    cells are read. Results are full-grid float32 arrays (NaN outside DEM coverage); with ``store`` they are written
+    to the feature store. The resumable, chunk-persistent version is :mod:`gems_bench.g11.dem_engine`.
+    """
+    res = float(cfg["dem"]["stats_resolution_m"])
+    stats_factor(grid, res)
+    C = int(chunk_cells or cfg["dem"]["aggregate_chunk_cells"])
+    H, W = grid.shape
+    names = dem_stat_names(cfg)
+    full = {n: np.full((H, W), np.nan, np.float32) for n in names}
     n_done = 0
     for r0 in range(0, H, C):
         for q0 in range(0, W, C):
             r1, q1 = min(r0 + C, H), min(q0 + C, W)
             if not covered[r0:r1, q0:q1].any():
                 continue
-            hr0, hq0 = max(r0 - halo_cells, 0), max(q0 - halo_cells, 0)
-            hr1, hq1 = min(r1 + halo_cells, H), min(q1 + halo_cells, W)
-            bounds = (c0 + a * hq0, f0 + e * hr1, c0 + a * hq1, f0 + e * hr0)
-            win = reader.read_dem_window(bounds, grid.crs, resolution=res, resampling="average", snap=False)
-            z, v = win.elevation, win.valid
-            if not v.any():
+            st = dem_chunk_stats(reader, grid, r0, r1, q0, q1, cfg, res)
+            if st is None:
                 continue
-            S, _ = masked_smooth(z, 0.5, 0.5)
-            d = derivatives_m(S, res)
-            slope, aspect = slope_aspect(d)
-            cv = curvatures(d)
-            S3, _ = masked_smooth(z, 2.5, 0.5)
-            layers = {"slope": np.where(v, slope, np.nan), "aspect_c": np.where(v, np.cos(np.radians(aspect)), np.nan),
-                      "aspect_s": np.where(v, np.sin(np.radians(aspect)), np.nan),
-                      "roughness": np.where(v, np.abs(z - S3), np.nan), "tri": np.where(v, np.abs(z - S), np.nan),
-                      "tpi": np.where(v, z - S3, np.nan), "profile_curvature": np.where(v, cv["profile_curvature"], np.nan),
-                      "plan_curvature": np.where(v, cv["plan_curvature"], np.nan), "seam": win.seam_mask}
-            nh, nw = (hr1 - hr0) * f, (hq1 - hq0) * f
-            z, v = z[:nh, :nw], v[:nh, :nw]
-            layers = {k: x[:nh, :nw] for k, x in layers.items()}
-            st = block_stats(z, v, layers, f)
-            ctx = compute_terrain_features(z, v, res, ctx_scales, cfg, families=("first_order",)).arrays
-            for s in ctx_scales:
-                k = f"{int(s)}m"
-                for nm, src in (("relief", f"relief_{k}"), ("roughness", f"roughness_{k}"), ("tpi", f"tpi_{k}"),
-                                ("slope", f"slope_{k}")):
-                    if src in ctx:
-                        import warnings
-
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore", RuntimeWarning)
-                            st[f"{nm}_ctx{int(s)}m"] = np.nanmean(_blocks(ctx[src], f), -1).astype(np.float32)
-            ir0, iq0 = r0 - hr0, q0 - hq0
             for n in names:
-                if n in st:
-                    full[n][r0:r1, q0:q1] = st[n][ir0:ir0 + (r1 - r0), iq0:iq0 + (q1 - q0)]
+                full[n][r0:r1, q0:q1] = st[n]
             n_done += 1
             if progress and n_done % 10 == 0:
                 progress(f"[dem-aggregate] {n_done} chunks")

@@ -180,8 +180,25 @@ class StageStore:
     def fingerprint(self, stage: str, *inputs) -> str:
         return stable_hash([stage, self.ctx.cfg_hash, self.ctx.source_hashes, *inputs])
 
+    def _p(self, stage: str) -> Path:
+        """``manifests/<stage>.json``; a stage key may be namespaced (``<run namespace>/train_E0``)."""
+        p = self.dir / f"{stage}.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def outputs_ok(self, stage: str) -> tuple[bool, str]:
+        """COMPLETE record whose every output still has its recorded size and sha256 (fingerprint not compared)."""
+        r = read_json(self._p(stage))
+        if r is None or r.get("status") != "COMPLETE":
+            return False, "no COMPLETE record"
+        for o in r.get("outputs", []):
+            p = Path(o["path"])
+            if not p.is_file() or p.stat().st_size != o["size"] or self.ctx.hashes.sha(p) != o["sha256"]:
+                return False, f"{p.name} missing or changed"
+        return True, "outputs verified"
+
     def status(self, stage: str, fp: str) -> tuple[bool, str]:
-        r = read_json(self.dir / f"{stage}.json")
+        r = read_json(self._p(stage))
         if r is None:
             return False, "MISSING"
         if r.get("status") != "COMPLETE":
@@ -198,11 +215,11 @@ class StageStore:
         """Mark a stage RUNNING (start time kept until completion; a crash leaves an INCOMPLETE record)."""
         self._started = getattr(self, "_started", {})
         self._started[stage] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        self.ctx.write_manifest(self.dir / f"{stage}.json", {"stage": stage, "fingerprint": fp, "status": "RUNNING",
+        self.ctx.write_manifest(self._p(stage), {"stage": stage, "fingerprint": fp, "status": "RUNNING",
                                                              "started_utc": self._started[stage], "outputs": []})
 
     def fail(self, stage: str, fp: str, error: BaseException) -> None:
-        self.ctx.write_manifest(self.dir / f"{stage}.json", {
+        self.ctx.write_manifest(self._p(stage), {
             "stage": stage, "fingerprint": fp, "status": "FAILED", "outputs": [],
             "started_utc": getattr(self, "_started", {}).get(stage), "error": f"{type(error).__name__}: {error}"[:4000]})
 
@@ -213,8 +230,8 @@ class StageStore:
         rec = {"stage": stage, "fingerprint": fp, "status": status, "outputs": outs, "stats": stats or {},
                "validation": validation or {}, "started_utc": getattr(self, "_started", {}).get(stage),
                "completed_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-        self.ctx.write_manifest(self.dir / f"{stage}.json", rec)
+        self.ctx.write_manifest(self._p(stage), rec)
         return rec
 
     def load(self, stage: str) -> dict | None:
-        return read_json(self.dir / f"{stage}.json")
+        return read_json(self._p(stage))

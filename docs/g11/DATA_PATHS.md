@@ -16,4 +16,9 @@ These were read through a read-only Google Drive connector: file names and metad
 | G08 / G09.4 / G06 | `outputs/G08_DEM_1M_EDA/`, `outputs/G08_DEM_FAULT_RECOVERY/`, `outputs/G09_4_STREAMING_GEOLOGICAL_EDA/`, `outputs/G06_GEOLOGICAL_FAULTS/`, `outputs/g06_geological_feature_store/` | optional patterns | |
 | M9 / P6 / GeoRegime | `outputs/m9_geofault_production/`, `outputs/p6_boost/`, `outputs/p6_fast_track/`, `GEMS_GEOREGIME_V1/` | `optional_patterns.m9`, `p6`, `georegime` | |
 
-The audit (notebook §05) re-verifies all of these at runtime. Paths are never assumed from this table.
+The audit re-verifies all of these at runtime (notebook §03). Paths are never assumed from this table.
+
+## G11 outputs found on 2026-11-11 (metadata only)
+- `outputs/G11_MULTISCALE_FAULT_DISCOVERY/`: the first real run, at commit `1618b0e`, with a complete 651-layer feature store. Details in [RECOVERY_FIRST.md §1](RECOVERY_FIRST.md).
+- `outputs/G11_MULTISCALE_FAULT_DISCOVERY_SMOKE/`: from an earlier smoke run.
+- `G11_PERSISTENT_PROCESSED_DATA/snapshot_20261110_214635/`: a copy started outside the G11 code. It holds one 0-byte `.partial` file and is ignored.

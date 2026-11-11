@@ -10,6 +10,11 @@ import pytest
 X0, Y0, PX, H, W = 500000.0, 4000000.0, 100.0, 120, 100
 CRS = "EPSG:32611"
 FAULT = ((501000.0, 3998000.0), (509000.0, 3990000.0))      # NW-SE line, azimuth 135 deg
+# split v2 on tiny synthetic grids: fewer regions, no patch-window gate, relaxed counts
+SMALL_V2 = {"n_regions": 10, "n_candidates": 400, "gates": {"require_patch_windows": False, "min_blocks": 1,
+                                                             "min_positive_px": 10, "min_fault_share_of_target": 0.2,
+                                                             "min_area_share_of_target": 0.3,
+                                                             "require_dem_each_split": False}}   # DEM: one 3 km patch
 
 
 def _write(path, arr, transform, descriptions=None, nodata=None, crs=CRS):
@@ -83,8 +88,10 @@ def synth(tmp_path_factory):
                                  "geophysical_grid": {"expected_shape": [H, W], "expected_band_count": 3},
                                  "source_artifacts": {"optional_patterns": {"g07_arrays": ["outputs/**/*foldmasked*.npy"]}},
                                  "dem": {"native_res_range_m": [0.25, 3.0], "aggregate_chunk_cells": 30,
-                                         "context_scales_m": [25, 100], "max_window_mpix": 64.0},
-                                 "spatial_splits": {"block_km": 2.0, "autocorrelation_range_m": 300.0, "embargo_m": 300.0},
+                                         "context_scales_m": [25, 100], "max_window_mpix": 64.0,
+                                         "stats_resolution_m": 2.0, "engine_chunk_cells": 20},
+                                 "spatial_splits": {"block_km": 2.0, "autocorrelation_range_m": 300.0, "embargo_m": 300.0,
+                                                    "v2": SMALL_V2},
                                  "feature_engineering": {"geophysics": {"scales_m": [200, 400, 800]}}})
     return {"root": root, "raw": raw, "dem_dir": dem, "tiles": tiles, "cfg": cfg, "signed_d": d}
 

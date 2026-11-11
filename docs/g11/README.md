@@ -1,30 +1,32 @@
-# G11 — Multiresolution geological fault discovery
+# G11 — Multiresolution geological fault discovery (recovery-first)
 
-**Run it:** `notebooks/colab/GEMS_G11_MASTER_COLAB_EXECUTION.ipynb` (see [COLAB_MASTER.md](COLAB_MASTER.md))
-· **Package:** `gems_bench/g11/` · **Config:** `configs/g11_multiscale.yaml`
-· **Tests:** `gems_bench/g11/tests/` (102: 97 synthetic tests pass; 5 real-data tests run only with `G11_REAL_DATA_ROOT`)
+**Run it:** `notebooks/colab/GEMS_G11_MASTER_COLAB_EXECUTION.ipynb`. See [RECOVERY_FIRST.md](RECOVERY_FIRST.md) and [COLAB_MASTER.md](COLAB_MASTER.md).
 
-G11 combines the 100 m GeoDAWN geophysics, native-resolution (about 1 m) USGS DEM windows, mapped faults and ML models:
-- XGBoost;
-- SegFormer;
-- gated geophysics × DEM fusion;
-- pixel fusion;
-- a segment ranker.
+- **Package:** `gems_bench/g11/`.
+- **Config:** `configs/g11_multiscale.yaml`.
+- **Tests:** `gems_bench/g11/tests/`. The synthetic tests run anywhere; the real-data tests run only when `G11_REAL_DATA_ROOT` is set.
 
-It generates fault-candidate segments, links, deduplicates and ranks them, and selects a subset under a length budget. The output is a submission in the official raster schema.
+Expensive geophysical and DEM features are processed once and verified. They are saved on Drive as an immutable, versioned dataset and reused by every split, loss, model and hyperparameter experiment. The models are:
 
-**Status (2026-11-10).** The code is written and tested on synthetic fixtures. No real-data stage has run yet, so no metric, DTI or submission exists. The DTI ≥ 0.40 target is a goal, not a measurement.
+- E0: XGBoost on geophysics;
+- E1: E0 plus the DEM 100 m summaries;
+- E2: SegFormer;
+- E3: gated multiresolution fusion;
+- E4: segment ranker;
+- E5: pixel ensemble.
+
+The output is the official single-band GeoTIFF on the template grid. It is never uploaded.
+
+**Status (2026-11-11).** Code written and tested on synthetic fixtures. No real-data stage of the recovery-first pipeline has run yet. The interrupted 2026-11-10 run's artifacts were inspected through their Drive metadata only; [RECOVERY_FIRST.md §1](RECOVERY_FIRST.md) has the findings. No metric, DTI or submission exists.
 
 | doc | content |
 |---|---|
+| [RECOVERY_FIRST.md](RECOVERY_FIRST.md) | What the interrupted run left on Drive, the feature identity rules, policies, persistence protocol, DEM engine, datasets, split v2 and the exact Colab instructions |
 | [COLAB_MASTER.md](COLAB_MASTER.md) | Launch, editable values, resource estimates, longest stages, limitations |
-| [EXECUTION_ORDER.md](EXECUTION_ORDER.md) | Notebook sections, stage calls, gates, failure policy |
-| [DATA_PATHS.md](DATA_PATHS.md) | Real Drive layout (verified from metadata) and the config keys |
+| [EXECUTION_ORDER.md](EXECUTION_ORDER.md) | Sections 00–20, calls, gates, run modes |
 | [ARTIFACT_REGISTRY.md](ARTIFACT_REGISTRY.md) | Every output path |
-| [AUDIT_STATIC.md](AUDIT_STATIC.md) | Repository audit; where the brief and the repository disagree |
-| [API.md](API.md) | Public functions |
-| [REPRODUCIBILITY.md](REPRODUCIBILITY.md) | Hashes, seeds, manifests, leakage protocol |
+| [DATA_PATHS.md](DATA_PATHS.md) | Real Drive layout (verified from metadata) |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Failure messages and fixes |
-| [INSTALLATION.md](INSTALLATION.md) | Colab and local setup |
 | [TEST_RECORD.md](TEST_RECORD.md) | What was executed and the results |
 | [SESSION_HANDOFF.md](SESSION_HANDOFF.md) | State, decisions, next steps |
+| [AUDIT_STATIC.md](AUDIT_STATIC.md), [API.md](API.md), [REPRODUCIBILITY.md](REPRODUCIBILITY.md), [INSTALLATION.md](INSTALLATION.md) | Background docs from the first G11 session |

@@ -1,45 +1,56 @@
 # G11 session handoff
 
-## 2026-11-10 (b): Colab + Drive master execution system
-- **Added:**
-  - the master notebook `notebooks/colab/GEMS_G11_MASTER_COLAB_EXECUTION.ipynb` (sections 00–20);
-  - modules `colab_runtime.py`, `notebook_config.py` (CONFIG adapter, plan, `StepRunner`), `dem_units.py`, `external_predictions.py`, `smoke.py`, `fusion.py`, `reports.py`, `eda/model_evidence.py`;
-  - tests `test_colab_infra.py` and `test_real_data.py`.
-- **Changed:**
-  - output layout `00_runtime … 11_reports`;
-  - stage records now carry start/completion time, FAILED status and validation results;
-  - FeatureStore uses family sub-folders plus `localize()`;
-  - DEM catalog spans several folders, de-duplicates tiles and audits units;
-  - smoke grid cropping and grid-aware reads;
-  - ingestion and EDA deliverables from the brief;
-  - training ablations, per-family model folders, `07_predictions/`;
-  - fusion stage E5;
-  - leaderboard with the required columns;
-  - submission names and the `official_DTI` status;
-  - local DEM mosaic for E4.
-- **Real Drive layout read:** via a read-only Drive connector, metadata only. See [DATA_PATHS.md](DATA_PATHS.md). The G07 arrays' grid comes from their `manifest.json`.
-- **Executed:** the local synthetic suite only (102 tests, 97 passed, 5 real-data tests skipped).
-- **Not executed:** the real-data smoke test, which needs the Drive mount in Colab. No real result exists.
-- **Not committed, not pushed.** The notebook defaults to `ref=g11-colab-production`, which does not exist on GitHub yet; section 02 stops with the deployment commands until it is pushed.
+## 2026-11-11: Recovery-first pipeline ("process once, save, then train")
+
+**Drive findings (metadata only, read-only connector)**
+- The interrupted run's feature stage is **COMPLETE** (651 layers).
+- Its split is invalid (test 0 px).
+- E0 trained on that invalid split; E1 was RUNNING when the session died.
+- Details in [RECOVERY_FIRST.md §1](RECOVERY_FIRST.md).
+- Root cause of the split failure: fault-system merging after a 3.2 km dilation.
+
+**Added**
+- `recovery.py`: `recover_feature_stage`.
+- `feature_versions.py`: specs, layer ids, expected-layer plan, `LayerManifest`.
+- `persist.py`: verified commit protocol.
+- `dem_engine.py`: tile cache, chunks, `process_missing_feature_chunks`, `validate_feature_chunk`, `commit_feature_chunk`, `resume_feature_processing`, assembly.
+- `feature_dataset.py`: `finalize_feature_dataset`, `load_feature_dataset`, `validate_feature_dataset`, `PoolView`.
+- `splits_v2.py`: region-based generator plus hard gates.
+- `training_data.py`: `build_training_dataset`.
+- `tests/test_recovery.py`.
+- `docs/g11/RECOVERY_FIRST.md`.
+
+**Changed**
+- `pipeline.py` rewritten around `feature_policy`, with:
+  - section-scoped fingerprints, so loss, split and hyperparameter changes no longer invalidate features;
+  - the run namespace `<feature_version>__split_<split_version>` for every downstream artifact;
+  - `predict_all` regeneration;
+  - checkpoint archiving.
+- Experiment ids renumbered to the brief: E0 geophysics XGB, E1 + DEM, E2 SegFormer, E3 gated, E4 ranker, E5 ensemble, B0 raw baseline.
+- `dem_reader.dem_chunk_stats` split out of the aggregation.
+- `notebook_config`: new modes and keys; DEM statistics default 10 m.
+- Master notebook regenerated (§00–§20); phase notebooks regenerated.
+- YAML gained `features`, `recovery`, `spatial_splits.version/v2` and the DEM engine keys.
+
+**Not executed:** anything on the real data. No real recovery, DEM chunk, split, model or submission exists from this code.
 
 ## Next step
-1. Push the branch, using the commands printed by notebook §02.
-2. Run the master notebook with `run_mode="SMOKE_TEST"` on a GPU runtime.
-3. Read `01_audit/audit_report.md`: DEM unit classes, G07 compatibility, smoke window.
-4. Read `02_ingestion/coverage_report.json`: fault coverage lost to unit exclusions.
-5. Only then run `FULL`.
+1. Commit and push to `g11-colab-production` (needs the user's authorization).
+2. Run the master notebook with the defaults.
+3. In §04, check the class counts and the INCOMPATIBLE reasons. The legacy config check against commit `1618b0e` must say MATCH.
+4. §05 computes the 59 DEM-class layers at 10 m. It can be split over sessions with `feature_time_budget_min`.
+5. §09: if the split gates fail, read `split_gates_FAILED.parquet`.
 
 ## Decisions (check them)
-- DEM tiles of unknown or conflicting vertical unit are excluded. USGS 3DEP NAVD88 tiles should classify as VERIFIED_METRES through the compound CRS; this is unverified on the real tiles.
-- G07, M9 and P6 maps are EDA-only, never fusion members or targets, because their splits differ from the G11 split.
-- Model fusion (E5) uses only G11 maps: fitted on stack, selected on validation.
-- E4 uses a local 25 m mosaic.
-- The SegFormer loss ablation and gated-fusion mode ablation are on by default (3 extra variants each). Set `training.loss_ablation: []` and `models.gated_fusion.mode_ablation: []` to save time.
-- In SMOKE_TEST, `candidates` and `submit` are not in the plan; the full chain runs in FULL.
-
-## Open risks
-- Drive throughput for the roughly 21 GB of DEM.
-- Feature store size, about 12–17 GB (estimate).
-- G07 grid nesting: if the 243350 / 4508550 origin does not nest in the master grid, the arrays are excluded, with the reason in the compatibility CSV.
-- PU labels: unlabeled pixels are background, not negatives.
-- No official evaluator.
+- **The legacy 2 m DEM resolution is an assumption.** It comes from the YAML and notebook default at `1618b0e`, because the files themselves don't record it.
+- **Legacy layers are adopted only when** all of these hold:
+  - the stage manifest is COMPLETE;
+  - the sources are unchanged;
+  - the registry hash matches;
+  - the finite fraction equals the recorded value;
+  - the write time precedes completion;
+  - the layer name is in the current plan;
+  - the feature config sections are equal at the legacy commit.
+- **Default = 10 m new version.** The 2 m layers become `g11_features_legacy_r2m` (usable at once by setting DEM 2.0 and that version name).
+- **Regional fault systems longer than one block may span splits.** The embargo separates the parts. Small systems never span splits.
+- **The ingest stage no longer writes targets.** Labels are versioned layers.

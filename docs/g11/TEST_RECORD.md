@@ -1,5 +1,38 @@
 # Test record
 
+## 2026-11-11: recovery-first pipeline (local, synthetic fixtures)
+**Environment:** scratchpad venv, Python 3.14, torch CPU.
+
+**Last complete full-suite run** (before the final fix): every test passed except one.
+- The failure was `test_checkpoint_restoration_regenerates_missing_prediction`. A regenerated probability map left a stale sha256 in its training stage record, so the model was retrained instead of reused.
+- The bug was fixed in `pipeline.predict_all`: the stage record is now refreshed after regeneration.
+- The targeted re-run of that test after the fix did not print its pass/fail line.
+- **The final full-suite re-run was stopped at the user's request ("skip tests").** The suite is therefore not confirmed green on the final code.
+- `ruff --select F,E9`: clean on the last checked revision.
+
+**Covered by the new `test_recovery.py`:**
+- fresh versioned dataset finalization;
+- changes to split, loss and hyperparameters do NOT invalidate features (files untouched);
+- the same version with another spec is refused;
+- a resolution change creates a new version that computes only the DEM-class layers, with the 2 m layers kept separate;
+- a truncated layer or `.partial` file is INCOMPLETE, and only that layer is recomputed;
+- legacy layers without a completion manifest are reconstructed (RECOVERABLE), with 0 recomputed;
+- duplicates and orphans are classified;
+- changed content, and an unverifiable legacy config, are rejected;
+- DEM engine: an interrupted chunk run resumes; assembly matches the direct aggregation; a corrupted chunk is detected; invalid chunks are rejected;
+- split v2 partitions are all non-empty, and an empty test partition is gated;
+- a split change reuses the features and namespaces the models;
+- checkpoint restoration: a lost map is regenerated, and a config change archives the old checkpoints;
+- a submission on the wrong grid is refused;
+- the notebook adapter's modes and keys.
+
+**Full-scale split simulation** (synthetic faults on the real 3730 × 3292 grid, 20 km blocks, 6.4 km embargo; script `split_scale_sim.py` in the scratchpad):
+- v1 reproduced the real failure: train 7,482,723, validation 30,017, stack 22,159, test 35,730 px.
+- v2 passed every gate in 17 s: train 2.69 M, validation 1.22 M, stack 1.02 M, test 1.23 M px, each with ≥ 1,723 fault px.
+- The embargo took about 28 % of the area.
+
+**Not executed:** anything on the real data.
+
 ## 2026-11-10 (b): Colab master execution system (local, synthetic fixtures)
 **Environment:** scratchpad venv, Python 3.14.0, numpy 2.5.4, rasterio 1.5.2, geopandas 1.2.0, xgboost 3.4.1, lightgbm 4.7.0, torch 2.15.0+cpu.
 
