@@ -81,7 +81,8 @@ def soft_skeleton(x, iters: int):
 
 def soft_cldice(prob, target, weight, iters: int):
     """1 - clDice. Returns (loss, valid flag); invalid (0, False) when the batch has no positive in the mask."""
-    p, t, w = _f(prob) * _f(weight), _f(target) * _f(weight)
+    p = _f(prob) * _f(weight)
+    t = _f(target) * _f(weight)
     if t.sum() < 1:
         return p.new_zeros(()), False
     sp, st = soft_skeleton(p, iters), soft_skeleton(t, iters)
