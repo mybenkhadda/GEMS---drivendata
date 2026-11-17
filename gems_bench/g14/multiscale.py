@@ -254,7 +254,7 @@ class MultiScaleDataset:
             w = int(rng.integers(8, self.L // 2))
             y0 = int(rng.integers(-self.L // 2, self.L // 2 - h))
             x0 = int(rng.integers(-self.L // 2, self.L // 2 - w))
-            for name, (f, _, _, S) in zip(LEVEL_NAMES, self.views):
+            for name, (f, S) in zip(LEVEL_NAMES, self.views):
                 cy = cx = S // 2
                 ys, xs = cy + y0 // f, cx + x0 // f
                 ye, xe = cy + (y0 + h) // f + 1, cx + (x0 + w) // f + 1
