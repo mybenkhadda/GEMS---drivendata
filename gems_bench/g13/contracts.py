@@ -264,13 +264,26 @@ def check_grid(*srcs) -> None:
 
 
 # =============================================================================== discovery
+def canonical_band_name(description: str | None, index: int) -> str:
+    """Map descriptive GDAL band text to the stable GeoDAWN numerical-feature key.
+
+    The official TIF may use 'rtp - reduced to pole magnetic data...'
+    rather than 'rtp'. Original source metadata remains untouched.
+    """
+    raw = str(description or "").strip().lower()
+    if not raw:
+        return f"band_{index}"
+    head = raw.split(" - ", 1)[0].strip()
+    return head if head in MODALITY else raw
+
+
 def _probe(path: Path) -> dict:
     import rasterio
 
     with rasterio.open(path) as src:
-        desc = [str(d or "").strip().lower() for d in src.descriptions]
+        desc = [canonical_band_name(d, i + 1) for i, d in enumerate(src.descriptions)]
         win = rasterio.windows.Window(0, 0, min(src.width, 512), min(src.height, 512))
-        sample = src.read(1, window=win, masked=True).filled(np.nan).astype(np.float64)
+        sample = src.read(1, window=win, masked=True).astype(np.float64).filled(np.nan)
         return {
             "path": str(path),
             "count": src.count,
@@ -374,9 +387,11 @@ def load(paths: dict, work: Path, *, force: bool = False) -> GeoData:
     work.mkdir(parents=True, exist_ok=True)
     with rasterio.open(paths["raw"]) as r, rasterio.open(paths["known"]) as k, rasterio.open(paths["template"]) as t:
         check_grid(r, k, t)
-        names = [str(d or f"band_{i + 1}").strip().lower() for i, d in enumerate(r.descriptions)]
+        names = [canonical_band_name(d, i + 1) for i, d in enumerate(r.descriptions)]
+        if len(set(names)) != len(names):
+            raise ValueError(f"duplicate canonical band descriptions: {names}")
         shape, transform, crs, profile = (r.height, r.width), r.transform, r.crs, t.profile.copy()
-        tv = np.isfinite(t.read(1, masked=True).filled(np.nan).astype(np.float32))
+        tv = np.isfinite(t.read(1, masked=True).astype(np.float32).filled(np.nan))
         kn = k.read(1, masked=True).filled(0)
         cache = work / "raw_stack_f32.npy"
         stamp = work / "raw_stack_f32.json"
@@ -386,7 +401,7 @@ def load(paths: dict, work: Path, *, force: bool = False) -> GeoData:
             tmp = work / "raw_stack_f32.partial.npy"
             mm = np.lib.format.open_memmap(tmp, mode="w+", dtype=np.float32, shape=(r.count, *shape))
             for i in range(r.count):
-                a = r.read(i + 1, masked=True).filled(np.nan).astype(np.float32)
+                a = r.read(i + 1, masked=True).astype(np.float32).filled(np.nan)
                 a[~np.isfinite(a) | (np.abs(a) > 1e20)] = np.nan
                 mm[i] = a
             mm.flush()
