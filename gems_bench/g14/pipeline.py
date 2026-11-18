@@ -243,9 +243,23 @@ class G14Pipeline:
         from .train import load_unit_model
 
         u = self.system.final_unit()
+        manifest = self.exp_dir / "manifests" / f"{u.key}_train.json"
+        checkpoint = self.exp_dir / "checkpoints" / f"{u.key}_best.pt"
+        if not manifest.is_file() or not checkpoint.is_file():
+            missing = [str(p) for p in (manifest, checkpoint) if not p.is_file()]
+            raise FileNotFoundError(
+                "G14 full-region inference requires a separately trained final model "
+                f"({u.key}); missing: {missing}. "
+                "After selecting the best configuration from held-out evaluation, "
+                "run pipe.train(unit_keys=('__none__',), include_final=True) "
+                "in TRAIN mode with train_enabled=True, then recreate the pipeline "
+                "in EVALUATE or SUBMIT mode and call predict_final(). "
+                "Existing geographical checkpoints do not substitute for the final model."
+            )
         model, inputs, _ = load_unit_model(self.cfg, self.stack, self.data, u, self.exp_dir)
         r = predict_full(model, inputs, self.cfg, self.data.valid, mc_samples=self.cfg.eval.mc_samples
                          if self.cfg.model.uncertainty == "mc_dropout" else 0, log=self.log)
+        (self.exp_dir / "maps").mkdir(parents=True, exist_ok=True)
         np.save(self.exp_dir / "maps" / "full.npy", r["prob"])
         if "mc_std" in r:
             np.save(self.exp_dir / "maps" / "full_mc_std.npy", r["mc_std"])
