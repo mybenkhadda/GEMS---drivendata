@@ -1,0 +1,37 @@
+# G14.1 notebook CONFIG (documentation copy; the notebook cell 01 is the source of truth). UNTESTED.
+repo: mybenkhadda/GEMS---drivendata
+ref: g14-1-critical-recovery
+drive_root: /content/drive/MyDrive/GEMS_2
+local_root: /content/gems_work
+source_experiment: T1_local_cnn__da3f44d05d84
+profile: FAST            # FAST | STANDARD | FULL
+mode: AUDIT_ONLY         # AUDIT_ONLY | DIAGNOSE | COUNTERFACTUAL | TRAIN | SUBMIT  (alias: run_mode)
+reuse_artifacts: true
+resume: true
+force_rebuild: false
+stages:
+  artifact_inventory: true
+  geometry_audit: true
+  prediction_diagnostics: true
+  representation_sweep: true
+  champion_comparison: true
+  failure_atlas: true
+  checkpoint_counterfactuals: false   # needs mode COUNTERFACTUAL (or TRAIN / SUBMIT)
+  train_models: false                 # needs mode TRAIN
+  transformers: false                 # needs mode TRAIN
+  submission: false                   # needs mode SUBMIT
+validation:
+  primary_task: disc_official
+  secondary_task: geo
+  protocol: geo_and_disc              # geo_only | disc_only | geo_and_disc
+  backend: g13                        # g13 (locked TEST) | phase5
+  locked_test: true
+resources: {device: auto, num_workers: 2, mixed_precision: true, cache_enabled: true, max_minutes_per_unit: 60}
+sweep:
+  area_fracs: [0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.0075, 0.01, 0.015, 0.02, 0.03, 0.04, 0.05, 0.06,
+               0.08, 0.10, 0.12, 0.15, 0.20, 0.30]
+  g14_weights: [0.0, 0.01, 0.025, 0.05, 0.075, 0.10, 0.15, 0.20, 0.30, 0.50]
+training:
+  experiments: [M1_geophysics_only, M2_conditional_discovery]   # [] = every spec of each training stage
+  selection_metric: inner_full_region_dti
+seed: 2026
